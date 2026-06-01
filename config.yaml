@@ -1,0 +1,4 @@
+# Citation Repair Engine — configuration
+model: claude-sonnet-4-6  # pinned snapshot, do not change without updating PREREGISTRATION.md
+ncbi_api_key: ""  # populate from .env, never commit the key directly
+anthropic_api_key: ""  # populate from .env, never commit the key directly
