@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software or dataset, please cite it as below."
+type: software
+title: "Citation Repair Engine"
+abstract: "Fine-grained biomedical citation diagnosis and evidence-backed repair using an 8-category failure-mode taxonomy (F1–F8) and PubMed/Crossref retrieval."
+authors:
+  - family-names: "Liu"
+    given-names: "Aston"
+repository-code: "https://github.com/astonliu/citation-repair-engine"
+license: MIT
+date-released: 2026-06-02
+keywords:
+  - biomedical NLP
+  - citation integrity
+  - citation repair
+  - information retrieval
+  - scientific literature
