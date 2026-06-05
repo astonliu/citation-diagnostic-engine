@@ -133,3 +133,19 @@ CitationRepair-1000 is scoped to citations that are either (a) PMID-indexed in P
 - IAA pilot (100 examples) stratified across F3–F7 only (~20 examples/category).
 
 **No annotation had occurred at time of this amendment.**
+
+---
+
+## Amendment Log
+
+**Amendment 2 — June 5, 2026 (pre-annotation)**
+
+**Change 1: Sarol reproduction demoted from hard gate to recommended validation.**
+
+**Rationale:** Exact reproduction of Sarol's published numbers (0.59 micro-F1 / 0.52 macro-F1) on their original corpus is not a prerequisite for valid downstream comparisons. ACL/EMNLP papers routinely compare against prior methods using released code or reported numbers without first reproducing original scores. Domain shift further weakens the argument — Sarol's performance on their corpus is largely orthogonal to their performance on CitationRepair-1000, which is what the comparison actually requires. The operative standard is: reproduction is recommended validation, not a research prerequisite. Decision is economic: if reproduction takes 2–4 hours using the released code at github.com/ScienceNLP-Lab/Citation-Integrity, do it as a sanity check and report the number. If dependency issues make it substantially more costly, document the implementation source and proceed. A result within ~3 points of published numbers is sufficient to establish implementation fidelity.
+
+**Change 2: §7 pre-pilot corrected per Amendment 1.**
+
+The §7 pre-pilot text still reflects the pre-Amendment-1 state (40 examples, 5/category, three at-risk pairs). The correct state per Amendment 1 is: ~20 examples targeting two pairs only (F3/F6 and F4/F6). F5/F8 is not a judgment-level confusable pair. IAA judgment categories are F3–F7 only (5 categories); F8 is excluded from κ computation.
+
+**No annotation had occurred at time of this amendment.**
