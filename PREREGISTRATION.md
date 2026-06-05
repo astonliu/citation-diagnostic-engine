@@ -115,3 +115,21 @@ CitationRepair-1000 is scoped to citations that are either (a) PMID-indexed in P
 - Taxonomy pre-pilot κ < 0.60 on a pair after decision rules → merge that pair, report the pilot evidence.
 - Zero-shot Claude beats Sarol by >10 F1 on the controlled comparison → that becomes a headline result alongside the taxonomy.
 - Generation top-3 fails to beat the in-domain recommender baseline by ≥10 pts → Generation stays exploratory / demoted, not escalated.
+
+---
+
+## Amendment Log
+
+**Amendment 1 — June 4, 2026 (pre-annotation)**
+
+**Change:** Removed F5/F8 from the pre-pilot confusable pairs list.
+
+**Rationale:** F8 (retracted paper) is resolved deterministically via PubMed retraction flag / Retraction Watch lookup and never reaches the human annotator. It is categorically not confusable with F5 (stale citation), which requires a substantive judgment call. Including F5/F8 as a confusable pair in the pre-pilot was an error — there is no annotator-level ambiguity to test. F8 belongs with F1 and F2 as a deterministic pre-classifier category (already stated in §8), not as a judgment category.
+
+**Specific changes to §7:**
+- Pre-pilot now targets **two pairs only**: F3/F6 and F4/F6.
+- Pre-pilot size revised from 40 examples (5/category × 8) to ~20 examples (10 per pair), targeting boundary cases for the two judgment pairs only.
+- IAA judgment categories clarified as F3–F7 (5 categories). F8 is excluded from IAA computation as it is deterministic; computing IAA over deterministic categories would artificially inflate κ.
+- IAA pilot (100 examples) stratified across F3–F7 only (~20 examples/category).
+
+**No annotation had occurred at time of this amendment.**
