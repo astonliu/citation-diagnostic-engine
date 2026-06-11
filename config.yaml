@@ -1,4 +1,24 @@
 # Citation Repair Engine — configuration
-model: claude-sonnet-4-6  # pinned snapshot, do not change without updating PREREGISTRATION.md
-ncbi_api_key: ""  # populate from .env, never commit the key directly
-anthropic_api_key: ""  # populate from .env, never commit the key directly
+# Model strings are pinned snapshots. Do not change a pin without updating PREREGISTRATION.md
+# and the Amendment log (Opus + GPT-5 co-equal verifiers; Med-V1 added per Amendment 2).
+#
+# NOTE: fill the *_pin fields with the exact version strings + snapshot dates you actually
+# pin in the methods section. Placeholders below are family identifiers, not final pins.
+
+# Three co-reported verifiers. Cross-family agreement is a standalone reported metric.
+# Disagreements are adjudicated by the human gold subset, never by any model.
+verifiers:
+  - name: claude-opus      # frontier, family 1
+    pin: ""                # e.g. claude-opus-4-8-YYYYMMDD
+  - name: gpt-5            # frontier, family 2
+    pin: ""                # e.g. gpt-5-YYYY-MM-DD
+  - name: med-v1           # 3B biomedical specialist (arXiv 2603.05308)
+    pin: ""
+
+# Stage 4 diagnosis mapper is rule-based (not an LLM) — see TAXONOMY_DECISION_RULES.md.
+# If repair-candidate *drafting* uses an LLM, name and pin it here; otherwise leave unset.
+repair_drafting_model: ""
+
+ncbi_api_key: ""        # populate from .env, never commit the key directly
+anthropic_api_key: ""   # populate from .env, never commit the key directly
+openai_api_key: ""      # populate from .env, never commit the key directly (GPT-5 verifier)

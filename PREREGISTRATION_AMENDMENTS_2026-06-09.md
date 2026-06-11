@@ -111,7 +111,7 @@
 ## Unchanged (explicitly retained from v2.2)
 - Primary claim and its paired-comparison test (§1, §4 power).
 - κ targets: ≥ 0.60 registered, 0.70 "good" (§7) — **not** raised; raising a registered threshold post-hoc is avoided.
-- Pre-pilot gate: 40 examples, three at-risk pairs, κ ≥ 0.60 to proceed (§7, TAXONOMY_DECISION_RULES.md).
+- Pre-pilot gate: ~20 examples, two at-risk pairs (F3/F6 and F4/F6), κ ≥ 0.60 to proceed (§7 as revised by Amendments 1–2; TAXONOMY_DECISION_RULES.md). F5/F8 is not a judgment-level pair; F8 is deterministic and excluded from κ. IAA judgment categories are F3–F7.
 - Held-out natural stratum; deterministic F1/F2/F8 pre-classifier (§8).
 - 70/30 stratified split; n = 1000 power justification (§4).
 - Two distinct Sarol comparisons, never conflated (§3).

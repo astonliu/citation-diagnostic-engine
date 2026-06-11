@@ -26,5 +26,5 @@
 ## Unchanged (guard against drift)
 - Primary claim + paired-comparison test + n=1000 power.
 - κ ≥ 0.60 registered (0.70 "good") — not raised.
-- Pre-pilot gate: 40 examples, three at-risk pairs, κ ≥ 0.60.
+- Pre-pilot gate: ~20 examples, two at-risk pairs (F3/F6 and F4/F6), κ ≥ 0.60. (F5/F8 removed per Amendment 1; F8 deterministic, excluded from κ; IAA over F3–F7.)
 - 70/30 stratified split; deterministic F1/F2/F8 pre-classifier; two distinct Sarol comparisons.
