@@ -86,16 +86,20 @@ def process_reference(ref: Reference, complete, *, ncbi_key="",
                       crossref_mailto="", openalex_mailto="",
                       sim_threshold=85.0, match_threshold=85.0,
                       author_tripwire=True, session=None) -> Reference:
-    # cheap path
+    # cheap path. With a claimed PMID: EFetch + metadata compare. Without one:
+    # compare_and_flag runs the structured no-ID bibliographic lookup itself.
     if ref.claimed.claimed_pmid:
         ref.retrieved = fetch_pubmed(ref.claimed.claimed_pmid, ncbi_key,
                                      session=session)
-    flagged = compare_and_flag(ref, sim_threshold, author_tripwire=author_tripwire)
+    flagged = compare_and_flag(ref, sim_threshold,
+                               author_tripwire=author_tripwire, session=session)
 
-    if not ref.claimed.claimed_pmid or not flagged:
+    # Not flagged -> cleared / unverifiable (both the PMID and no-ID paths).
+    if not flagged:
         return decide(ref, flagged, None, None, match_threshold)
 
-    # expensive path (flagged survivors only)
+    # expensive path (flagged survivors only -- PMID candidates and no-ID
+    # references whose cheap lookup found a poor match or nothing)
     verdict = llm_filter(ref, complete)
     if verdict in (V_FORMATTING, V_UNCERTAIN):
         return decide(ref, flagged, verdict, None, match_threshold)

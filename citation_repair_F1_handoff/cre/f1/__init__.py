@@ -20,7 +20,14 @@ from .schema import (
     Reference, ClaimedRef, RetrievedRecord, StageLog, write_jsonl,
 )
 from .parser import parse_pmc_xml, iter_pmc_dir, link_citances
-from .lookup import fetch_pubmed, compare_and_flag, title_similarity
+from .lookup import (fetch_pubmed, compare_and_flag, title_similarity,
+                     fuzzy_biblio_lookup)
+from .biblio_match import (
+    normalize_title, title_sim, trigram_jaccard, trigram_containment,
+    jaro_winkler, field_agreement, match_score, best_match, retrieve_candidates,
+    FieldAgreement, MatchResult, BestMatch,
+)
+from .biblio_rerank import rerank_stage2
 from .llm_filter import llm_filter, build_prompt, parse_verdict
 from .confirm import confirm as confirm_refs, found_anywhere, all_errored
 from .decide import decide as decide_label
@@ -36,7 +43,12 @@ __all__ = [
     "check_f6_invariant", "pipeline_state_to_taxonomy",
     "Reference", "ClaimedRef", "RetrievedRecord", "StageLog", "write_jsonl",
     "parse_pmc_xml", "iter_pmc_dir", "link_citances", "fetch_pubmed",
-    "compare_and_flag", "title_similarity", "llm_filter", "build_prompt",
+    "compare_and_flag", "title_similarity", "fuzzy_biblio_lookup",
+    "normalize_title", "title_sim", "trigram_jaccard", "trigram_containment",
+    "jaro_winkler", "field_agreement", "match_score", "best_match",
+    "retrieve_candidates", "FieldAgreement", "MatchResult", "BestMatch",
+    "rerank_stage2",
+    "llm_filter", "build_prompt",
     "parse_verdict", "confirm_refs", "found_anywhere", "all_errored",
     "decide_label", "run_pipeline", "process_reference", "make_completer",
     "RateLimiter", "request_with_retry", "configure_ncbi",
