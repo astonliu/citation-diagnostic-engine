@@ -1,0 +1,12 @@
+{
+  "header": {"type": "esummary", "version": "0.3"},
+  "result": {
+    "uids": ["33301246"],
+    "33301246": {
+      "uid": "33301246",
+      "title": "Global burden of 369 diseases and injuries in 204 countries and territories, 1990-2019: a systematic analysis for the Global Burden of Disease Study 2019.",
+      "pubdate": "2020 Oct 17",
+      "source": "Lancet"
+    }
+  }
+}

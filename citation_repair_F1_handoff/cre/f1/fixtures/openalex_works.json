@@ -1,0 +1,17 @@
+{
+  "meta": {"count": 3, "per_page": 3},
+  "results": [
+    {
+      "id": "https://openalex.org/W3000000001",
+      "title": null,
+      "display_name": "Global burden of 369 diseases and injuries in 204 countries and territories, 1990-2019: a systematic analysis for the Global Burden of Disease Study 2019"
+    },
+    {
+      "id": "https://openalex.org/W3000000002",
+      "title": "An unrelated study of widgets"
+    },
+    {
+      "id": "https://openalex.org/W3000000003"
+    }
+  ]
+}

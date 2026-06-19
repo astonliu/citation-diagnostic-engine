@@ -1,0 +1,11 @@
+PMID- 32000001
+OWN - NLM
+STAT- Publisher
+DEP - 20200115
+TI  - Ahead-of-print electronic-only report on a small cohort.
+AU  - Roe A
+AU  - Mark VanDerBerg J
+LA  - eng
+PT  - Journal Article
+TA  - J Adv Res
+JT  - Journal of Advanced Research

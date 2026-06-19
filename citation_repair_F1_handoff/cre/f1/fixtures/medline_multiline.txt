@@ -1,0 +1,26 @@
+PMID- 33301246
+OWN - NLM
+STAT- MEDLINE
+DCOM- 20210105
+LR  - 20211204
+IS  - 1474-547X (Electronic)
+IS  - 0140-6736 (Print)
+VI  - 396
+IP  - 10258
+DP  - 2020 Oct 17
+TI  - Global burden of 369 diseases and injuries in 204 countries and
+      territories, 1990-2019: a systematic analysis for the Global Burden of
+      Disease Study 2019.
+PG  - 1204-1222
+AB  - Background In an era of shifting global agendas and expanded
+      emphasis on non-communicable diseases and injuries.
+FAU - Vos, Theo
+AU  - Vos T
+FAU - Lim, Stephen S
+AU  - Lim SS
+CN  - GBD 2019 Diseases and Injuries Collaborators
+LA  - eng
+PT  - Journal Article
+TA  - Lancet
+JT  - Lancet (London, England)
+SO  - Lancet. 2020 Oct 17;396(10258):1204-1222.

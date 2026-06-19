@@ -1,0 +1,50 @@
+<article>
+  <front>
+    <article-meta>
+      <article-id pub-id-type="pmid">99999999</article-id>
+      <title-group><article-title>A citing review of things</article-title></title-group>
+    </article-meta>
+  </front>
+  <body>
+    <sec>
+      <title>Introduction</title>
+      <p>Aspirin reduces mortality in adult patients
+         <xref ref-type="bibr" rid="B1">1</xref>. A separate claim about
+         quantum widgets was reported recently
+         <xref ref-type="bibr" rid="B2">2</xref>. See also the figure
+         <xref ref-type="fig" rid="F1">Fig 1</xref> for details.</p>
+      <sec>
+        <p>Two works support the combined endpoint
+           <xref ref-type="bibr" rid="B1">1</xref><xref ref-type="bibr" rid="B3">3</xref>.</p>
+      </sec>
+    </sec>
+  </body>
+  <back>
+    <ref-list>
+      <ref id="B1">
+        <element-citation publication-type="journal">
+          <person-group><name><surname>Smith</surname></name></person-group>
+          <article-title>Aspirin and mortality</article-title>
+          <source>Lancet</source><year>2020</year>
+          <pub-id pub-id-type="pmid">111</pub-id>
+        </element-citation>
+      </ref>
+      <ref id="B2">
+        <mixed-citation publication-type="journal">
+          <name><surname>Jones</surname></name>
+          <article-title>Quantum widgets in medicine</article-title>
+          <source>J Widgets</source><year>2021</year>
+          <pub-id pub-id-type="pmid">222</pub-id>
+        </mixed-citation>
+      </ref>
+      <ref id="B3">
+        <element-citation publication-type="journal">
+          <person-group><name><surname>Lee</surname></name></person-group>
+          <article-title>Combined endpoints</article-title>
+          <source>J Trials</source><year>2019</year>
+          <pub-id pub-id-type="pmid">333</pub-id>
+        </element-citation>
+      </ref>
+    </ref-list>
+  </back>
+</article>
