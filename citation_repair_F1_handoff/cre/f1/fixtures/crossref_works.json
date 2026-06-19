@@ -1,0 +1,19 @@
+{
+  "status": "ok",
+  "message": {
+    "items": [
+      {
+        "DOI": "10.1016/s0140-6736(20)30925-9",
+        "title": ["Global burden of 369 diseases and injuries in 204 countries and territories, 1990-2019: a systematic analysis for the Global Burden of Disease Study 2019"],
+        "author": [{"family": "Vos", "given": "Theo"}]
+      },
+      {
+        "DOI": "10.1000/unrelated",
+        "title": ["A completely unrelated paper about something else entirely"]
+      },
+      {
+        "DOI": "10.1000/notitle"
+      }
+    ]
+  }
+}

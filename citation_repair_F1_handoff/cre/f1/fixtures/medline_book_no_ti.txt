@@ -1,0 +1,8 @@
+PMID- 30000001
+OWN - NLM
+STAT- Publisher
+DP  - 2019
+BTI - A Reference Book of Clinical Things
+AU  - Editor E
+LA  - eng
+PT  - Book
