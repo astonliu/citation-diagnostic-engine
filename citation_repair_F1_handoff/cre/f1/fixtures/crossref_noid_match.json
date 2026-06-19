@@ -1,0 +1,18 @@
+{
+  "status": "ok",
+  "message": {
+    "items": [
+      {
+        "DOI": "10.1000/biblio-drift",
+        "title": ["Bibliometric drift in retracted oncology literature"],
+        "author": [{"family": "Okafor", "given": "A."}],
+        "issued": {"date-parts": [[2021]]},
+        "container-title": ["Journal of Scholarly Metrics"]
+      },
+      {
+        "DOI": "10.1000/unrelated",
+        "title": ["A completely unrelated paper about something else entirely"]
+      }
+    ]
+  }
+}

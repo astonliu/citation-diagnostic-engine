@@ -240,6 +240,11 @@ class ClaimedRef:
     claimed_pmid: str = ""
     claimed_doi: str = ""
     raw: str = ""
+    # Structured fields used by the bibliographic matcher (biblio_match.py).
+    # The PMC parser does not populate these yet; default "" => the matcher
+    # reports field-agreement None ("can't judge") rather than a false mismatch.
+    volume: str = ""
+    pages: str = ""
 
 
 @dataclass
@@ -250,13 +255,19 @@ class RetrievedRecord:
     year: Optional[int] = None
     journal: str = ""
     pmid: str = ""
+    # Carried by candidates from the bibliographic matcher (biblio_match.py).
+    # doi enables DOI-based candidate dedup; volume/pages feed field agreement.
+    doi: str = ""
+    volume: str = ""
+    pages: str = ""
 
 
 @dataclass
 class StageLog:
     pmid_present: bool = False
     pmid_resolved: bool = False
-    title_similarity: Optional[float] = None
+    title_similarity: Optional[float] = None    # 0..100 (token-sort, legacy scale)
+    match_score: Optional[float] = None         # 0..1 composite (biblio_match.py)
     author_match: Optional[bool] = None
     year_match: Optional[bool] = None
     author_tripwire: Optional[bool] = None   # True = first-author trip-wire fired
@@ -265,6 +276,9 @@ class StageLog:
     db_hits: dict = field(default_factory=dict)
     decided_by: str = ""
     notes: str = ""
+    # No-ID branch (references with no claimed PMID).
+    noid_lookup_attempted: bool = False      # ran the structured biblio lookup
+    noid_not_found: bool = False             # biblio lookup found no confident match
 
 
 @dataclass
@@ -300,6 +314,7 @@ class Reference:
                                     label=out_label, confidence=c)],
             evidence={
                 "title_similarity": self.log.title_similarity,
+                "match_score": self.log.match_score,
                 "pmid_resolved": self.log.pmid_resolved,
                 "author_tripwire": self.log.author_tripwire,
                 "llm_verdict": self.log.llm_verdict,

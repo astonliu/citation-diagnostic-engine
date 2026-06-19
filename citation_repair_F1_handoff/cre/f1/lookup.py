@@ -22,6 +22,7 @@ from rapidfuzz import fuzz
 
 from .schema import Reference, RetrievedRecord
 from .ratelimit import NCBI, request_with_retry
+from .biblio_match import match_score, retrieve_candidates, best_match
 
 EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
@@ -168,16 +169,117 @@ def _claimed_first_author_present(claimed_authors: list[str],
     return False
 
 
+# --------------------------------------------------------------------------
+# No-ID branch: structured bibliographic lookup
+# --------------------------------------------------------------------------
+# HANDOFF_BIBLIO_MATCH supersedes the old single-token_sort_ratio judging here:
+# candidate retrieval + parsing now live in biblio_match.py, and the confident
+# match decision is made by the structured matcher (title similarity + field
+# agreement), not a bare title threshold. The ROUTING is unchanged -- a no-PMID
+# reference still goes to a lookup whose only outcomes are CLEARED or escalation
+# (-> human_review), never straight to F1.
+def _maybe_rerank(claimed, candidates, accept, bm):
+    """Stage-2 tie-break: when the top two candidates are within ``margin``,
+    re-rank with the MedCPT cross-encoder. Degrades to the Stage-1 ``bm`` when
+    the optional model/dependency is unavailable (the common case)."""
+    try:
+        from .biblio_rerank import rerank_stage2
+    except Exception:                         # noqa: BLE001 - module optional
+        return bm
+    try:
+        reranked = rerank_stage2(claimed, candidates, accept=accept)
+    except Exception:                         # noqa: BLE001 - model load/runtime
+        return bm
+    return reranked if reranked is not None else bm
+
+
+def fuzzy_biblio_lookup(ref: Reference, threshold: float = 85.0,
+                        session: requests.Session | None = None
+                        ) -> RetrievedRecord:
+    """Structured bibliographic lookup for references with no claimed PMID.
+
+    Retrieves candidates from Crossref bibliographic search + OpenAlex title
+    search (:func:`biblio_match.retrieve_candidates`) and picks the best with the
+    structured matcher (:func:`biblio_match.best_match`): normalized title
+    similarity plus author/year/journal/volume/pages agreement. When the top two
+    candidates are within ``margin`` the optional Stage-2 cross-encoder re-ranks
+    (and degrades to Stage 1 if unavailable).
+
+    Returns a ``RetrievedRecord`` with ``resolved=True`` and the winning hit's
+    metadata only on a CONFIDENT match (score >= ``threshold``/100 with a clear
+    margin over the runner-up); otherwise ``resolved=False``. ``.pmid`` is always
+    empty (there is none on this path).
+
+    If both databases errored or returned nothing, ``retrieve_candidates`` yields
+    an empty list and this returns ``resolved=False`` -- a network failure is NOT
+    treated as "found nothing"; the caller escalates such cases through the
+    confirmation path (its own all-errored guard), never straight to F1. Uses the
+    shared CROSSREF / OPENALEX rate limiters.
+    """
+    candidates = retrieve_candidates(ref.claimed, session=session)
+    if not candidates:                       # both DBs errored or found nothing
+        return RetrievedRecord(resolved=False)
+    accept = threshold / 100.0
+    bm = best_match(ref.claimed, candidates, accept=accept)
+    if bm.found and bm.ambiguous:
+        bm = _maybe_rerank(ref.claimed, candidates, accept, bm)
+    if bm.found and bm.confident and bm.best is not None and bm.best.record:
+        rec = bm.best.record
+        rec.resolved = True
+        return rec
+    return RetrievedRecord(resolved=False)
+
+
 def compare_and_flag(ref: Reference, threshold: float = 85.0,
-                     author_tripwire: bool = True) -> bool:
+                     author_tripwire: bool = True,
+                     session: requests.Session | None = None) -> bool:
     """Populate the log and return True if this reference is a CANDIDATE
     (dead PMID, claimed PMID resolves to a low-similarity title, or -- with the
     trip-wire on -- a similar title whose authors lack the claimed first author).
+
+    No-ID path (no claimed PMID): instead of giving up, run a structured
+    bibliographic lookup. A confident, well-matching hit clears the reference; a
+    poor match or no match escalates to the LLM + confirmation path -- never
+    straight to F1 (see decide.py for the precision-first no-ID outcome).
     """
     log = ref.log
     log.pmid_present = bool(ref.claimed.claimed_pmid)
+    accept = threshold / 100.0             # match_score is 0..1; threshold is 0..100
     if not log.pmid_present:
-        return False                       # -> unverifiable, handled in decide()
+        if not ref.claimed.title:
+            # Nothing to search on -> genuinely unverifiable.
+            log.notes = "No claimed PMID and no title; cannot attempt lookup."
+            return False                   # decide() will set UNVERIFIABLE
+        retrieved = fuzzy_biblio_lookup(ref, threshold=threshold, session=session)
+        ref.retrieved = retrieved
+        log.pmid_present = False            # stays False; downstream = no-ID path
+        log.noid_lookup_attempted = True
+        if retrieved.resolved:
+            # Re-score claimed vs the chosen record with the structured matcher
+            # (truncation-robust title + field agreement). title_similarity is
+            # logged on the established 0..100 scale; match_score on 0..1.
+            m = match_score(ref.claimed, retrieved)
+            log.title_similarity = round(m.title_sim * 100, 1)
+            log.match_score = m.score
+            log.author_match = m.fields.author_match
+            log.year_match = m.fields.year_match
+            if m.score >= accept:
+                # Reference exists and points to the right work as far as we can
+                # tell -> cleared (was_flagged=False in decide()).
+                log.mismatch_flagged = False
+                log.notes = (f"No PMID; bibliographic match found "
+                             f"(match_score {m.score:.2f}).")
+                return False
+            # Found a candidate but it doesn't match well -> possible wrong ref.
+            log.mismatch_flagged = True
+            log.notes = (f"No PMID; bibliographic lookup found a candidate but "
+                         f"match_score {m.score:.2f} < {accept:.2f}.")
+            return True                    # continue to LLM filter + confirm path
+        # Not found confidently -> do NOT label F1; escalate.
+        log.mismatch_flagged = True
+        log.noid_not_found = True
+        log.notes = "No PMID; bibliographic lookup found no confident match."
+        return True                        # continue to LLM filter + confirm path
 
     log.pmid_resolved = ref.retrieved.resolved
     if not ref.retrieved.resolved:
@@ -185,17 +287,21 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
         log.notes = "claimed PMID did not resolve"
         return True
 
-    sim = title_similarity(ref.claimed.title, ref.retrieved.title)
-    log.title_similarity = sim
-    cl = {a.lower() for a in ref.claimed.authors}
-    rt = {a.lower() for a in ref.retrieved.authors}
-    log.author_match = bool(cl & rt) if cl and rt else None
-    log.year_match = (ref.claimed.year == ref.retrieved.year) \
-        if ref.claimed.year and ref.retrieved.year else None
+    # Structured match: containment-aware title similarity + field agreement.
+    # A truncated-but-correct title whose author/year/journal agree now scores
+    # HIGH (field boosts compensate) and is not flagged; a PMID resolving to an
+    # unrelated paper scores LOW on title AND fields -> flagged (Dr. Roberts'
+    # concern). title_similarity stays on 0..100; match_score is the 0..1 verdict.
+    m = match_score(ref.claimed, ref.retrieved)
+    log.title_similarity = round(m.title_sim * 100, 1)
+    log.match_score = m.score
+    log.author_match = m.fields.author_match
+    log.year_match = m.fields.year_match
 
-    flagged = sim < threshold
+    flagged = m.score < accept
     if flagged:
-        log.notes = f"title similarity {sim:.0f} < {threshold:.0f}"
+        log.notes = (f"match_score {m.score:.2f} < {accept:.2f} "
+                     f"(title_sim {m.title_sim:.2f})")
 
     # Trip-wire: title is similar enough to pass, but the claimed first author
     # is absent from the record the PMID resolves to -> recombination candidate.
@@ -206,8 +312,8 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
             log.author_tripwire = (present is False)
         if present is False:
             flagged = True
-            log.notes = (f"title similar (sim {sim:.0f}) but claimed first "
-                         f"author {ref.claimed.authors[0]!r} absent from "
+            log.notes = (f"title similar (match_score {m.score:.2f}) but claimed "
+                         f"first author {ref.claimed.authors[0]!r} absent from "
                          f"resolved record")
 
     log.mismatch_flagged = flagged

@@ -17,19 +17,33 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
            db_hits: dict | None, match_threshold: float = 85.0) -> Reference:
     log = ref.log
 
-    # No claimed PMID -> never F1 (Topaz-style exclusion).
+    # No claimed PMID.
     if not log.pmid_present:
-        ref.label, ref.confidence = UNVERIFIABLE, "HIGH"
-        ref.rationale = "No claimed PMID; outside the F1-verifiable set."
-        log.decided_by = "no_pmid"
-        return ref
+        if not log.noid_lookup_attempted:
+            # No title to search on -> genuinely unverifiable (Topaz-style).
+            ref.label, ref.confidence = UNVERIFIABLE, "HIGH"
+            ref.rationale = ("No claimed PMID and no title; outside the "
+                             "verifiable set.")
+            log.decided_by = "no_pmid_no_title"
+            return ref
+        # No-ID lookup ran; fall through to the normal decision logic below.
+        # was_flagged drives the path identically to the PMID path, EXCEPT the
+        # confirm-not-found outcome is human_review, not F1 (guard further down).
 
     # Resolved and metadata matched -> cleared.
     if not was_flagged:
         ref.label, ref.confidence = CLEARED, "HIGH"
-        ref.rationale = (f"Claimed PMID resolves; title similarity "
-                         f"{log.title_similarity:.0f}.")
-        log.decided_by = "metadata_match"
+        if not log.pmid_present:
+            sim = log.title_similarity
+            sim_txt = f"title similarity {sim:.0f}" if sim is not None \
+                else "title similarity unavailable"
+            ref.rationale = (f"No claimed PMID; bibliographic lookup found a "
+                             f"matching record ({sim_txt}).")
+            log.decided_by = "noid_metadata_match"
+        else:
+            ref.rationale = (f"Claimed PMID resolves; title similarity "
+                             f"{log.title_similarity:.0f}.")
+            log.decided_by = "metadata_match"
         return ref
 
     # Flagged but no LLM verdict yet -> caller should have run the filter.
@@ -72,6 +86,17 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
         return ref
 
     if found_anywhere(db_hits, match_threshold):
+        if not log.pmid_present:
+            # No-ID path: the title exists in a database, yet the cheap
+            # structured lookup (title+author+year+journal) missed and the LLM
+            # flagged it. Contradictory evidence and there is no claimed PMID to
+            # call "wrong" -> F2 is inapplicable. Precision-first: escalate.
+            ref.label, ref.confidence = HUMAN_REVIEW, "MED"
+            ref.rationale = ("No claimed PMID; claimed title found in a database "
+                             "but the structured bibliographic lookup did not "
+                             "confirm it. Ambiguous; needs human adjudication.")
+            log.decided_by = "noid_confirm_found_human_review"
+            return ref
         # Real work exists, but the claimed PMID pointed elsewhere -> wrong ref.
         ref.label, ref.confidence = F2, "MED"
         ref.rationale = ("Claimed work found in a database but claimed PMID "
@@ -79,7 +104,19 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
         log.decided_by = "confirm_found_f2"
         return ref
 
-    # Not found in PubMed, Crossref, or OpenAlex -> fabricated.
+    # Not found in PubMed, Crossref, or OpenAlex.
+    if not log.pmid_present:
+        # No-ID path: "not found" is ambiguous (grey literature, books, parsing
+        # gaps) and has a higher base rate than PMID-dead + title-not-found.
+        # Precision-first: escalate rather than accuse.
+        ref.label, ref.confidence = HUMAN_REVIEW, "MED"
+        ref.rationale = ("No claimed PMID; claimed title not found in any "
+                         "database. Cannot distinguish fabrication from an "
+                         "unfindable legitimate source.")
+        log.decided_by = "noid_confirm_not_found_human_review"
+        return ref
+
+    # PMID path: fabricated.
     ref.label = F1
     ref.confidence = "HIGH" if not log.pmid_resolved else "MED"
     ref.rationale = ("Claimed title not found in PubMed, Crossref, or OpenAlex; "
