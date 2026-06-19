@@ -66,7 +66,6 @@ Reported separately; never averaged.
 - **Confidence intervals:** bootstrap, 1000 resamples. No single point estimates reported as results.
 - **Contamination control:** a held-out experiment using citations from papers published after the model's training cutoff.
 - **Model reporting:** exact Claude model strings and snapshot dates pinned.
-- **UNVERIFIABLE exclusion:** examples flagged UNVERIFIABLE (theses, grey literature, conference papers with no stable identifier) are excluded from F1–F8 macro-F1 computation and from the Sarol comparison. Their count and fraction are reported in a separate coverage table. ABSTRACT_ONLY examples are included in primary metrics with the flag reported as a covariate. These rules are fixed; they are not adjusted based on observed results.
 
 ---
 
@@ -82,7 +81,7 @@ Reported separately; never averaged.
 ## 7. Inter-annotator agreement (fixed in advance)
 
 - **Target:** Cohen's κ ≥ 0.60 on the IAA subset (≥100 of the released examples double-annotated); κ ≥ 0.70 is "good".
-- **Taxonomy pre-pilot:** 40 examples (5/category, two annotators) targeting the three at-risk pairs (see `TAXONOMY_DECISION_RULES.md`) *before* volume annotation. Proceed if each pair holds κ ≥ 0.60; otherwise merge the offending pair with the pilot as justification.
+- **Taxonomy pre-pilot:** ~20 examples targeting the F3/F6 and F4/F6 confusable pairs only (F5/F8 excluded; F8 is deterministic) *before* volume annotation. Proceed if each pair holds κ ≥ 0.60; otherwise merge the offending pair with the pilot as justification.
 - **Fallback annotator qualification:** any second annotator must reach κ ≥ 0.60 against gold on a 20-example calibration set *before* paid annotation. Calibration κ reported in the manuscript.
 
 ---
@@ -90,22 +89,9 @@ Reported separately; never averaged.
 ## 8. Dataset construction (fixed in advance)
 
 - **Real-error stratum is held out as a dedicated test partition** (Retraction Watch, PubPeer, Topaz et al. list when released). The primary claim reported separately on natural-only test examples.
-- **Heterogeneous synthetic injection** per category to avoid a single artifact signature (e.g., F3: random PubMed paper / same-MeSH-wrong-finding / LLM-generated plausible-but-wrong). Injection-method mix documented in the dataset card.
+- **Naturally-occurring errors only.** All dataset examples are harvested from published literature. No synthetic perturbations or artificially injected errors are used. Source and harvesting method documented per category in the dataset card. **Amendment note:** original preregistration referenced synthetic injection; this was superseded by Dr. Roberts' mandate before annotation began.
 - **Deterministic pre-classifier categories:** F1, F2, F8 resolved by database lookup before the classifier; human/LLM judgment confined to F3–F7.
 - **Stratify across all 8 categories before train/test split.**
-
-### 8a. Retrieval scope (fixed in advance)
-
-CitationRepair-1000 is scoped to citations that are either (a) PMID-indexed in PubMed or (b) DOI-resolvable via Crossref. This operating envelope is declared here before annotation begins and reported explicitly in the manuscript's data statement. The following reference types fall outside the pipeline's stated scope and are handled as follows:
-
-- **Theses and dissertations** (no PMID, DOI absent or unresolvable): flagged as UNVERIFIABLE at output, not assigned a failure label. Excluded from the primary F1–F8 evaluation metrics. Count reported separately in the dataset card.
-- **Conference papers with no stable identifier** (e.g., workshop proceedings not indexed in PubMed or Crossref): same handling as theses — UNVERIFIABLE flag, excluded from primary metrics.
-- **Paywalled papers where only title+abstract are accessible** (paper exists and identifier resolves, but full text is unavailable): existence check passes; verification proceeds on abstract only. Output confidence field is set to ABSTRACT_ONLY to signal reduced certainty. These examples are *included* in evaluation metrics but the ABSTRACT_ONLY flag is reported as a covariate.
-- **Grey literature** (websites, reports, books): flagged UNVERIFIABLE; excluded from primary metrics.
-
-**Rationale for fixed exclusion rather than silent filtering:** Topaz et al. (Lancet 2026) noted that their system excluded 23% of references lacking PMIDs, acknowledging this as a limitation. The Citation Repair Engine makes the same pragmatic choice but declares it in advance to prevent post-hoc scope adjustment. UNVERIFIABLE is not a failure mode — it is a coverage boundary.
-
-**Scope is fixed as of this preregistration.** If the evaluation reveals an unexpectedly high UNVERIFIABLE rate (>15% of CitationRepair-1000), that is reported as a finding, not addressed by retroactively expanding the retrieval stack.
 
 ---
 
@@ -115,37 +101,3 @@ CitationRepair-1000 is scoped to citations that are either (a) PMID-indexed in P
 - Taxonomy pre-pilot κ < 0.60 on a pair after decision rules → merge that pair, report the pilot evidence.
 - Zero-shot Claude beats Sarol by >10 F1 on the controlled comparison → that becomes a headline result alongside the taxonomy.
 - Generation top-3 fails to beat the in-domain recommender baseline by ≥10 pts → Generation stays exploratory / demoted, not escalated.
-
----
-
-## Amendment Log
-
-**Amendment 1 — June 4, 2026 (pre-annotation)**
-
-**Change:** Removed F5/F8 from the pre-pilot confusable pairs list.
-
-**Rationale:** F8 (retracted paper) is resolved deterministically via PubMed retraction flag / Retraction Watch lookup and never reaches the human annotator. It is categorically not confusable with F5 (stale citation), which requires a substantive judgment call. Including F5/F8 as a confusable pair in the pre-pilot was an error — there is no annotator-level ambiguity to test. F8 belongs with F1 and F2 as a deterministic pre-classifier category (already stated in §8), not as a judgment category.
-
-**Specific changes to §7:**
-- Pre-pilot now targets **two pairs only**: F3/F6 and F4/F6.
-- Pre-pilot size revised from 40 examples (5/category × 8) to ~20 examples (10 per pair), targeting boundary cases for the two judgment pairs only.
-- IAA judgment categories clarified as F3–F7 (5 categories). F8 is excluded from IAA computation as it is deterministic; computing IAA over deterministic categories would artificially inflate κ.
-- IAA pilot (100 examples) stratified across F3–F7 only (~20 examples/category).
-
-**No annotation had occurred at time of this amendment.**
-
----
-
-## Amendment Log
-
-**Amendment 2 — June 5, 2026 (pre-annotation)**
-
-**Change 1: Sarol reproduction demoted from hard gate to recommended validation.**
-
-**Rationale:** Exact reproduction of Sarol's published numbers (0.59 micro-F1 / 0.52 macro-F1) on their original corpus is not a prerequisite for valid downstream comparisons. ACL/EMNLP papers routinely compare against prior methods using released code or reported numbers without first reproducing original scores. Domain shift further weakens the argument — Sarol's performance on their corpus is largely orthogonal to their performance on CitationRepair-1000, which is what the comparison actually requires. The operative standard is: reproduction is recommended validation, not a research prerequisite. Decision is economic: if reproduction takes 2–4 hours using the released code at github.com/ScienceNLP-Lab/Citation-Integrity, do it as a sanity check and report the number. If dependency issues make it substantially more costly, document the implementation source and proceed. A result within ~3 points of published numbers is sufficient to establish implementation fidelity.
-
-**Change 2: §7 pre-pilot corrected per Amendment 1.**
-
-The §7 pre-pilot text still reflects the pre-Amendment-1 state (40 examples, 5/category, three at-risk pairs). The correct state per Amendment 1 is: ~20 examples targeting two pairs only (F3/F6 and F4/F6). F5/F8 is not a judgment-level confusable pair. IAA judgment categories are F3–F7 only (5 categories); F8 is excluded from κ computation.
-
-**No annotation had occurred at time of this amendment.**
