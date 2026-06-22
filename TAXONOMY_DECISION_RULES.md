@@ -1,4 +1,4 @@
-# Taxonomy Decision Rules — The Two At-Risk Pairs (+ F5/F8 routing)
+# Taxonomy Decision Rules — The Three At-Risk Pairs
 
 **Fold into `TAXONOMY.md`.** These are the deterministic collision rules that keep F1–F8 at 8 categories. They exist because an earlier pilot collapsed the taxonomy to 5 over inter-annotator confusion; these rules pre-empt the specific collisions that drove it. Each rule is a decision procedure an annotator applies *before* exercising judgment — the goal is to remove the judgment call entirely where possible.
 
@@ -42,15 +42,18 @@ Use alongside the full per-category definitions (1 paragraph + 2 positive + 2 ne
 
 ---
 
-## F5/F8 routing rule — NOT a pre-pilot at-risk pair
+## Pair 3 — F5 (Stale) vs. F8 (Retracted)
 
-*Per Preregistration Amendment 1 (June 4, 2026), F5/F8 was removed from the confusable-pairs list. F8 is resolved deterministically (database lookup) and never reaches the human annotator, so there is no annotator-level ambiguity to gate on. This section is retained as the deterministic routing rule, not as a judgment pair tested for κ.*
-
-**Why the routing exists.** Both can read as "the cited paper is no longer valid evidence," so the pre-classifier must route them apart before any judgment.
+**Why they collide.** Both are "the cited paper is no longer valid evidence."
 
 **Decision rule (deterministic routing):**
 
-1. **Check the retraction flag first** (PubMed retraction status / Retraction Watch). If the paper is formally retracted → **F8 (Retracted source).** This is a database lookup, handled in the existence-check layer with F1/F2 — it never reaches the human classifier.
+1. **Check the retraction flag first** (PubMed retraction status / Retraction Watch). If the paper is formally retracted, apply the **timing gate** before assigning F8:
+   - **F8 (Retracted source)** requires the citing paper to have been published *after the retraction notice* — i.e., the work was already retracted at citation time. Operationalized for inclusion as a gap of **≥ 31 days** between the retraction notice date and the citing paper's publication date.
+   - **Gap < 31 days → exclude (indeterminate timing), not F8.** Publication date lags submission, so a small positive gap cannot establish that the authors could have known of the retraction. These are genuine citations-to-a-retracted-paper that are not includable, distinct from label errors.
+   - The 31-day floor is an **annotation-confidence threshold, not part of the definition.** The definition is "retracted at citation time"; the band is how we operationalize confidence in that ordering. Year-only citing dates use worst-case (earliest-possible) ordering — accept only if even a January 1 publication clears the floor.
+   - `retraction_date` throughout means the **retraction notice date**, not the original publication date of the retracted paper. (Conflating the two is a live trap.)
+   - The retraction lookup and timing gate are handled in the existence-check layer with F1/F2 — F8 never reaches the human classifier.
 2. If the paper is **not** retracted but a newer paper contradicts its finding on the same claim → **F5 (Stale citation).** Proceed to the two-path F5 protocol below.
 
 **Consequence.** F8 is never a judgment call. F5 always is — but F5 has two distinct outputs depending on whether supersession is unambiguous.
@@ -126,7 +129,7 @@ Check the following against the contradicting paper. Each criterion is sufficien
 |---|---|---|
 | F1 Fabricated | DOI/PMID/metadata fails to resolve | Existence check (pre-classifier) |
 | F2 Wrong reference | Metadata mismatch after fuzzy match | Existence check (pre-classifier) |
-| F8 Retracted | Retraction flag lookup | Existence check (pre-classifier) |
+| F8 Retracted | Retraction flag lookup + post-retraction timing gate (≥31d) | Existence check (pre-classifier) |
 | F3 Misattribution | Atomic-claim count (zero supported) | F3–F7 judgment band |
 | F4 Overstatement | Strength/modality mismatch | F3–F7 judgment band |
 | F5 Stale | Contradiction detection + supersession criteria → Path A (autonomous repair) or Path B (escalation flag) | F3–F7 judgment band |
@@ -152,8 +155,7 @@ These are real examples from claims_test.jsonl used to calibrate annotators on b
 
 ## Pre-pilot gate (run before annotating at volume)
 
-- **~20 examples (10 per pair), two annotators**, targeted at the two at-risk pairs only: **F3/F6 and F4/F6** (Pairs 1–2 above). F5/F8 is excluded — F8 is deterministic and never reaches the annotator (Amendment 1).
-- **Proceed to full 1100–1200** if each pair holds **κ ≥ 0.60** on the pre-pilot. (κ ≥ 0.70 is "good"; 0.60 is the registered gate, not raised.)
-- IAA is computed over the F3–F7 judgment band only (5 categories); F8 is excluded from κ as deterministic.
+- **40 examples, 5 per category, two annotators**, targeted at Pairs 1–3 above.
+- **Proceed to full 1100–1200** if each pair holds **κ ≥ 0.60** on the pre-pilot.
 - **If F3/F6 or F4/F6 still collide** after these rules: merge the offending pair and report the pre-pilot as the methodological justification ("collapsed after a pilot revealed residual confusion" = methodological care, not retreat).
 - The taxonomy stays **8** unless the pre-pilot says otherwise.
