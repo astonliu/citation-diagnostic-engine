@@ -364,3 +364,12 @@ def test_citance_linking_attaches_sentences_and_markers():
     b3 = by["PMC9:B3"]                                      # cited only in nested <p>
     assert "combined endpoint" in b3.citance.lower()
     assert b3.cited_reference_marker == "3"
+
+
+def test_part_title_chapter_ref_extracted():
+    refs = parse_pmc_xml(os.path.join(FIX, "pmc_chapter_ref.xml"),
+                         source_pmcid="PMCX")
+    by = {r.citation_id: r for r in refs}
+    b1 = by["PMCX:B1"]
+    assert b1.claimed.title == "Effects of setting on psychedelic outcomes"
+    assert b1.claimed.claimed_pmid == "35138585"
