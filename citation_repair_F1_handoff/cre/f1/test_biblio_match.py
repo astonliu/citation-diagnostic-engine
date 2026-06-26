@@ -355,3 +355,66 @@ def test_dead_pmid_still_flagged():
     ref.retrieved = RetrievedRecord(resolved=False, pmid="0")
     assert compare_and_flag(ref, 85.0) is True
     assert ref.log.notes == "claimed PMID did not resolve"
+
+
+# ==========================================================================
+# 7. Strong-corroboration override regression tests.
+# ==========================================================================
+
+def test_override_rescues_cross_language_same_paper():
+    claimed = ClaimedRef(
+        title="Ergebnisse der chirurgischen Behandlung des Magenkarzinoms",
+        authors=["Müller"], year=1998, journal="Der Chirurg")
+    cand = RetrievedRecord(
+        resolved=False,
+        title="Results of surgical treatment of gastric carcinoma",
+        authors=["H Muller"], year=1998, journal="Der Chirurg",
+        pmid="", doi="", volume="", pages="")
+    r = match_score(claimed, cand, accept=ACCEPT)
+    assert r.title_sim < 0.7, f"expected low cross-language title_sim, got {r.title_sim}"
+    assert r.fields.author_match is True
+    assert r.fields.journal_match is True
+    assert r.score >= ACCEPT, f"override should fire, score={r.score}"
+
+
+def test_override_does_not_fire_on_author_year_only_wrong_paper():
+    claimed = ClaimedRef(
+        title="A randomized trial of early surfactant in preterm infants",
+        authors=["Okafor"], year=2015, journal="J Perinatology")
+    cand = RetrievedRecord(
+        resolved=False,
+        title="Maternal vitamin D status and neonatal outcomes",
+        authors=["A Okafor"], year=2015, journal="",
+        pmid="", doi="", volume="", pages="")
+    r = match_score(claimed, cand, accept=ACCEPT)
+    assert r.fields.author_match is True
+    assert r.fields.year_match is True
+    assert r.fields.journal_match is None
+    assert r.score < ACCEPT, (
+        f"override must not fire on author+year only (journal missing), score={r.score}")
+
+
+def test_override_does_not_fire_when_author_disagrees():
+    claimed = ClaimedRef(
+        title="Deep learning for medical image segmentation",
+        authors=["Zhang"], year=2020, journal="Med Image Anal")
+    cand = RetrievedRecord(
+        resolved=False,
+        title="Convolutional networks for biomedical image segmentation",
+        authors=["Patel"], year=2020, journal="Med Image Anal",
+        pmid="", doi="", volume="", pages="")
+    r = match_score(claimed, cand, accept=ACCEPT)
+    assert r.fields.author_match is False
+    assert r.score < ACCEPT, f"author disagreement must block override, score={r.score}"
+
+
+def test_override_threshold_tracks_accept():
+    claimed = ClaimedRef(
+        title="Zur Pathogenese der Leberzirrhose",
+        authors=["Schmidt"], year=2001, journal="Z Gastroenterol")
+    cand = RetrievedRecord(
+        resolved=False,
+        title="On the pathogenesis of liver cirrhosis",
+        authors=["K Schmidt"], year=2001, journal="Z Gastroenterol",
+        pmid="", doi="", volume="", pages="")
+    assert match_score(claimed, cand, accept=0.90).score >= 0.90
