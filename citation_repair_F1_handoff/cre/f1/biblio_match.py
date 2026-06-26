@@ -77,18 +77,37 @@ class BestMatch:
 # =====================================================================
 # Title scoring (containment-aware, so truncation doesn't tank the score)
 # =====================================================================
+# PubMed brackets translated (non-English) titles: "[Results of ...]".
+# Corrigendum/erratum/correction notices decorate the original title.
+_TITLE_PREFIX_RE = re.compile(
+    r"^\s*(erratum|corrigendum|correction|retraction)\b[:\-\s]*", re.I)
+
+
 def normalize_title(t: str) -> str:
     """Lowercase, Unicode-fold (strip accents), drop punctuation, collapse
-    whitespace. The same normalization is applied to both sides before any
-    string comparison."""
+    whitespace. Also strips PubMed translated-title brackets and
+    erratum/corrigendum prefixes so the SAME work normalizes consistently.
+    Applied to both sides before any string comparison."""
     if not t:
         return ""
-    t = unicodedata.normalize("NFKD", t)
-    t = "".join(c for c in t if not unicodedata.combining(c))
-    t = t.lower()
-    t = re.sub(r"[^\w\s]", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
+    # strip a single pair of square brackets PubMed wraps around translated
+    # titles: "[Results of ...]" -> "Results of ..."
+    s = t.strip()
+    if s.startswith("[") and s.endswith("]"):
+        s = s[1:-1]
+    elif s.startswith("[") and s.endswith("]."):
+        s = s[1:-2]
+    # drop erratum/corrigendum/correction/retraction decoration
+    s = _TITLE_PREFIX_RE.sub("", s)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.lower()
+    # collapse intra-token hyphens in alphanumeric tokens so "t-rna" == "trna",
+    # "pd-l2" == "pdl2" (chemical / gene / variant name formatting)
+    s = re.sub(r"(?<=\w)-(?=\w)", "", s)
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
 def _trigrams(s: str) -> set[str]:
@@ -226,12 +245,35 @@ def _digits(s: str) -> str:
 # =====================================================================
 # Composite score + best match
 # =====================================================================
-def match_score(claimed: Claimed, cand: RetrievedRecord) -> MatchResult:
+def match_score(claimed: Claimed, cand: RetrievedRecord,
+                accept: float = 0.85) -> MatchResult:
     """Title similarity, nudged by confirmatory field agreement and pulled down
-    by confident field DISagreement. The penalties are what separate a
-    same-title-DIFFERENT-paper (survey vs. update from the same group) from a
-    true match: titles can look alike, but a confident author/year disagreement
-    is strong evidence of a different work."""
+    by confident field DISagreement, with a STRONG-CORROBORATION OVERRIDE.
+
+    The penalties are what separate a same-title-DIFFERENT-paper (survey vs.
+    update from the same group) from a true match: titles can look alike, but a
+    confident author/year disagreement is strong evidence of a different work.
+
+    The additive nudges, however, cannot lift a near-zero cross-language title
+    over ``accept`` even when the work is plainly the same. The override floors
+    the score at ``accept`` ONLY when the two high-entropy fields -- first-author
+    surname AND journal -- both agree and NO field disagrees.
+
+    Why author+journal, not ``agree >= 2`` / ``agree >= 3``: year (+/-1 window)
+    and volume/pages are low-entropy and collide across unrelated works, and
+    missing fields read as None (uncountable). Counting them lets the override
+    fire on author+year alone whenever journal is unparsed -- i.e. on sparse,
+    malformed references, the population most likely to be a real wrong-reference
+    (F2). Requiring the two discriminating fields, both present and agreeing, is
+    the narrowest gate that still rescues the cross-language case (author + year
+    + journal agree) while refusing to fire when journal is unknown.
+
+    KNOWN RESIDUAL (no metadata gate can close it): a wrong paper by the SAME
+    author in the SAME journal in the SAME year is metadata-identical to a
+    cross-language same-paper cite. The override fires on it. This is an
+    irreducible precision/recall trade; its size is measured on the held-out F2
+    recall set, not assumed away here.
+    """
     ts = title_sim(claimed.title, cand.title)
     f = field_agreement(claimed, cand)
     score = ts
@@ -249,6 +291,19 @@ def match_score(claimed: Claimed, cand: RetrievedRecord) -> MatchResult:
         score -= 0.15
     if f.year_match is False:
         score -= 0.10
+
+    # --- strong-corroboration override -------------------------------------
+    disagree = sum(1 for v in (f.author_match, f.year_match, f.journal_match,
+                               f.volume_match, f.pages_match) if v is False)
+    # Fire ONLY when both high-entropy fields agree and nothing contradicts.
+    # author_match is True AND journal_match is True already implies neither of
+    # those disagrees; ``disagree == 0`` additionally blocks a contradicting
+    # year/volume/pages (same author+journal but year off by 5 -> likely a
+    # different work, do not rescue).
+    if f.author_match is True and f.journal_match is True and disagree == 0:
+        score = max(score, accept)
+    # -----------------------------------------------------------------------
+
     score = round(max(0.0, min(1.0, score)), 4)   # round: avoid float knife-edges
     return MatchResult(score=score, title_sim=round(ts, 4), fields=f, record=cand)
 
@@ -260,8 +315,10 @@ def best_match(claimed: Claimed, candidates: list[RetrievedRecord],
     ambiguous, never confident -- precision-first).
 
     ``accept`` and ``margin`` are calibration targets; defaults favor precision.
+    ``accept`` is threaded into ``match_score`` so the strong-corroboration
+    override floors at the SAME threshold a non-default ``accept`` sets here.
     """
-    scored = sorted((match_score(claimed, c) for c in candidates),
+    scored = sorted((match_score(claimed, c, accept=accept) for c in candidates),
                     key=lambda m: m.score, reverse=True)
     if not scored:
         return BestMatch(found=False)
