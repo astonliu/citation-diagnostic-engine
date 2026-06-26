@@ -15,7 +15,9 @@ Set NCBI_API_KEY in config for ~10 req/s; EFetch shares the NCBI rate budget
 with the ESearch/ESummary calls in confirm.py via the shared limiter.
 """
 from __future__ import annotations
+import html
 import re
+import unicodedata
 
 import requests
 from rapidfuzz import fuzz
@@ -27,7 +29,74 @@ from .biblio_match import match_score, retrieve_candidates, best_match
 EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
 
+# Greek letter -> English name. Maps both lowercase and uppercase forms.
+# Needed because PMC/JATS titles carry literal Greek (β-glucans) while
+# PubMed/Crossref records spell them out (beta-glucans); without this the SAME
+# paper scores as a mismatch.
+_GREEK = {
+    "\u03b1": "alpha", "\u0391": "alpha",
+    "\u03b2": "beta",  "\u0392": "beta",
+    "\u03b3": "gamma", "\u0393": "gamma",
+    "\u03b4": "delta", "\u0394": "delta",
+    "\u03b5": "epsilon", "\u0395": "epsilon",
+    "\u03b6": "zeta",  "\u0396": "zeta",
+    "\u03b7": "eta",   "\u0397": "eta",
+    "\u03b8": "theta", "\u0398": "theta",
+    "\u03b9": "iota",  "\u0399": "iota",
+    "\u03ba": "kappa", "\u039a": "kappa",
+    "\u03bb": "lambda", "\u039b": "lambda",
+    "\u03bc": "mu",    "\u039c": "mu",
+    "\u03bd": "nu",    "\u039d": "nu",
+    "\u03be": "xi",    "\u039e": "xi",
+    "\u03bf": "omicron", "\u039f": "omicron",
+    "\u03c0": "pi",    "\u03a0": "pi",
+    "\u03c1": "rho",   "\u03a1": "rho",
+    "\u03c3": "sigma", "\u03c2": "sigma", "\u03a3": "sigma",
+    "\u03c4": "tau",   "\u03a4": "tau",
+    "\u03c5": "upsilon", "\u03a5": "upsilon",
+    "\u03c6": "phi",   "\u03a6": "phi",
+    "\u03c7": "chi",   "\u03a7": "chi",
+    "\u03c8": "psi",   "\u03a8": "psi",
+    "\u03c9": "omega", "\u03a9": "omega",
+    "\u00b5": "mu",    # MICRO SIGN (distinct codepoint from Greek mu)
+}
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_GREEK_RE = re.compile("|".join(map(re.escape, _GREEK)))
+
+
 def _normalize(t: str) -> str:
+    """Normalize a title/name for fuzzy comparison.
+
+    Steps run IN ORDER. Each exists to stop a specific formatting difference
+    from making the SAME work look like a different one (observed in the F2
+    base-rate test):
+
+      1. Unescape HTML entities (&amp;, &lt;, &#x2014; ...) -- JATS/Crossref
+         carry entity-encoded characters.
+      2. Strip HTML/MathML tags (<sub>, </sub>, <i>, <sup> ...) -- e.g.
+         CHA<sub>2</sub>DS<sub>2</sub> vs CHA2DS2.
+      3. Map Greek letters to English names (beta-glucans vs beta-glucans).
+      4. NFKD-fold and drop combining marks to fold diacritics to ASCII
+         (AlZu'bi vs AlZubi; also normalizes sub/superscript digit forms).
+      5. Lowercase, replace remaining non-word/space chars with a space,
+         collapse whitespace, strip.
+
+    Do NOT "simplify" this back to a single non-alnum strip -- that is the bug
+    this function fixes.
+    """
+    if not t:
+        return ""
+    # 1. HTML entities
+    t = html.unescape(t)
+    # 2. HTML/MathML tags
+    t = _TAG_RE.sub(" ", t)
+    # 3. Greek letters -> names
+    t = _GREEK_RE.sub(lambda m: _GREEK[m.group()], t)
+    # 4. fold diacritics / compatibility forms to ASCII
+    t = unicodedata.normalize("NFKD", t)
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    # 5. existing behavior
     t = t.lower()
     t = re.sub(r"[^\w\s]", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
