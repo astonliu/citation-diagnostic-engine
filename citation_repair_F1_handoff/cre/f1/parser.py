@@ -180,7 +180,7 @@ def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:
         if cit is None:
             continue
         claimed = ClaimedRef(
-            title=_text(_first(cit, "article-title")),
+            title=_text(_first(cit, "article-title","part-title", "chapter-title")),
             authors=_authors_from(cit),
             year=_year_from(cit),
             journal=_text(_first(cit, "source")),

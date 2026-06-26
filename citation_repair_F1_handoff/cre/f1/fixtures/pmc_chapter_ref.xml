@@ -1,0 +1,18 @@
+<article>
+  <front><article-meta>
+    <title-group><article-title>A citing paper</article-title></title-group>
+    <article-id pub-id-type="pmid">11111111</article-id>
+  </article-meta></front>
+  <back>
+    <ref-list>
+      <ref id="B1">
+        <element-citation publication-type="book">
+          <part-title>Effects of setting on psychedelic outcomes</part-title>
+          <source>Disruptive Psychopharmacology</source>
+          <year>2022</year>
+          <pub-id pub-id-type="pmid">35138585</pub-id>
+        </element-citation>
+      </ref>
+    </ref-list>
+  </back>
+</article>
