@@ -89,6 +89,14 @@ VERDICT_FORMATTING   = "review_formatting"   # flagged, LOW priority (likely sam
 _TITLE_PREFIX_RE = re.compile(
     r"^\s*(erratum|corrigendum|correction|retraction)\b[:\-\s]*", re.I)
 
+# A leading section / society / consortium prefix that PubMed prepends to an
+# article title and the citing reference often omits, e.g. "Biochemistry.
+# Metamorphic proteins.", "Clinical practice. Celiac disease.", "American College
+# of Sports Medicine position stand. Progression models...". A short (<= 80 char)
+# run ending in the first '.' or ':' followed by whitespace and more text. Used
+# only to OFFER a de-prefixed title variant; never the sole representation.
+_LEADING_PREFIX_RE = re.compile(r"^[^.:]{1,80}?[.:]\s+(?=\S)")
+
 
 def normalize_title(t: str) -> str:
     """Lowercase, Unicode-fold (strip accents), drop punctuation, collapse
@@ -186,13 +194,11 @@ def jaro_winkler(a: str, b: str) -> float:
     return float(JaroWinkler.similarity(a, b))
 
 
-def title_sim(claimed: str, candidate: str) -> float:
-    """0..1. Robust to truncation and dropped subtitles.
-
-    ``max`` of (a) Jaro-Winkler (prefix-weighted, good for truncated prefixes)
-    and (b) the S2ORC-style harmonic mean of trigram Jaccard and trigram
-    containment (containment rescues a short-but-correct title)."""
-    a, b = normalize_title(claimed), normalize_title(candidate)
+def _pair_sim(a: str, b: str) -> float:
+    """0..1 similarity of two ALREADY-NORMALIZED strings: ``max`` of (a)
+    Jaro-Winkler (prefix-weighted, good for truncated prefixes) and (b) the
+    S2ORC-style harmonic mean of trigram Jaccard and trigram containment
+    (containment rescues a short-but-correct title)."""
     if not a or not b:
         return 0.0
     jw = jaro_winkler(a, b)
@@ -200,6 +206,40 @@ def title_sim(claimed: str, candidate: str) -> float:
     cont = trigram_containment(a, b)
     hm = 0.0 if (tri_j + cont) == 0 else 2 * tri_j * cont / (tri_j + cont)
     return max(jw, hm)
+
+
+def _title_variants(title: str) -> list[str]:
+    """Normalized title, plus a de-prefixed variant when a leading section/
+    society/consortium prefix is present (e.g. 'Biochemistry. Metamorphic
+    proteins.' -> also 'metamorphic proteins'). The de-prefixed remainder is
+    offered ONLY when it is still a substantial title (>= 2 words and >= 10
+    chars), so a real short title is never stripped to a fragment. It is an
+    ADDITIONAL variant, never a replacement -- title_sim takes the MAX, so
+    de-prefixing can only RAISE similarity for a genuinely same work."""
+    base = normalize_title(title)
+    if not base:
+        return []
+    variants = [base]
+    m = _LEADING_PREFIX_RE.match(title or "")
+    if m:
+        nr = normalize_title((title or "")[m.end():])
+        if nr and nr != base and len(nr.split()) >= 2 and len(nr) >= 10:
+            variants.append(nr)
+    return variants
+
+
+def title_sim(claimed: str, candidate: str) -> float:
+    """0..1. Robust to truncation, dropped subtitles, AND a leading section/
+    society prefix on either side. ``max`` of ``_pair_sim`` over the cross-product
+    of each side's title variants (original + de-prefixed). Because the
+    original-vs-original pair is always included, this can only RAISE the score
+    relative to the bare comparison, never lower it -- a prefix can no longer tank
+    a genuinely same work, and two different works gain nothing (their de-prefixed
+    forms still do not match)."""
+    va, vb = _title_variants(claimed), _title_variants(candidate)
+    if not va or not vb:
+        return 0.0
+    return max(_pair_sim(a, b) for a in va for b in vb)
 
 
 # =====================================================================
