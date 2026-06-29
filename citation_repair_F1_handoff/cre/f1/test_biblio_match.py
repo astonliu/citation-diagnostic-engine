@@ -470,3 +470,57 @@ def test_flag_verdict_formatting_band():
     r = _make_record("Frequency and distribution of sleep problems", ["Schlack"], 2013, "")
     v, m = flag_verdict(c, r)
     assert v == VERDICT_FORMATTING
+
+# ── prefix-aware title_sim (de-prefixing can only RAISE the score) ─────────────
+
+from cre.f1.biblio_match import _title_variants  # noqa: E402
+
+
+def test_title_variants_deprefixes_section_prefix():
+    # "Biochemistry. Metamorphic proteins." -> base + de-prefixed remainder.
+    vs = _title_variants("Biochemistry. Metamorphic proteins.")
+    assert "metamorphic proteins" in vs
+
+
+def test_title_variants_keeps_short_remainder_whole():
+    # A real short title must NOT be stripped to a fragment (remainder < 10 chars).
+    assert _title_variants("Foo: bar") == ["foo bar"]
+
+
+def test_title_sim_section_prefix_same_paper_scores_high():
+    # 18583598 shape: written omits the "Biochemistry." section prefix PubMed adds.
+    s = title_sim("Metamorphic proteins", "Biochemistry. Metamorphic proteins.")
+    assert s >= 0.95
+
+
+def test_title_sim_society_prefix_same_paper_scores_high():
+    # 19204579 shape: ACSM position-stand prefix on the resolved side.
+    s = title_sim(
+        "Progression models in resistance training for healthy adults",
+        "American College of Sports Medicine position stand. Progression models "
+        "in resistance training for healthy adults")
+    assert s >= 0.95
+
+
+def test_title_sim_never_lowers_vs_bare_comparison():
+    # Monotonicity: adding a prefix to one side cannot DROP similarity.
+    bare = title_sim("Celiac disease", "Celiac disease")
+    prefixed = title_sim("Celiac disease", "Clinical practice. Celiac disease.")
+    assert prefixed >= 0.95 and prefixed >= bare - 1e-9
+
+
+def test_title_sim_different_papers_not_rescued_by_deprefixing():
+    # Two genuinely different works gain nothing decisive from de-prefixing: the
+    # similarity stays well below the accept gate, so the pair still flags.
+    s = title_sim("Disseminated varicella infection",
+                  "Review. Purple urine after catheterization")
+    assert s < 0.7
+
+
+def test_prefixed_genuine_f2_still_flagged():
+    # A genuine wrong-reference whose written title carries a leading prefix must
+    # still flag: de-prefixing does not make two different titles match.
+    c = _make_claimed("Background. Disseminated varicella infection", ["Smith"], 2019, "")
+    r = _make_record("Purple urine after catheterization", ["Placais"], 2019, "")
+    v, m = flag_verdict(c, r)
+    assert m.score < ACCEPT and v == VERDICT_WRONG_PAPER
