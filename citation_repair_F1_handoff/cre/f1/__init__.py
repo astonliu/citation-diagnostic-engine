@@ -23,7 +23,8 @@ from .parser import parse_pmc_xml, iter_pmc_dir, link_citances
 from .lookup import (fetch_pubmed, compare_and_flag, title_similarity,
                      fuzzy_biblio_lookup)
 from .unscoreable import classify_unscoreable
-from .eval_report import summarize as eval_summarize, band_of, wilson_ci, format_report
+from .eval_report import (summarize as eval_summarize, band_of, wilson_ci,
+                          format_report, build_f2_record)
 from .biblio_match import (
     normalize_title, title_sim, trigram_jaccard, trigram_containment,
     jaro_winkler, field_agreement, match_score, best_match, retrieve_candidates,
@@ -49,7 +50,7 @@ __all__ = [
     "parse_pmc_xml", "iter_pmc_dir", "link_citances", "fetch_pubmed",
     "compare_and_flag", "title_similarity", "fuzzy_biblio_lookup",
     "classify_unscoreable",
-    "eval_summarize", "band_of", "wilson_ci", "format_report",
+    "eval_summarize", "band_of", "wilson_ci", "format_report", "build_f2_record",
     "normalize_title", "title_sim", "trigram_jaccard", "trigram_containment",
     "jaro_winkler", "field_agreement", "match_score", "best_match",
     "retrieve_candidates", "FieldAgreement", "MatchResult", "BestMatch",

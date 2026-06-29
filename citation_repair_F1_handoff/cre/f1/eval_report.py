@@ -26,7 +26,8 @@ import math
 from collections import Counter
 from typing import Optional
 
-from .schema import F1, F2, UNVERIFIABLE, UNSCOREABLE
+from .schema import F1, F2, UNVERIFIABLE, UNSCOREABLE, ClaimedRef, RetrievedRecord
+from .biblio_match import match_score, flag_verdict, VERDICT_MATCH
 
 
 # =====================================================================
@@ -223,3 +224,69 @@ def format_report(report: dict) -> str:
         lines.append(f"  wrong-paper band size : {wp['band_size']} "
                      f"({wp.get('note','')})")
     return "\n".join(lines)
+
+
+# =====================================================================
+# Canonical run-output record
+# =====================================================================
+# Existing keys preserved for backward compatibility; the *_first_author /
+# *_journal / *_volume / *_pages / resolved_year_from_dep keys are what make a
+# record faithfully RE-BANDABLE offline (a rescore can rebuild ClaimedRef /
+# RetrievedRecord from the stored strings and reproduce author_match /
+# journal_match and the preprint year-gap tolerance instead of recomputing them
+# as None). Keep every future run on this function so the schema cannot drift.
+_F2_RECORD_KEYS = (
+    "pmid", "src_pmcid", "written_title", "resolved_title", "written_year",
+    "resolved_year", "match_score", "title_sim", "author_match", "year_match",
+    "journal_match", "resolved", "flag",
+    "written_first_author", "resolved_first_author", "written_journal",
+    "resolved_journal", "written_volume", "resolved_volume", "written_pages",
+    "resolved_pages", "resolved_year_from_dep", "verdict",
+)
+
+
+def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
+                    resolved: RetrievedRecord, accept: float = 0.85) -> dict:
+    """Assemble one F2 run-output record from the SAME claimed/resolved objects
+    the scorer consumes -- the canonical, re-bandable schema.
+
+    Stores BOTH the computed field-agreement verdicts (author/year/journal_match)
+    AND the raw strings they were computed from (first author, journal, volume,
+    pages) plus ``resolved_year_from_dep``. An offline rescore can therefore
+    rebuild the inputs and reproduce the live banding exactly -- including the
+    preprint year-gap tolerance, which keys on ``resolved_year_from_dep`` -- with
+    no re-fetch and no recompute-to-None.
+
+    ``flag`` is True iff the composite is below ``accept`` (the screen's
+    flag line); ``verdict`` is the priority band (match / wrong_paper /
+    formatting). Both are derived from the single ``match_score`` call so they
+    are mutually consistent.
+    """
+    m = match_score(claimed, resolved, accept=accept)
+    verdict, _ = flag_verdict(claimed, resolved, accept=accept)
+    return {
+        "pmid": pmid,
+        "src_pmcid": src_pmcid,
+        "written_title": claimed.title,
+        "resolved_title": resolved.title,
+        "written_year": claimed.year,
+        "resolved_year": resolved.year,
+        "match_score": m.score,
+        "title_sim": m.title_sim,
+        "author_match": m.fields.author_match,
+        "year_match": m.fields.year_match,
+        "journal_match": m.fields.journal_match,
+        "resolved": resolved.resolved,
+        "flag": m.score < accept,
+        # raw strings the verdicts were computed from (enable faithful re-banding)
+        "written_first_author":   claimed.authors[0] if claimed.authors else "",
+        "resolved_first_author":  resolved.authors[0] if resolved.authors else "",
+        "written_journal":        claimed.journal or "",
+        "resolved_journal":       resolved.journal or "",
+        "written_volume":         claimed.volume or "",
+        "resolved_volume":        resolved.volume or "",
+        "written_pages":          claimed.pages or "",
+        "resolved_pages":         resolved.pages or "",
+        "resolved_year_from_dep": bool(getattr(resolved, "year_from_dep", False)),
+        "verdict": verdict,
+    }
