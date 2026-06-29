@@ -30,6 +30,13 @@ TAXONOMY_LABELS = {ACCURATE, F1, F2, F3, F4, F5, F6, F7, F8}
 CLEARED = "cleared"
 UNVERIFIABLE = "unverifiable"
 HUMAN_REVIEW = "human_review"
+# A (claimed, resolved) pair that cannot bear a title-vs-title comparison at all:
+# a non-title input (journal name / regulatory code / committee string), a
+# placeholder ("[Not Available]"), or a book/container record cited as a chapter.
+# Reported as a named, counted bucket (never silently dropped) and EXCLUDED from
+# both the flagged pool and the F2 numerator. Maps to None (dropped from the
+# dataset) exactly like UNVERIFIABLE — it is a coverage bucket, never ACCURATE.
+UNSCOREABLE = "unscoreable"
 
 # ---- LLM filter verdicts ----
 V_FABRICATION = "fabrication"
@@ -223,7 +230,7 @@ def pipeline_state_to_taxonomy(label: str) -> Optional[str]:
         return label
     if label == CLEARED:
         return ACCURATE
-    if label in (UNVERIFIABLE, HUMAN_REVIEW):
+    if label in (UNVERIFIABLE, HUMAN_REVIEW, UNSCOREABLE):
         return None
     return label if label in TAXONOMY_LABELS else None
 
@@ -260,6 +267,15 @@ class RetrievedRecord:
     doi: str = ""
     volume: str = ""
     pages: str = ""
+    # True when ``title`` is a book/container title (MEDLINE BTI, OpenAlex
+    # type=book) rather than an article/chapter title. The UNSCOREABLE gate uses
+    # this so a chapter cite resolving to its parent book is not title-matched.
+    is_container: bool = False
+    # True when ``year`` came from the electronic-publication date (MEDLINE DEP)
+    # because no print date (DP) was present -- an epub-ahead-of-print / preprint
+    # signal. The field matcher widens its year tolerance for such a record so a
+    # preprint->publication year gap on the SAME work is not read as a mismatch.
+    year_from_dep: bool = False
 
 
 @dataclass
@@ -268,10 +284,25 @@ class StageLog:
     pmid_resolved: bool = False
     title_similarity: Optional[float] = None    # 0..100 (token-sort, legacy scale)
     match_score: Optional[float] = None         # 0..1 composite (biblio_match.py)
+    # Full field-agreement verdict tuple. Logged so the eval layer can BAND the
+    # flagged pool on the raw (True/False/None) verdicts directly — never on the
+    # non-invertible Delta=score-ts (a corroborating boost can mask a year/author
+    # disagreement, so Delta>=0 does NOT imply "no field disagreed").
     author_match: Optional[bool] = None
     year_match: Optional[bool] = None
+    journal_match: Optional[bool] = None
+    volume_match: Optional[bool] = None
+    pages_match: Optional[bool] = None
     author_tripwire: Optional[bool] = None   # True = first-author trip-wire fired
+    # True when the strong-corroboration override floored this score to accept
+    # (author+journal agree on a low-title-similarity pair). Logged so the eval
+    # layer can COUNT the override-cleared population -- the known same-author/
+    # same-journal residual whose size must be measured, not assumed.
+    override_fired: bool = False
     mismatch_flagged: bool = False
+    # Set when the (claimed, resolved) pair is not a scoreable title comparison
+    # (see UNSCOREABLE). Names the reason; routes the ref out of the F2 numerator.
+    unscoreable_reason: Optional[str] = None
     llm_verdict: Optional[str] = None
     db_hits: dict = field(default_factory=dict)
     decided_by: str = ""
@@ -316,7 +347,13 @@ class Reference:
                 "title_similarity": self.log.title_similarity,
                 "match_score": self.log.match_score,
                 "pmid_resolved": self.log.pmid_resolved,
+                "author_match": self.log.author_match,
+                "year_match": self.log.year_match,
+                "journal_match": self.log.journal_match,
+                "volume_match": self.log.volume_match,
+                "pages_match": self.log.pages_match,
                 "author_tripwire": self.log.author_tripwire,
+                "unscoreable_reason": self.log.unscoreable_reason,
                 "llm_verdict": self.log.llm_verdict,
                 "db_hits": self.log.db_hits,
                 "decided_by": self.log.decided_by,

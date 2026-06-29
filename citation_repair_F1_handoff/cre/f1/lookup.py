@@ -25,6 +25,7 @@ from rapidfuzz import fuzz
 from .schema import Reference, RetrievedRecord
 from .ratelimit import NCBI, request_with_retry
 from .biblio_match import match_score, retrieve_candidates, best_match
+from .unscoreable import classify_unscoreable
 
 EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
@@ -148,15 +149,21 @@ def _first_nonempty(fields: dict, *tags: str) -> str:
     return ""
 
 
-def _year_from_medline(fields: dict) -> int | None:
-    """Publication year. DP is canonical; DEP (epub date, often YYYYMMDD) is the
-    electronic-only fallback."""
-    for tag in ("DP", "DEP"):
-        for v in fields.get(tag, []):
-            m = re.search(r"(?:19|20)\d{2}", v)
-            if m:
-                return int(m.group())
-    return None
+def _year_from_medline(fields: dict) -> tuple[int | None, bool]:
+    """(publication year, came_from_DEP). DP is canonical; DEP (epub date, often
+    YYYYMMDD) is the electronic-only fallback. ``came_from_DEP`` is True when DP
+    was absent and the year came from DEP -- an epub-ahead-of-print signal the
+    field matcher uses to widen its year tolerance for a preprint->publication
+    gap on the SAME work."""
+    for v in fields.get("DP", []):
+        m = re.search(r"(?:19|20)\d{2}", v)
+        if m:
+            return int(m.group()), False
+    for v in fields.get("DEP", []):
+        m = re.search(r"(?:19|20)\d{2}", v)
+        if m:
+            return int(m.group()), True
+    return None, False
 
 
 def _parse_medline(text: str, pmid: str) -> RetrievedRecord:
@@ -181,7 +188,13 @@ def _parse_medline(text: str, pmid: str) -> RetrievedRecord:
 
     # A real record always carries a PMID; some carry a book title (BTI) or
     # transliterated title (TT) instead of TI. No PMID and no title => junk.
-    title = _first_nonempty(fields, "TI", "BTI", "TT")
+    ti = _first_nonempty(fields, "TI")
+    bti = _first_nonempty(fields, "BTI")
+    title = ti or bti or _first_nonempty(fields, "TT")
+    # A record whose only title is a BOOK title (BTI, no article-level TI) is a
+    # container, not the cited chapter -- title-matching a chapter claim against
+    # it is meaningless, so flag it for the UNSCOREABLE gate.
+    is_container = bool(bti) and not ti
     if not fields.get("PMID") and not title:
         return RetrievedRecord(resolved=False, pmid=pmid)
 
@@ -190,13 +203,16 @@ def _parse_medline(text: str, pmid: str) -> RetrievedRecord:
         authors = [a.split(",")[0].strip() for a in fields["FAU"]]
     authors += fields.get("CN", [])             # corporate/collective authors, raw
 
+    year, year_from_dep = _year_from_medline(fields)
     return RetrievedRecord(
         resolved=True,
         title=title,
         authors=[a for a in authors if a],
-        year=_year_from_medline(fields),
+        year=year,
         journal=_first_nonempty(fields, "TA", "JT"),
         pmid=(fields.get("PMID") or [pmid])[0],
+        is_container=is_container,
+        year_from_dep=year_from_dep,
     )
 
 
@@ -299,6 +315,60 @@ def fuzzy_biblio_lookup(ref: Reference, threshold: float = 85.0,
     return RetrievedRecord(resolved=False)
 
 
+def _year_disagreement(fields) -> bool:
+    """True when the years CONFIDENTLY disagree (year_match is False).
+
+    A year disagreement is direct wrong-reference evidence, but the confirmatory
+    boosts in ``match_score`` can lift the composite back over ``accept`` and bury
+    it: fixing the parser's author extraction adds +0.05, pushing a genuine
+    wrong-reference whose year disagrees (e.g. the 16639420 paper-series case,
+    0.8339) up to 0.8839 -- silently UN-flagged. Flagging on a year disagreement
+    regardless of the boosted composite closes that recall hole WITHOUT raising
+    ``accept`` (C1) and WITHOUT auto-clearing on agreement (C2). It only ever ADDS
+    a flag, so it cannot drop a genuine F2; None (can't-judge) never trips it.
+
+    Author disagreement is deliberately NOT handled here -- it is owned by the
+    opt-in author trip-wire below (with its own ``log.author_tripwire`` signal),
+    so that ``author_tripwire=False`` still fully opts out of author-based
+    flagging. Both penalty-bearing fields (author, year) are thus covered at a
+    boosted-over-accept score: author by the trip-wire, year here.
+    """
+    return fields.year_match is False
+
+
+def _override_quality(fields) -> bool:
+    """The strong-corroboration condition (mirrors biblio_match.match_score's
+    override gate): the two HIGH-ENTROPY fields -- first-author surname AND
+    journal -- both agree, and no field disagrees. This is the only corroboration
+    strong enough to let a sub-accept title be CLEARED; author-only or
+    year-only agreement is not (low entropy, collides across unrelated works)."""
+    if not (fields.author_match is True and fields.journal_match is True):
+        return False
+    return not any(v is False for v in (fields.author_match, fields.year_match,
+                                        fields.journal_match, fields.volume_match,
+                                        fields.pages_match))
+
+
+def _flag_decision(m, accept: float) -> bool:
+    """The F2-screen flag predicate, shared by the PMID and no-PMID paths.
+
+    Flag when ANY holds:
+      * the composite is below accept;
+      * the years confidently disagree (a boost may have buried it -- the 16639420
+        paper-series case after the parser author fix);
+      * the title is below accept and is NOT rescued by override-quality
+        corroboration -- so confirmatory boosts ALONE (e.g. the lone +0.05 author
+        boost the parser fix now adds on a sparse ref whose year+journal are
+        unparsed) cannot carry a sub-accept title over accept and silently clear a
+        genuine wrong-reference.
+    Every disjunct only ADDS a flag (recall-first, C1); none ever clears (C2). It
+    does not raise ``accept``: a title at/above accept still clears on its own.
+    """
+    return (m.score < accept
+            or _year_disagreement(m.fields)
+            or (m.title_sim < accept and not _override_quality(m.fields)))
+
+
 def compare_and_flag(ref: Reference, threshold: float = 85.0,
                      author_tripwire: bool = True,
                      session: requests.Session | None = None) -> bool:
@@ -319,11 +389,25 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
             # Nothing to search on -> genuinely unverifiable.
             log.notes = "No claimed PMID and no title; cannot attempt lookup."
             return False                   # decide() will set UNVERIFIABLE
+        # Claimed-side UNSCOREABLE (journal name / regulatory code in the title
+        # slot): a non-title carries no wrong-reference evidence, and there is
+        # nothing meaningful to search on. Route to the counted bucket.
+        bucket, reason = classify_unscoreable(ref.claimed, None)
+        if bucket:
+            log.unscoreable_reason = bucket
+            log.notes = f"UNSCOREABLE ({bucket}): {reason}"
+            return False                   # decide() -> UNSCOREABLE (dropped)
         retrieved = fuzzy_biblio_lookup(ref, threshold=threshold, session=session)
         ref.retrieved = retrieved
         log.pmid_present = False            # stays False; downstream = no-ID path
         log.noid_lookup_attempted = True
         if retrieved.resolved:
+            # Resolved-side UNSCOREABLE (placeholder / book-container record).
+            bucket, reason = classify_unscoreable(ref.claimed, retrieved)
+            if bucket:
+                log.unscoreable_reason = bucket
+                log.notes = f"UNSCOREABLE ({bucket}): {reason}"
+                return False
             # Re-score claimed vs the chosen record with the structured matcher
             # (truncation-robust title + field agreement). title_similarity is
             # logged on the established 0..100 scale; match_score on 0..1.
@@ -332,7 +416,17 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
             log.match_score = m.score
             log.author_match = m.fields.author_match
             log.year_match = m.fields.year_match
-            if m.score >= accept:
+            log.journal_match = m.fields.journal_match
+            log.volume_match = m.fields.volume_match
+            log.pages_match = m.fields.pages_match
+            log.override_fired = m.override_fired
+            # Same screen predicate as the PMID path (a confident year
+            # disagreement or a boost-only sub-accept clear escalates rather than
+            # clearing). No-PMID can never become F2, so a flag here only routes
+            # to human_review -- but keeping the two paths consistent avoids
+            # auto-clearing a year-mismatched pair on one path and flagging it on
+            # the other.
+            if not _flag_decision(m, accept):
                 # Reference exists and points to the right work as far as we can
                 # tell -> cleared (was_flagged=False in decide()).
                 log.mismatch_flagged = False
@@ -342,7 +436,8 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
             # Found a candidate but it doesn't match well -> possible wrong ref.
             log.mismatch_flagged = True
             log.notes = (f"No PMID; bibliographic lookup found a candidate but "
-                         f"match_score {m.score:.2f} < {accept:.2f}.")
+                         f"it did not cleanly match (match_score {m.score:.2f}, "
+                         f"title_sim {m.title_sim:.2f}).")
             return True                    # continue to LLM filter + confirm path
         # Not found confidently -> do NOT label F1; escalate.
         log.mismatch_flagged = True
@@ -356,6 +451,16 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
         log.notes = "claimed PMID did not resolve"
         return True
 
+    # UNSCOREABLE gate: a non-title / placeholder / book-container pair carries
+    # no evidence about whether the PMID points to the wrong paper. Route it to
+    # the counted bucket BEFORE scoring, so the strong-corroboration override
+    # cannot silently floor it to ``accept`` and clear it (the 30539090 path).
+    bucket, reason = classify_unscoreable(ref.claimed, ref.retrieved)
+    if bucket:
+        log.unscoreable_reason = bucket
+        log.notes = f"UNSCOREABLE ({bucket}): {reason}"
+        return False                       # decide() -> UNSCOREABLE (dropped)
+
     # Structured match: containment-aware title similarity + field agreement.
     # A truncated-but-correct title whose author/year/journal agree now scores
     # HIGH (field boosts compensate) and is not flagged; a PMID resolving to an
@@ -366,11 +471,27 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
     log.match_score = m.score
     log.author_match = m.fields.author_match
     log.year_match = m.fields.year_match
+    log.journal_match = m.fields.journal_match
+    log.volume_match = m.fields.volume_match
+    log.pages_match = m.fields.pages_match
+    log.override_fired = m.override_fired
 
-    flagged = m.score < accept
+    # Flag via the shared screen predicate (low composite, buried year
+    # disagreement, or a sub-accept title not rescued by override-quality
+    # corroboration). Recall-first; never raises accept, never auto-clears.
+    flagged = _flag_decision(m, accept)
     if flagged:
-        log.notes = (f"match_score {m.score:.2f} < {accept:.2f} "
-                     f"(title_sim {m.title_sim:.2f})")
+        if m.score < accept:
+            log.notes = (f"match_score {m.score:.2f} < {accept:.2f} "
+                         f"(title_sim {m.title_sim:.2f})")
+        elif _year_disagreement(m.fields):
+            log.notes = (f"match_score {m.score:.2f} >= {accept:.2f} but the "
+                         f"years confidently disagree (year_match=False); "
+                         f"wrong-reference evidence the boosts masked.")
+        else:
+            log.notes = (f"title_sim {m.title_sim:.2f} < {accept:.2f}; composite "
+                         f"{m.score:.2f} reached accept on confirmatory boosts "
+                         f"alone without author+journal corroboration.")
 
     # Trip-wire: title is similar enough to pass, but the claimed first author
     # is absent from the record the PMID resolves to -> recombination candidate.
