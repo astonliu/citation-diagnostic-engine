@@ -13,7 +13,7 @@ import time
 import requests
 from typing import Callable, Iterable
 
-from .schema import (Reference, write_jsonl, UNVERIFIABLE,
+from .schema import (Reference, write_jsonl, UNVERIFIABLE, UNSCOREABLE,
                      V_FORMATTING, V_UNCERTAIN)
 from .parser import iter_pmc_dir
 from .lookup import fetch_pubmed, compare_and_flag
@@ -21,6 +21,7 @@ from .llm_filter import llm_filter
 from .confirm import confirm
 from .decide import decide
 from .ratelimit import configure_ncbi
+from . import eval_report
 
 # Anthropic API errors worth retrying (transient); everything else fails fast.
 _RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
@@ -130,10 +131,18 @@ def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
                           author_tripwire=author_tripwire, session=session)
         counts[ref.label] = counts.get(ref.label, 0) + 1
         log_records.append(ref.to_log_record())
-        # unverifiable refs are dropped from the prediction set (no taxonomy label)
-        if ref.label != UNVERIFIABLE:
+        # unverifiable AND unscoreable refs are dropped from the prediction set
+        # (no taxonomy label); unscoreable is still counted + reported below.
+        if ref.label not in (UNVERIFIABLE, UNSCOREABLE):
             prediction_records.append(ref.to_prediction().to_dict())
 
     write_jsonl(prediction_records, out_dataset)
     write_jsonl(log_records, out_logs)
+    # F2 measurement layer: UNSCOREABLE buckets, evidence bands, base rate.
+    # Read-only; precision-vs-human is computed separately once adjudications
+    # exist (eval_report.summarize(log_records, gold=...)).
+    try:
+        print(eval_report.format_report(eval_report.summarize(log_records)))
+    except Exception as e:                            # noqa: BLE001 - reporting must never break a run
+        print(f"[eval-report-skip] {e}")
     return counts

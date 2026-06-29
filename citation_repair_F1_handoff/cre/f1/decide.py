@@ -9,13 +9,29 @@ Precision-first: anything ambiguous goes to human_review or cleared, never F1.
 from __future__ import annotations
 
 from .schema import (Reference, F1, F2, CLEARED, UNVERIFIABLE, HUMAN_REVIEW,
-                     V_FORMATTING, V_UNCERTAIN)
+                     UNSCOREABLE, V_FORMATTING, V_UNCERTAIN)
 from .confirm import found_anywhere, all_errored
 
 
 def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
            db_hits: dict | None, match_threshold: float = 85.0) -> Reference:
     log = ref.log
+
+    # UNSCOREABLE: the (claimed, resolved) pair is not a scoreable title
+    # comparison -- a non-title input (journal name / regulatory code), a
+    # placeholder ("[Not Available]"), or a book/container record cited as a
+    # chapter. It carries no wrong-reference evidence, so it is routed to a
+    # counted coverage bucket and EXCLUDED from the F2 numerator. Crucially this
+    # is checked BEFORE the `not was_flagged -> CLEARED` branch below, which would
+    # otherwise stamp it ACCURATE -- a silent miscount of a non-title as a
+    # correct citation.
+    if log.unscoreable_reason:
+        ref.label, ref.confidence = UNSCOREABLE, "HIGH"
+        ref.rationale = (f"Not a scoreable title comparison "
+                         f"({log.unscoreable_reason}); excluded from the F2 "
+                         f"numerator and reported as UNSCOREABLE.")
+        log.decided_by = "unscoreable"
+        return ref
 
     # No claimed PMID.
     if not log.pmid_present:
