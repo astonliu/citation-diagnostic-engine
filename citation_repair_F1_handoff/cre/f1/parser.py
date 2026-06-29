@@ -43,21 +43,72 @@ def _first(node, *paths):
 
 
 def _year_from(node) -> int | None:
-    y = _first(node, "year")
-    if y is not None and (t := _text(y)):
-        m = re.search(r"\d{4}", t)
-        if m:
-            return int(m.group())
-    return None
+    """The cited work's publication year, or None when ambiguous.
+
+    Reads <year> DIRECT children only (a nested access-date / conference year
+    never leaks in). Returns None -- the safe can't-judge value -- rather than a
+    guess when distinct 4-digit years disagree (multiple <year> children, or a
+    'YYYY-YYYY' range), since a confidently-WRONG written year manufactures a
+    spurious year disagreement in the matcher. A single distinct year is returned
+    as before."""
+    years: set[int] = set()
+    for y in node.findall("year"):
+        for m in re.findall(r"\d{4}", _text(y)):
+            years.add(int(m))
+    return next(iter(years)) if len(years) == 1 else None
+
+
+# person-group-type values whose <name>s are NOT the authors of the cited work.
+# These must be excluded so an editor/translator never leaks in as authors[0] --
+# the matcher reads authors[0] as the claimed first-author surname, and an editor
+# there manufactures a spurious author_match=False (the -0.15 penalty that turns
+# correct book-chapter citations into F2 false positives). JATS person-group-type
+# vocabulary; lowercased for a case-insensitive compare.
+_NON_AUTHOR_PERSON_GROUPS = {
+    "editor", "translator", "guest-editor", "transed", "assignee",
+    "inventor", "compiler", "allauthors-editor", "editors",
+}
+
+
+def _surnames_under(el) -> list[str]:
+    out = []
+    for nm in el.iter("name"):
+        sn = nm.find("surname")
+        if sn is not None and _text(sn):
+            out.append(_text(sn))
+    return out
 
 
 def _authors_from(node) -> list[str]:
-    surnames = []
-    for nm in node.iter("name"):
-        sn = nm.find("surname")
-        if sn is not None and _text(sn):
-            surnames.append(_text(sn))
-    return surnames
+    """First-listed AUTHORS of the cited work, in document order.
+
+    Collects <surname>s from author (and untyped) <person-group>s only, plus any
+    <collab> consortium name in those groups; editor/translator groups are
+    skipped. Falls back to every <name> in the citation when there is no
+    <person-group> at all, or when author-group filtering leaves nothing (e.g. an
+    edited book whose only listed people are editors -- recall-first: surface
+    those rather than nothing, since the matcher needs an authors[0] to compare).
+
+    Top-down only (no getparent()), so it works under both lxml and the stdlib
+    ElementTree fallback.
+    """
+    groups = list(node.iter("person-group"))
+    if not groups:
+        return _surnames_under(node)
+
+    authors: list[str] = []
+    for pg in groups:
+        ptype = (pg.get("person-group-type") or "").strip().lower()
+        if ptype in _NON_AUTHOR_PERSON_GROUPS:
+            continue
+        authors += _surnames_under(pg)
+        for col in pg.iter("collab"):
+            t = _text(col)
+            if t:
+                authors.append(t)
+    # Only non-author groups (editor-only edited book): better some signal than
+    # none. Returns the editor surnames -- the closest available author proxy.
+    return authors or _surnames_under(node)
 
 
 def _pub_id(node, id_type: str) -> str:

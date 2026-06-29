@@ -63,6 +63,7 @@ class MatchResult:
     title_sim: float                   # 0..1 title-only similarity
     fields: FieldAgreement
     record: Optional[RetrievedRecord] = None   # the candidate this scores
+    override_fired: bool = False       # strong-corroboration override floored the score
 
 
 @dataclass
@@ -218,14 +219,31 @@ def field_agreement(claimed: Claimed, cand: RetrievedRecord) -> FieldAgreement:
     if claimed_sn and cand.authors:
         fa.author_match = _surname_present(claimed_sn, cand.authors)
 
-    # year (+/- 1)
-    if claimed.year and cand.year:
-        fa.year_match = abs(int(claimed.year) - int(cand.year)) <= 1
-
-    # journal (bidirectional normalized containment)
+    # journal (bidirectional normalized containment) -- computed before year so
+    # the preprint year-tolerance below can require journal corroboration.
     cj, rj = _norm(claimed.journal), _norm(cand.journal)
     if cj and rj:
         fa.journal_match = (cj in rj) or (rj in cj)
+
+    # year: agree within +/-1. A 2-year gap is read as CAN'T-JUDGE (None, never a
+    # penalty) ONLY when the resolved year is epub/preprint-derived (year_from_dep)
+    # AND BOTH high-entropy fields -- author AND journal -- corroborate: the same
+    # work cited from its preprint and indexed at its later print year. Every other
+    # >1 gap stays a confident disagreement (False). Requiring author AND journal
+    # (not author alone) means this demotion only ever lets the strong-corroboration
+    # OVERRIDE fire (author+journal+no-disagreement), so its recall cost is a SUBSET
+    # of the already-documented, instrumented override residual -- it cannot touch a
+    # large-gap paper-series F2 (19-yr gap), a sparse ref (author not True), or a
+    # same-author-but-different-journal wrong paper.
+    if claimed.year and cand.year:
+        gap = abs(int(claimed.year) - int(cand.year))
+        if gap <= 1:
+            fa.year_match = True
+        elif (gap <= 2 and getattr(cand, "year_from_dep", False)
+              and fa.author_match is True and fa.journal_match is True):
+            fa.year_match = None
+        else:
+            fa.year_match = False
 
     # volume / pages (digits only)
     cv, rv = _digits(claimed.volume), _digits(cand.volume)
@@ -300,12 +318,15 @@ def match_score(claimed: Claimed, cand: RetrievedRecord,
     # those disagrees; ``disagree == 0`` additionally blocks a contradicting
     # year/volume/pages (same author+journal but year off by 5 -> likely a
     # different work, do not rescue).
-    if f.author_match is True and f.journal_match is True and disagree == 0:
-        score = max(score, accept)
+    override_fired = (f.author_match is True and f.journal_match is True
+                      and disagree == 0 and score < accept)
+    if override_fired:
+        score = accept
     # -----------------------------------------------------------------------
 
     score = round(max(0.0, min(1.0, score)), 4)   # round: avoid float knife-edges
-    return MatchResult(score=score, title_sim=round(ts, 4), fields=f, record=cand)
+    return MatchResult(score=score, title_sim=round(ts, 4), fields=f, record=cand,
+                       override_fired=override_fired)
 
 
 def best_match(claimed: Claimed, candidates: list[RetrievedRecord],
