@@ -75,6 +75,12 @@ class BestMatch:
     runners_up: list = field(default_factory=list)
 
 
+# Flag verdicts (priority bands for the human/LLM audit).
+VERDICT_MATCH        = "match"               # score >= accept: not flagged
+VERDICT_WRONG_PAPER  = "review_wrong_paper"  # flagged, HIGH priority (real-F2 signal)
+VERDICT_FORMATTING   = "review_formatting"   # flagged, LOW priority (likely same paper)
+
+
 # =====================================================================
 # Title scoring (containment-aware, so truncation doesn't tank the score)
 # =====================================================================
@@ -137,6 +143,42 @@ def trigram_containment(a: str, b: str) -> float:
     inter = len(ta & tb)
     smaller = min(len(ta), len(tb))
     return inter / smaller if smaller else 0.0
+
+
+# Resolved-side placeholders PubMed emits when a record has no usable title.
+_NONTITLE_PHRASES = {
+    "not available", "no title available", "no title",
+    "title not available", "untitled",
+}
+
+
+def is_scoreable_title(title: str, journal: str = "") -> bool:
+    """Whether ``title`` is usable for an F2 title comparison.
+
+    Returns False (caller buckets UNSCOREABLE, never auto-flagged) when the
+    title is not really a title:
+      * empty / whitespace-only;
+      * a PubMed '[Not Available]' placeholder;
+      * the journal name parsed into the title slot (normalized title equals or
+        is near-identical to the journal field by trigram containment >= 0.92).
+
+    This is NOT precision-by-suppression: a journal name or missing title
+    carries no evidence about whether the cited PMID is the wrong paper.
+    Excluded references are reported as a named coverage bucket, not hidden.
+    Apply symmetrically to both written and resolved titles before scoring."""
+    nt = normalize_title(title)
+    if not nt:
+        return False
+    if nt in _NONTITLE_PHRASES:
+        return False
+    if journal:
+        nj = normalize_title(journal)
+        if nj:
+            if nt == nj:
+                return False
+            if min(len(nt), len(nj)) >= 8 and trigram_containment(nt, nj) >= 0.92:
+                return False
+    return True
 
 
 def jaro_winkler(a: str, b: str) -> float:
@@ -327,6 +369,38 @@ def match_score(claimed: Claimed, cand: RetrievedRecord,
     score = round(max(0.0, min(1.0, score)), 4)   # round: avoid float knife-edges
     return MatchResult(score=score, title_sim=round(ts, 4), fields=f, record=cand,
                        override_fired=override_fired)
+
+
+def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
+                 accept: float = 0.85) -> tuple[str, MatchResult]:
+    """Classify a (claimed, resolved-candidate) pair into a priority band.
+
+    Returns (verdict, MatchResult). Does NOT change the flagging decision --
+    everything below ``accept`` is still surfaced for review (recall unchanged).
+    It only ranks the flagged pool so the audit reaches genuine F2 candidates
+    first:
+
+      VERDICT_MATCH          score >= accept.
+      VERDICT_WRONG_PAPER    below accept AND (author or year disagrees, or no
+                             field agrees at all): the wrong-paper signal, the
+                             audit's high-precision band.
+      VERDICT_FORMATTING     below accept but at least one field agrees and none
+                             disagrees: low title similarity is most likely a
+                             formatting/translation variant of the SAME paper.
+                             Low priority, never auto-cleared.
+
+    Compute F2 precision primarily over VERDICT_WRONG_PAPER.
+    Call is_scoreable_title on both titles before calling this."""
+    m = match_score(claimed, cand, accept=accept)
+    if m.score >= accept:
+        return VERDICT_MATCH, m
+    f = m.fields
+    disagree  = (f.author_match is False) or (f.year_match is False)
+    any_agree = ((f.author_match is True) or (f.year_match is True)
+                 or (f.journal_match is True))
+    if disagree or not any_agree:
+        return VERDICT_WRONG_PAPER, m
+    return VERDICT_FORMATTING, m
 
 
 def best_match(claimed: Claimed, candidates: list[RetrievedRecord],
