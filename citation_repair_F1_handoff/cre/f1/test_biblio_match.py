@@ -25,13 +25,26 @@ from cre.f1 import biblio_match as bm
 from cre.f1 import biblio_rerank, lookup, run, ratelimit, confirm
 from cre.f1 import schema as S
 from cre.f1.biblio_match import (match_score, best_match, field_agreement,
-                                 title_sim, retrieve_candidates)
+                                 title_sim, retrieve_candidates,
+                                 is_scoreable_title, flag_verdict,
+                                 VERDICT_MATCH, VERDICT_WRONG_PAPER,
+                                 VERDICT_FORMATTING)
 from cre.f1.lookup import compare_and_flag
 from cre.f1.run import process_reference
 from cre.f1.schema import Reference, ClaimedRef, RetrievedRecord
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures")
 ACCEPT = 0.85
+
+
+def _make_claimed(title, authors, year, journal):
+    return ClaimedRef(title=title, authors=authors, year=year, journal=journal,
+                      volume="", pages="", claimed_pmid="")
+
+
+def _make_record(title, authors, year, journal):
+    return RetrievedRecord(resolved=True, title=title, authors=authors, year=year,
+                           journal=journal, pmid="", doi="", volume="", pages="")
 
 
 def _fx(name: str) -> dict:
@@ -418,3 +431,42 @@ def test_override_threshold_tracks_accept():
         authors=["K Schmidt"], year=2001, journal="Z Gastroenterol",
         pmid="", doi="", volume="", pages="")
     assert match_score(claimed, cand, accept=0.90).score >= 0.90
+
+
+# ── is_scoreable_title ────────────────────────────────────────────────────────
+
+def test_is_scoreable_title_rejects_empty():
+    assert is_scoreable_title("") is False
+
+def test_is_scoreable_title_rejects_not_available():
+    assert is_scoreable_title("[Not Available].", "J Foo") is False
+
+def test_is_scoreable_title_rejects_journal_as_title():
+    j = "Zhongguo Zhong yao za zhi = Zhongguo zhongyao zazhi"
+    assert is_scoreable_title(j, j) is False
+
+def test_is_scoreable_title_accepts_real_title():
+    assert is_scoreable_title("Acute liver failure", "Hepatology") is True
+
+# ── flag_verdict bands ────────────────────────────────────────────────────────
+
+def test_flag_verdict_match_band():
+    """Word-for-word same title + corroborating fields -> VERDICT_MATCH."""
+    c = _make_claimed("Metamorphic proteins", ["Murzin"], 2008, "Biochemistry")
+    r = _make_record("Metamorphic proteins", ["Murzin"], 2008, "Biochemistry")
+    v, m = flag_verdict(c, r)
+    assert v == VERDICT_MATCH
+
+def test_flag_verdict_wrong_paper_band():
+    """Different paper, author disagrees -> VERDICT_WRONG_PAPER."""
+    c = _make_claimed("Disseminated varicella infection", ["Smith"], 2019, "")
+    r = _make_record("Purple Urine after Catheterization", ["Placais"], 2019, "")
+    v, m = flag_verdict(c, r)
+    assert v == VERDICT_WRONG_PAPER
+
+def test_flag_verdict_formatting_band():
+    """Cross-language same paper, author+year agree, no journal -> VERDICT_FORMATTING."""
+    c = _make_claimed("Haufigkeit und Verteilung von Schlafproblemen", ["Schlack"], 2013, "")
+    r = _make_record("Frequency and distribution of sleep problems", ["Schlack"], 2013, "")
+    v, m = flag_verdict(c, r)
+    assert v == VERDICT_FORMATTING

@@ -28,6 +28,8 @@ from .biblio_match import (
     normalize_title, title_sim, trigram_jaccard, trigram_containment,
     jaro_winkler, field_agreement, match_score, best_match, retrieve_candidates,
     FieldAgreement, MatchResult, BestMatch,
+    is_scoreable_title, flag_verdict,
+    VERDICT_MATCH, VERDICT_WRONG_PAPER, VERDICT_FORMATTING,
 )
 from .biblio_rerank import rerank_stage2
 from .llm_filter import llm_filter, build_prompt, parse_verdict
@@ -51,6 +53,8 @@ __all__ = [
     "normalize_title", "title_sim", "trigram_jaccard", "trigram_containment",
     "jaro_winkler", "field_agreement", "match_score", "best_match",
     "retrieve_candidates", "FieldAgreement", "MatchResult", "BestMatch",
+    "is_scoreable_title", "flag_verdict",
+    "VERDICT_MATCH", "VERDICT_WRONG_PAPER", "VERDICT_FORMATTING",
     "rerank_stage2",
     "llm_filter", "build_prompt",
     "parse_verdict", "confirm_refs", "found_anywhere", "all_errored",
