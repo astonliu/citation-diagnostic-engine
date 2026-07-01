@@ -71,11 +71,29 @@ _NON_AUTHOR_PERSON_GROUPS = {
 
 
 def _surnames_under(el) -> list[str]:
-    out = []
-    for nm in el.iter("name"):
-        sn = nm.find("surname")
-        if sn is not None and _text(sn):
-            out.append(_text(sn))
+    """Surnames of all contributors under ``el``, in document order.
+
+    Reads a <surname> from BOTH <name> and <string-name> contributor elements:
+    JATS mixed-citation reference lists format contributors either way, and refs
+    that use <string-name><surname> would otherwise lose their author entirely
+    (author_match -> None -> a genuine wrong-paper mis-bands, e.g. 31665581).
+
+    De-duped by the <surname> element's identity so a contributor wrapped as
+    <string-name><name><surname> (rare/malformed nesting) is counted once; order
+    follows the surname's document position. For a pure <name><surname> ref this
+    yields exactly the previous result (same surnames, same order)."""
+    out: list[str] = []
+    seen: set[int] = set()
+    for node in el.iter():
+        if _localname(node.tag) not in ("name", "string-name"):
+            continue
+        sn = node.find("surname")           # direct-child surname only
+        if sn is None or id(sn) in seen:
+            continue
+        txt = _text(sn)
+        if txt:
+            seen.add(id(sn))
+            out.append(txt)
     return out
 
 

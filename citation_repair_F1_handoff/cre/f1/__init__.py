@@ -24,13 +24,15 @@ from .lookup import (fetch_pubmed, compare_and_flag, title_similarity,
                      fuzzy_biblio_lookup)
 from .unscoreable import classify_unscoreable
 from .eval_report import (summarize as eval_summarize, band_of, wilson_ci,
-                          format_report, build_f2_record)
+                          format_report, build_f2_record,
+                          high_band_rate_of_scoreable, assert_f2_fixes_loaded)
 from .biblio_match import (
     normalize_title, title_sim, trigram_jaccard, trigram_containment,
     jaro_winkler, field_agreement, match_score, best_match, retrieve_candidates,
     FieldAgreement, MatchResult, BestMatch,
     is_scoreable_title, flag_verdict,
     VERDICT_MATCH, VERDICT_WRONG_PAPER, VERDICT_FORMATTING,
+    VERDICT_SAME_WORK_VARIANT, SAME_WORK_TITLE_SIM_MIN,
 )
 from .biblio_rerank import rerank_stage2
 from .llm_filter import llm_filter, build_prompt, parse_verdict
@@ -51,11 +53,13 @@ __all__ = [
     "compare_and_flag", "title_similarity", "fuzzy_biblio_lookup",
     "classify_unscoreable",
     "eval_summarize", "band_of", "wilson_ci", "format_report", "build_f2_record",
+    "high_band_rate_of_scoreable", "assert_f2_fixes_loaded",
     "normalize_title", "title_sim", "trigram_jaccard", "trigram_containment",
     "jaro_winkler", "field_agreement", "match_score", "best_match",
     "retrieve_candidates", "FieldAgreement", "MatchResult", "BestMatch",
     "is_scoreable_title", "flag_verdict",
     "VERDICT_MATCH", "VERDICT_WRONG_PAPER", "VERDICT_FORMATTING",
+    "VERDICT_SAME_WORK_VARIANT", "SAME_WORK_TITLE_SIM_MIN",
     "rerank_stage2",
     "llm_filter", "build_prompt",
     "parse_verdict", "confirm_refs", "found_anywhere", "all_errored",

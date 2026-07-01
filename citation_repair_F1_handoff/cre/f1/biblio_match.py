@@ -79,6 +79,15 @@ class BestMatch:
 VERDICT_MATCH        = "match"               # score >= accept: not flagged
 VERDICT_WRONG_PAPER  = "review_wrong_paper"  # flagged, HIGH priority (real-F2 signal)
 VERDICT_FORMATTING   = "review_formatting"   # flagged, LOW priority (likely same paper)
+VERDICT_SAME_WORK_VARIANT = "review_same_work_variant"  # (near-)identical title,
+#   author/year drift: the PMID points at the SAME work (revision / citing-side
+#   metadata drift), NOT a wrong reference. Audited, but excluded from the F2 count.
+
+# An (near-)identical title means the identifier resolves to the SAME work, so a
+# field disagreement on it is a same-work variant, not a wrong paper. Title
+# similarity alone gates this -- source-agnostic (no StatPearls / journal
+# allowlist).
+SAME_WORK_TITLE_SIM_MIN = 0.95
 
 
 # =====================================================================
@@ -420,7 +429,14 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     It only ranks the flagged pool so the audit reaches genuine F2 candidates
     first:
 
-      VERDICT_MATCH          score >= accept.
+      VERDICT_MATCH               score >= accept.
+      VERDICT_SAME_WORK_VARIANT   below accept, title (near-)identical
+                             (title_sim >= SAME_WORK_TITLE_SIM_MIN) yet author or
+                             year CONFIDENTLY disagrees: the identifier points at
+                             the SAME work, so this is a revision / citing-side
+                             metadata-drift signature, NOT a wrong reference.
+                             Checked BEFORE the wrong-paper branch; audited but
+                             excluded from the F2 count.
       VERDICT_WRONG_PAPER    below accept AND (author or year disagrees, or no
                              field agrees at all): the wrong-paper signal, the
                              audit's high-precision band.
@@ -432,13 +448,30 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     Compute F2 precision primarily over VERDICT_WRONG_PAPER.
     Call is_scoreable_title on both titles before calling this."""
     m = match_score(claimed, cand, accept=accept)
+    f = m.fields
+    # Tri-state: only a REAL disagreement (is False) counts; None (unparsed) does
+    # not. A confident author/year disagreement.
+    disagree = (f.author_match is False) or (f.year_match is False)
+    # SAME_WORK_VARIANT quarantine -- checked FIRST. A near-identical title means
+    # the PMID resolves to the same work, so author/year drift on it is a
+    # revision / metadata-drift signature, not wrong-paper evidence. Requires a
+    # real disagreement (so an unparsed-field ``None`` never diverts).
+    if m.title_sim >= SAME_WORK_TITLE_SIM_MIN and disagree:
+        return VERDICT_SAME_WORK_VARIANT, m
+    # A confident disagreement on a NON-identical title is wrong-paper evidence
+    # and MUST stay in the HIGH band even when confirmatory field boosts lifted
+    # the composite over ``accept`` -- the Defect-A author fix can do exactly that
+    # to a genuine F2 (16639420: +0.05 for the now-parsed matching author pushes
+    # its year-mismatched score past accept). Mirrors lookup.compare_and_flag's
+    # flag rule; guarantees C1 (never drop a genuine wrong-paper from HIGH).
+    if disagree:
+        return VERDICT_WRONG_PAPER, m
+    # No confident disagreement below the same-work threshold.
     if m.score >= accept:
         return VERDICT_MATCH, m
-    f = m.fields
-    disagree  = (f.author_match is False) or (f.year_match is False)
     any_agree = ((f.author_match is True) or (f.year_match is True)
                  or (f.journal_match is True))
-    if disagree or not any_agree:
+    if not any_agree:
         return VERDICT_WRONG_PAPER, m
     return VERDICT_FORMATTING, m
 
