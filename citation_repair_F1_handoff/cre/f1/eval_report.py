@@ -27,7 +27,8 @@ from collections import Counter
 from typing import Optional
 
 from .schema import F1, F2, UNVERIFIABLE, UNSCOREABLE, ClaimedRef, RetrievedRecord
-from .biblio_match import match_score, flag_verdict, VERDICT_MATCH
+from .biblio_match import (match_score, flag_verdict, VERDICT_MATCH,
+                           VERDICT_WRONG_PAPER, VERDICT_SAME_WORK_VARIANT)
 
 
 # =====================================================================
@@ -290,3 +291,65 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
         "resolved_year_from_dep": bool(getattr(resolved, "year_from_dep", False)),
         "verdict": verdict,
     }
+
+
+# =====================================================================
+# HIGH-band F2 rate (verdict-based; SAME_WORK_VARIANT quarantined)
+# =====================================================================
+def high_band_rate_of_scoreable(records: list[dict]) -> dict:
+    """Rate of the HIGH F2-candidate band among scoreable records.
+
+    HIGH band = verdict ``review_wrong_paper`` (the wrong-paper pool a human
+    audits). ``review_same_work_variant`` rows are QUARANTINED -- excluded from
+    BOTH the numerator and the denominator: an (near-)identical title means the
+    identifier resolves to the same work, so it is neither an F2 candidate nor
+    part of the scoreable-for-F2 frame. VERDICT_MATCH / VERDICT_FORMATTING remain
+    in the denominator (they are scoreable, just not HIGH).
+
+    ``records`` are ``build_f2_record`` dicts (each carries a ``verdict``).
+    Returns the HIGH count, the denominator, the number of quarantined rows, and
+    the rate (None on an empty frame)."""
+    scoreable = [r for r in records if r.get("verdict")]
+    frame = [r for r in scoreable
+             if r.get("verdict") != VERDICT_SAME_WORK_VARIANT]
+    high = sum(1 for r in frame if r.get("verdict") == VERDICT_WRONG_PAPER)
+    n = len(frame)
+    return {
+        "flagged_f2_high": high,
+        "denominator_scoreable": n,
+        "same_work_variant_excluded": len(scoreable) - n,
+        "high_band_rate_of_scoreable": (high / n) if n else None,
+    }
+
+
+# =====================================================================
+# Stale-module guard (call before a v3 run)
+# =====================================================================
+def assert_f2_fixes_loaded() -> None:
+    """Fail LOUD and halt if either F2 revision fix is not the code actually
+    loaded -- the backstop against a stale ``sys.modules`` / stale-checkout run
+    (the module silently runs old code). Call at the top of the v3 runner.
+
+    Checks: (Defect B) ``biblio_match`` exposes ``SAME_WORK_TITLE_SIM_MIN == 0.95``
+    and the ``review_same_work_variant`` verdict; (Defect A) the parser extracts a
+    ``<string-name><surname>`` author from a tiny inline fixture."""
+    from . import biblio_match as bm
+    if getattr(bm, "SAME_WORK_TITLE_SIM_MIN", None) != 0.95:
+        raise RuntimeError("STALE MODULE: biblio_match.SAME_WORK_TITLE_SIM_MIN "
+                           "missing or != 0.95 -- Defect B fix not loaded.")
+    if getattr(bm, "VERDICT_SAME_WORK_VARIANT", None) != "review_same_work_variant":
+        raise RuntimeError("STALE MODULE: biblio_match.VERDICT_SAME_WORK_VARIANT "
+                           "missing -- Defect B fix not loaded.")
+    from .parser import _authors_from
+    try:
+        from lxml import etree
+    except ImportError:                       # pragma: no cover - stdlib fallback
+        import xml.etree.ElementTree as etree
+    el = etree.fromstring(
+        b"<element-citation><string-name><surname>Pannu</surname></string-name>"
+        b"<article-title>t</article-title></element-citation>")
+    authors = _authors_from(el)
+    if not authors or authors[0] != "Pannu":
+        raise RuntimeError("STALE MODULE: parser does not extract "
+                           f"<string-name><surname> -- Defect A fix not loaded; "
+                           f"got {authors!r}.")
