@@ -36,6 +36,7 @@ from typing import Iterable, Optional, Tuple
 
 from .schema import ClaimedRef, RetrievedRecord
 from .parser import iter_pmc_dir
+from .biblio_match import VERDICT_UNSCOREABLE
 from .eval_report import (build_f2_record, high_band_rate_of_scoreable,
                           assert_f2_fixes_loaded)
 
@@ -99,11 +100,23 @@ def _write_run(records: list, *, out_dir: str, out_prefix: str, version: str,
 # =====================================================================
 # Offline re-band from cache (F2_V3_1 -- no re-fetch)
 # =====================================================================
-def _retrieved_from_cache(rec: dict) -> RetrievedRecord:
-    """Reconstruct a ``RetrievedRecord`` from one resolved-cache line, keeping
-    only real RetrievedRecord fields (envelope keys such as ``src_pmcid`` /
-    ``claimed_pmid`` are ignored, so an enriched cache line never TypeErrors)."""
-    return RetrievedRecord(**{k: v for k, v in rec.items()
+def _retrieved_from_cache(line: dict) -> RetrievedRecord:
+    """Reconstruct a ``RetrievedRecord`` from one resolved-cache line.
+
+    The RetrievedRecord fields live in a NESTED ``"rec"`` sub-object -- the cache
+    envelope is ``{"pmid": ..., "rec": {resolved, title, authors, year, journal,
+    doi, volume, pages, is_container, year_from_dep}}`` -- so descend into it.
+    Fall back to the top-level object when ``rec`` is absent, so an un-enveloped
+    (flat) line still reconstructs. Keeps only real RetrievedRecord fields, so
+    envelope keys (pmid, src_pmcid, ...) are ignored and never TypeError.
+
+    Reading the wrong level would silently yield ``resolved=False`` + empty title
+    on every row (they carry no RetrievedRecord fields), so this descent is
+    load-bearing; ``reband_from_cache`` also guards against it before writing."""
+    fields = line.get("rec")
+    if not isinstance(fields, dict):
+        fields = line
+    return RetrievedRecord(**{k: v for k, v in fields.items()
                               if k in _RETRIEVED_FIELDS})
 
 
@@ -129,19 +142,21 @@ def index_claimed_from_xml_dir(xml_dir: str) -> dict:
 def load_resolved_cache(resolved_cache_path: str, *, src_pmcid_key: str = "src_pmcid",
                         pmid_key: str = "pmid") -> list:
     """Read the resolved-cache JSONL. Each line yields ``(src_pmcid, pmid,
-    RetrievedRecord)``: ``pmid`` comes from ``pmid_key`` (falling back to the
-    reconstructed record's ``.pmid``); ``src_pmcid`` from ``src_pmcid_key`` when
-    present, else ``""`` (the join then degrades to PMID-only)."""
+    RetrievedRecord)``: the RetrievedRecord is reconstructed from the line's nested
+    ``"rec"`` sub-object (see ``_retrieved_from_cache``); ``pmid`` comes from the
+    top-level ``pmid_key`` (falling back to the reconstructed record's ``.pmid``);
+    ``src_pmcid`` from ``src_pmcid_key`` when present, else ``""`` (the join then
+    degrades to PMID-only)."""
     out = []
     with open(resolved_cache_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
                 continue
-            rec = json.loads(line)
-            resolved = _retrieved_from_cache(rec)
-            pmid = str(rec.get(pmid_key) or resolved.pmid or "").strip()
-            src_pmcid = str(rec.get(src_pmcid_key) or "").strip()
+            env = json.loads(raw)                 # the whole line envelope
+            resolved = _retrieved_from_cache(env)  # descends into env["rec"]
+            pmid = str(env.get(pmid_key) or resolved.pmid or "").strip()
+            src_pmcid = str(env.get(src_pmcid_key) or "").strip()
             out.append((src_pmcid, pmid, resolved))
     return out
 
@@ -156,13 +171,20 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
     ``<prefix>_seed7_<version>.*`` (default ``v3_1``); refuses to target a frozen
     version (v2/v3 are preserved, never overwritten).
 
+    Cache format: each resolved-cache line is an envelope
+    ``{"pmid": ..., "rec": {resolved, title, authors, ...}}``; the RetrievedRecord
+    is reconstructed from the nested ``"rec"`` (see ``_retrieved_from_cache``).
+
     Join: the resolved cache is joined to the parsed claimed refs on
     ``(src_pmcid, claimed_pmid)``. When a cache line has no ``src_pmcid``, the join
     falls back to PMID-only and is accepted ONLY when that PMID is unique across
     the parsed frame; an ambiguous PMID-only line (same PMID in >1 source paper)
-    is dropped and counted, never silently mis-joined. Both fixes ride through
-    ``build_f2_record``: the UNSCOREABLE gate (Bug 1) and the strengthened Unicode
-    normalization (Bug 2).
+    is dropped and counted, never silently mis-joined. A cache line that DOES carry
+    a ``src_pmcid`` joins ONLY on its exact key -- a present-but-unmatched
+    ``src_pmcid`` is dropped as unmatched, never re-joined to another paper. Both
+    fixes ride through ``build_f2_record``: the UNSCOREABLE gate (Bug 1) and the
+    strengthened Unicode normalization (Bug 2). Before writing, a guard ABORTS if
+    >50% of scoreable rows have an empty resolved_title (a broken reconstruction).
 
     Returns the run summary plus join diagnostics (``n_resolved_cache``,
     ``n_joined``, ``n_pmid_only_join``, ``n_ambiguous_dropped``,
@@ -216,6 +238,24 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
 
     records = [build_f2_record(pmid, s, c, r, accept=accept)
                for (pmid, s, c, r) in items]
+
+    # Pre-write reconstruction guard. If the resolved records were read from the
+    # wrong level (top-level instead of the nested "rec"), every row reconstructs
+    # to resolved=False + empty title and then bands as spurious wrong-paper. When
+    # >50% of the SCOREABLE (non-UNSCOREABLE) rows carry an empty resolved_title,
+    # the reconstruction/join is broken -- ABORT before writing a corrupt v3_1.
+    scoreable_recs = [r for r in records
+                      if r.get("verdict") != VERDICT_UNSCOREABLE]
+    n_empty_resolved = sum(1 for r in scoreable_recs
+                           if not (r.get("resolved_title") or "").strip())
+    if scoreable_recs and n_empty_resolved / len(scoreable_recs) > 0.5:
+        raise RuntimeError(
+            f"reband_from_cache: {n_empty_resolved}/{len(scoreable_recs)} scoreable "
+            f"rows have an EMPTY resolved_title (> 50%). The resolved cache almost "
+            f"certainly reconstructed from the wrong level -- RetrievedRecord fields "
+            f"live in the nested 'rec' sub-object of each line. Aborting before any "
+            f"write so a corrupt v3_1 is never emitted.")
+
     diag = {
         "n_resolved_cache": len(cache),
         "n_joined": len(items),
