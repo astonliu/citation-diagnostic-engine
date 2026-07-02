@@ -82,6 +82,11 @@ VERDICT_FORMATTING   = "review_formatting"   # flagged, LOW priority (likely sam
 VERDICT_SAME_WORK_VARIANT = "review_same_work_variant"  # (near-)identical title,
 #   author/year drift: the PMID points at the SAME work (revision / citing-side
 #   metadata drift), NOT a wrong reference. Audited, but excluded from the F2 count.
+VERDICT_UNSCOREABLE  = "unscoreable"         # not a scoreable title comparison
+#   (empty/placeholder title, journal-as-title, regulatory code, book-container):
+#   carries ZERO wrong-paper evidence. Named + counted, excluded from BOTH the HIGH
+#   count and the scoreable denominator -- mirrors decide()'s live-path treatment.
+#   Value matches schema.UNSCOREABLE on purpose (same concept, two label spaces).
 
 # An (near-)identical title means the identifier resolves to the SAME work, so a
 # field disagreement on it is a same-work variant, not a wrong paper. Title
@@ -106,6 +111,16 @@ _TITLE_PREFIX_RE = re.compile(
 # only to OFFER a de-prefixed title variant; never the sole representation.
 _LEADING_PREFIX_RE = re.compile(r"^[^.:]{1,80}?[.:]\s+(?=\S)")
 
+# Unicode dash / hyphen variants that must fold to ASCII '-' BEFORE the intra-token
+# hyphen collapse below. Without this fold a U+2010 HYPHEN in 'Topka‐Bielecka'
+# survives to the [^\w\s] step and becomes a SPACE (a word split -> 'topka
+# bielecka'), while the ASCII 'Topka-Bielecka' is collapsed to 'topkabielecka' --
+# so the SAME surname / title mis-compares (F2_V3_1 Bug 2). Folds U+2010..U+2015
+# (hyphen, non-breaking hyphen, figure dash, en dash, em dash, horizontal bar) and
+# U+2212 (minus sign). This is punctuation folding only -- it never widens matching.
+_DASH_RE = re.compile(
+    "[‐‑‒–—―−]")
+
 
 def normalize_title(t: str) -> str:
     """Lowercase, Unicode-fold (strip accents), drop punctuation, collapse
@@ -126,6 +141,11 @@ def normalize_title(t: str) -> str:
     s = unicodedata.normalize("NFKD", s)
     s = "".join(c for c in s if not unicodedata.combining(c))
     s = s.lower()
+    # fold Unicode dash/hyphen variants to ASCII '-' so the intra-token collapse
+    # below treats 'Topka‐Bielecka' (U+2010) identically to 'Topka-Bielecka'
+    # (F2_V3_1 Bug 2). Must precede the collapse: otherwise a Unicode dash reaches
+    # the [^\w\s] step and becomes a word-splitting space instead.
+    s = _DASH_RE.sub("-", s)
     # collapse intra-token hyphens in alphanumeric tokens so "t-rna" == "trna",
     # "pd-l2" == "pdl2" (chemical / gene / variant name formatting)
     s = re.sub(r"(?<=\w)-(?=\w)", "", s)

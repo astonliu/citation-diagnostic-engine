@@ -64,6 +64,10 @@ _GREEK = {
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _GREEK_RE = re.compile("|".join(map(re.escape, _GREEK)))
+# Unicode dash/hyphen variants folded to ASCII '-' (kept in step with
+# biblio_match.normalize_title; see _normalize step 4b). U+2010..U+2015 + U+2212.
+_DASH_RE = re.compile(
+    "[‐‑‒–—―−]")
 
 
 def _normalize(t: str) -> str:
@@ -97,6 +101,13 @@ def _normalize(t: str) -> str:
     # 4. fold diacritics / compatibility forms to ASCII
     t = unicodedata.normalize("NFKD", t)
     t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    # 4b. fold Unicode dash/hyphen variants to ASCII '-' (F2_V3_1 Bug 2). Here the
+    # next step turns every non-word char into a space, so a Unicode dash and an
+    # ASCII hyphen both become a space either way -- this fold is functionally a
+    # no-op for _normalize, kept only so this normalizer stays byte-for-byte in
+    # step with biblio_match.normalize_title (the fix's real site), where the
+    # intra-token hyphen collapse makes the fold load-bearing.
+    t = _DASH_RE.sub("-", t)
     # 5. existing behavior
     t = t.lower()
     t = re.sub(r"[^\w\s]", " ", t)
