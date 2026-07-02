@@ -394,9 +394,68 @@ def test_reband_present_but_unmatched_src_pmcid_not_counted_ambiguous(tmp_path):
 
 
 def test_reband_retrieved_reconstruction_ignores_envelope_keys(tmp_path):
-    # a resolved cache line with extra envelope keys must reconstruct cleanly.
+    # a FLAT (un-enveloped) cache line with extra envelope keys must reconstruct
+    # cleanly (top-level fallback when there is no nested "rec").
     from cre.f1.f2_run_v3 import _retrieved_from_cache
     rec = _retrieved_from_cache({"src_pmcid": "PMCx", "pmid": "5", "resolved": True,
                                  "title": "R", "authors": ["Z"], "year": 2001,
                                  "some_unknown_future_key": 42})
     assert rec.title == "R" and rec.pmid == "5" and rec.resolved is True
+
+
+def test_retrieved_from_cache_reads_nested_rec():
+    # the real cache envelope: {"pmid": ..., "rec": {RetrievedRecord fields}}.
+    # Reconstruction must DESCEND into "rec", not read the top level.
+    from cre.f1.f2_run_v3 import _retrieved_from_cache
+    line = {"pmid": "111", "rec": {
+        "resolved": True, "title": "Purple Urine after Catheterization",
+        "authors": ["Sabanis"], "year": 2019, "journal": "N Engl J Med",
+        "doi": "10.x/y", "volume": "12", "pages": "1-9",
+        "is_container": False, "year_from_dep": False, "pmid": "111"}}
+    r = _retrieved_from_cache(line)
+    assert r.resolved is True
+    assert r.title == "Purple Urine after Catheterization"
+    assert r.authors == ["Sabanis"]
+    assert r.year == 2019
+    assert r.journal == "N Engl J Med"
+    assert r.pmid == "111"
+    assert r.volume == "12" and r.pages == "1-9"
+
+
+def test_reband_with_nested_rec_envelope(tmp_path):
+    # full reband path against the REAL nested-"rec" cache format.
+    from cre.f1.f2_run_v3 import reband_from_cache
+    xml_dir = tmp_path / "xml"; xml_dir.mkdir()
+    _write_xml(str(xml_dir), "PMC0001", [
+        ("r1", "Disseminated varicella infection", "Pannu", 2019, "111")])
+    cache = tmp_path / "resolved.jsonl"
+    _write_cache(str(cache), [{"src_pmcid": "PMC0001", "pmid": "111", "rec": {
+        "resolved": True, "title": "Purple Urine after Catheterization",
+        "authors": ["Sabanis"], "year": 2019}}])
+    summary = reband_from_cache(str(xml_dir), str(cache), out_dir=str(tmp_path),
+                                version="v3_1")
+    recs = {json.loads(l)["pmid"]: json.loads(l)
+            for l in open(summary["records_path"])}
+    assert summary["n_joined"] == 1
+    assert recs["111"]["resolved_title"] == "Purple Urine after Catheterization"
+    assert recs["111"]["verdict"] == VERDICT_WRONG_PAPER
+    assert recs["111"]["resolved_first_author"] == "Sabanis"
+
+
+def test_reband_aborts_when_resolved_titles_mostly_empty(tmp_path):
+    # Pre-write guard: cache lines that carry NO RetrievedRecord fields (neither
+    # nested "rec" nor top-level) reconstruct to resolved=False + empty title, so
+    # every scoreable row lands wrong-paper with an empty resolved_title. The guard
+    # must ABORT before writing -- this is exactly the wrong-level-read failure.
+    from cre.f1.f2_run_v3 import reband_from_cache
+    xml_dir = tmp_path / "xml"; xml_dir.mkdir()
+    _write_xml(str(xml_dir), "PMC1", [
+        ("r1", "Claimed title one", "A", 2019, "111"),
+        ("r2", "Claimed title two", "B", 2019, "222")])
+    cache = tmp_path / "resolved.jsonl"
+    _write_cache(str(cache), [{"pmid": "111"}, {"pmid": "222"}])   # no rec, no fields
+    with pytest.raises(RuntimeError, match="resolved_title"):
+        reband_from_cache(str(xml_dir), str(cache), out_dir=str(tmp_path),
+                          version="v3_1")
+    # nothing written -- the abort precedes the write.
+    assert not (tmp_path / "f2_random_oa_seed7_v3_1.jsonl").exists()

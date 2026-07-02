@@ -84,12 +84,27 @@ with the currently-loaded fixes:
 - **Claimed side:** parse every `{DATA}/pmc_oa_xml/{src_pmcid}.xml` with the fixed
   parser; index each PMID-bearing ref's `ClaimedRef` by `(src_pmcid,
   claimed_pmid)` (`index_claimed_from_xml_dir`).
-- **Resolved side:** load `{DATA}/f2_resolved_cache_seed7_v3.jsonl`; reconstruct
-  `RetrievedRecord` from each line, ignoring envelope keys (`load_resolved_cache`
-  / `_retrieved_from_cache`).
+- **Resolved side:** load `{DATA}/f2_resolved_cache_seed7_v3.jsonl`. Each line is
+  an envelope `{"pmid": ..., "rec": {resolved, title, authors, year, journal, doi,
+  volume, pages, is_container, year_from_dep}}`; the `RetrievedRecord` is
+  reconstructed from the **nested `"rec"`** (descend into it — reading the top
+  level yields `resolved=False`/empty-title on every row). Un-enveloped flat lines
+  fall back to the top level (`load_resolved_cache` / `_retrieved_from_cache`).
 - **Join** on `(src_pmcid, claimed_pmid)`. A cache line with no `src_pmcid` falls
   back to a PMID-only join, accepted only when that PMID is unique across the
-  frame; an ambiguous PMID-only line is dropped and counted, never mis-joined.
+  frame; an ambiguous PMID-only line is dropped and counted, never mis-joined. A
+  line that *does* carry a `src_pmcid` joins ONLY on its exact key — a
+  present-but-unmatched `src_pmcid` is dropped as unmatched, never re-joined to a
+  different paper.
+- **Operational note:** the current cache envelope carries **no `src_pmcid`**, so
+  every line takes the PMID-only path. Any target PMID cited by >1 sampled source
+  paper is dropped as ambiguous (precision-safe, never mis-banded) — **watch
+  `n_ambiguous_dropped`** in the summary. If it is material, add `src_pmcid` to the
+  cache envelope (exact join) or fan out one banded record per (src_pmcid, PMID);
+  this pass does neither, to avoid a silent mis-join.
+- **Pre-write guard:** aborts if >50% of scoreable rows have an empty
+  `resolved_title` — the signature of a broken reconstruction (wrong-level read);
+  a corrupt v3_1 is never written.
 - Writes `*_seed7_v3_1.*`; **refuses** to target a frozen version (v2/v3 preserved)
   and calls `assert_f2_fixes_loaded()` (fail-loud stale-module guard) before any
   read/write. Summary carries join diagnostics (`n_resolved_cache`, `n_joined`,
@@ -105,13 +120,14 @@ to `main` until the ~28 HIGH rows are hand-audited.**
 
 ## Tests
 
-`cre/f1/test_f2_v3_1.py` (24 tests): UNSCOREABLE gate + schema uniformity + metric
+`cre/f1/test_f2_v3_1.py` (27 tests): UNSCOREABLE gate + schema uniformity + metric
 exclusion; the 28146066 mixed-citation shape; Unicode-dash author/title folding;
 the SAME_WORK threshold reached via dash-only difference; three regression guards
 staying HIGH; and the full `reband_from_cache` path (join, both fixes, v3
-preserved, v2/v3 refused, PMID-only fallback, ambiguous/unmatched drops, and the
-present-but-unmatched-`src_pmcid` never-mis-join guarantee). Full `cre.f1` suite
-green except the 5 pre-existing `anthropic`-SDK import failures in
+preserved, v2/v3 refused, PMID-only fallback, ambiguous/unmatched drops, the
+present-but-unmatched-`src_pmcid` never-mis-join guarantee, nested-`rec`
+reconstruction, and the >50%-empty-resolved-title pre-write abort). Full `cre.f1`
+suite green except the 5 pre-existing `anthropic`-SDK import failures in
 `test_live_paths.py` (environment-only; unrelated).
 
 An adversarial multi-agent review of this diff surfaced one real defect — the
