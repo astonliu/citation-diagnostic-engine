@@ -32,7 +32,7 @@ from .biblio_match import (
     FieldAgreement, MatchResult, BestMatch,
     is_scoreable_title, flag_verdict,
     VERDICT_MATCH, VERDICT_WRONG_PAPER, VERDICT_FORMATTING,
-    VERDICT_SAME_WORK_VARIANT, SAME_WORK_TITLE_SIM_MIN,
+    VERDICT_SAME_WORK_VARIANT, VERDICT_UNSCOREABLE, SAME_WORK_TITLE_SIM_MIN,
 )
 from .biblio_rerank import rerank_stage2
 from .llm_filter import llm_filter, build_prompt, parse_verdict
@@ -59,7 +59,7 @@ __all__ = [
     "retrieve_candidates", "FieldAgreement", "MatchResult", "BestMatch",
     "is_scoreable_title", "flag_verdict",
     "VERDICT_MATCH", "VERDICT_WRONG_PAPER", "VERDICT_FORMATTING",
-    "VERDICT_SAME_WORK_VARIANT", "SAME_WORK_TITLE_SIM_MIN",
+    "VERDICT_SAME_WORK_VARIANT", "VERDICT_UNSCOREABLE", "SAME_WORK_TITLE_SIM_MIN",
     "rerank_stage2",
     "llm_filter", "build_prompt",
     "parse_verdict", "confirm_refs", "found_anywhere", "all_errored",

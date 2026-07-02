@@ -28,7 +28,9 @@ from typing import Optional
 
 from .schema import F1, F2, UNVERIFIABLE, UNSCOREABLE, ClaimedRef, RetrievedRecord
 from .biblio_match import (match_score, flag_verdict, VERDICT_MATCH,
-                           VERDICT_WRONG_PAPER, VERDICT_SAME_WORK_VARIANT)
+                           VERDICT_WRONG_PAPER, VERDICT_SAME_WORK_VARIANT,
+                           VERDICT_UNSCOREABLE)
+from .unscoreable import classify_unscoreable
 
 
 # =====================================================================
@@ -243,7 +245,35 @@ _F2_RECORD_KEYS = (
     "written_first_author", "resolved_first_author", "written_journal",
     "resolved_journal", "written_volume", "resolved_volume", "written_pages",
     "resolved_pages", "resolved_year_from_dep", "verdict",
+    # F2_V3_1 Bug 1: the UNSCOREABLE bucket name, "" for scoreable rows. Present on
+    # every record so the schema stays uniform (re-bandable + JSON round-trips).
+    "unscoreable_reason",
 )
+
+
+def _raw_fields(pmid: str, src_pmcid: str, claimed: ClaimedRef,
+                resolved: RetrievedRecord) -> dict:
+    """The identity + raw-string fields shared by every F2 record (scoreable or
+    UNSCOREABLE). Kept in one place so the two build paths cannot drift apart."""
+    return {
+        "pmid": pmid,
+        "src_pmcid": src_pmcid,
+        "written_title": claimed.title,
+        "resolved_title": resolved.title,
+        "written_year": claimed.year,
+        "resolved_year": resolved.year,
+        "resolved": resolved.resolved,
+        # raw strings the verdicts were computed from (enable faithful re-banding)
+        "written_first_author":   claimed.authors[0] if claimed.authors else "",
+        "resolved_first_author":  resolved.authors[0] if resolved.authors else "",
+        "written_journal":        claimed.journal or "",
+        "resolved_journal":       resolved.journal or "",
+        "written_volume":         claimed.volume or "",
+        "resolved_volume":        resolved.volume or "",
+        "written_pages":          claimed.pages or "",
+        "resolved_pages":         resolved.pages or "",
+        "resolved_year_from_dep": bool(getattr(resolved, "year_from_dep", False)),
+    }
 
 
 def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
@@ -262,34 +292,43 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
     flag line); ``verdict`` is the priority band (match / wrong_paper /
     formatting). Both are derived from the single ``match_score`` call so they
     are mutually consistent.
+
+    UNSCOREABLE GATE (F2_V3_1 Bug 1): before scoring, the pair runs through the
+    SAME ``classify_unscoreable`` gate the live ``lookup.compare_and_flag`` path
+    applies. A non-title / placeholder / book-container / empty-title pair carries
+    ZERO wrong-paper evidence, so it is emitted with ``verdict=VERDICT_UNSCOREABLE``
+    and its bucket in ``unscoreable_reason``; its ``match_score``/``title_sim``/
+    field verdicts are left ``None`` (never fabricated to 0.0, which previously
+    banded 303 empty-title rows as maximal WRONG_PAPER). ``high_band_rate_of_
+    scoreable`` drops these from BOTH the HIGH count and the denominator, exactly
+    as ``decide()`` drops UNSCOREABLE on the live path.
     """
+    bucket, _reason = classify_unscoreable(claimed, resolved)
+    if bucket:
+        return {
+            **_raw_fields(pmid, src_pmcid, claimed, resolved),
+            "match_score": None,
+            "title_sim": None,
+            "author_match": None,
+            "year_match": None,
+            "journal_match": None,
+            "flag": None,                     # not a flag decision; it was gated out
+            "verdict": VERDICT_UNSCOREABLE,
+            "unscoreable_reason": bucket,
+        }
+
     m = match_score(claimed, resolved, accept=accept)
     verdict, _ = flag_verdict(claimed, resolved, accept=accept)
     return {
-        "pmid": pmid,
-        "src_pmcid": src_pmcid,
-        "written_title": claimed.title,
-        "resolved_title": resolved.title,
-        "written_year": claimed.year,
-        "resolved_year": resolved.year,
+        **_raw_fields(pmid, src_pmcid, claimed, resolved),
         "match_score": m.score,
         "title_sim": m.title_sim,
         "author_match": m.fields.author_match,
         "year_match": m.fields.year_match,
         "journal_match": m.fields.journal_match,
-        "resolved": resolved.resolved,
         "flag": m.score < accept,
-        # raw strings the verdicts were computed from (enable faithful re-banding)
-        "written_first_author":   claimed.authors[0] if claimed.authors else "",
-        "resolved_first_author":  resolved.authors[0] if resolved.authors else "",
-        "written_journal":        claimed.journal or "",
-        "resolved_journal":       resolved.journal or "",
-        "written_volume":         claimed.volume or "",
-        "resolved_volume":        resolved.volume or "",
-        "written_pages":          claimed.pages or "",
-        "resolved_pages":         resolved.pages or "",
-        "resolved_year_from_dep": bool(getattr(resolved, "year_from_dep", False)),
         "verdict": verdict,
+        "unscoreable_reason": "",
     }
 
 
@@ -303,13 +342,19 @@ def high_band_rate_of_scoreable(records: list[dict]) -> dict:
     audits). ``review_same_work_variant`` rows are QUARANTINED -- excluded from
     BOTH the numerator and the denominator: an (near-)identical title means the
     identifier resolves to the same work, so it is neither an F2 candidate nor
-    part of the scoreable-for-F2 frame. VERDICT_MATCH / VERDICT_FORMATTING remain
-    in the denominator (they are scoreable, just not HIGH).
+    part of the scoreable-for-F2 frame. ``unscoreable`` rows (F2_V3_1 Bug 1) are
+    likewise excluded from BOTH sides -- a non-title / placeholder / book-container
+    pair is not part of the scoreable-for-F2 frame at all. VERDICT_MATCH /
+    VERDICT_FORMATTING remain in the denominator (scoreable, just not HIGH).
 
     ``records`` are ``build_f2_record`` dicts (each carries a ``verdict``).
-    Returns the HIGH count, the denominator, the number of quarantined rows, and
-    the rate (None on an empty frame)."""
-    scoreable = [r for r in records if r.get("verdict")]
+    Returns the HIGH count, the denominator, the number of quarantined rows, the
+    number of UNSCOREABLE rows, and the rate (None on an empty frame)."""
+    unscoreable = sum(1 for r in records
+                      if r.get("verdict") == VERDICT_UNSCOREABLE)
+    # scoreable frame: has a verdict AND is not an UNSCOREABLE row.
+    scoreable = [r for r in records if r.get("verdict")
+                 and r.get("verdict") != VERDICT_UNSCOREABLE]
     frame = [r for r in scoreable
              if r.get("verdict") != VERDICT_SAME_WORK_VARIANT]
     high = sum(1 for r in frame if r.get("verdict") == VERDICT_WRONG_PAPER)
@@ -318,6 +363,7 @@ def high_band_rate_of_scoreable(records: list[dict]) -> dict:
         "flagged_f2_high": high,
         "denominator_scoreable": n,
         "same_work_variant_excluded": len(scoreable) - n,
+        "unscoreable_excluded": unscoreable,
         "high_band_rate_of_scoreable": (high / n) if n else None,
     }
 
