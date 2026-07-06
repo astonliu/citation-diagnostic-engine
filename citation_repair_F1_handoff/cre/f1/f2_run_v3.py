@@ -36,7 +36,8 @@ from typing import Iterable, Optional, Tuple
 
 from .schema import ClaimedRef, RetrievedRecord
 from .parser import iter_pmc_dir
-from .biblio_match import VERDICT_UNSCOREABLE
+from .biblio_match import (VERDICT_UNSCOREABLE, VERDICT_SAME_WORK_VARIANT,
+                           SAME_WORK_TITLE_SIM_MIN)
 from .eval_report import (build_f2_record, high_band_rate_of_scoreable,
                           assert_f2_fixes_loaded)
 
@@ -44,6 +45,12 @@ Item = Tuple[str, str, ClaimedRef, RetrievedRecord]
 
 # Output versions that are FROZEN and must never be overwritten by a re-band.
 _PRESERVED_VERSIONS = {"v2", "v3"}
+
+# F2_V3_3 audit: the SAME_WORK gate before v3.3 (0.95). A row that bands
+# review_same_work_variant now but sits in [SAME_WORK_TITLE_SIM_MIN, this) is one
+# that was review_wrong_paper (HIGH) at the old gate -- i.e. NEWLY quarantined by
+# the 0.95 -> 0.92 move. Surfaced in the reband summary so no row moves silently.
+_PRIOR_SAME_WORK_TITLE_SIM_MIN = 0.95
 
 # RetrievedRecord constructor field names -- used to reconstruct a record from a
 # cache line while ignoring envelope keys (src_pmcid, claimed_pmid, ...) that are
@@ -188,7 +195,10 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
 
     Returns the run summary plus join diagnostics (``n_resolved_cache``,
     ``n_joined``, ``n_pmid_only_join``, ``n_ambiguous_dropped``,
-    ``n_unmatched_dropped``)."""
+    ``n_unmatched_dropped``) and the F2_V3_3 audit list
+    ``same_work_newly_quarantined`` -- the PMIDs whose band changed from
+    review_wrong_paper (at the old 0.95 gate) to review_same_work_variant (at the
+    new 0.92 gate), so the threshold move can be audited row-by-row."""
     if version.lower() in _PRESERVED_VERSIONS:
         raise RuntimeError(
             f"reband_from_cache refuses to write a preserved version "
@@ -261,6 +271,20 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
             f"live in the nested 'rec' sub-object of each line. Aborting before any "
             f"write so a corrupt v3_1 is never emitted.")
 
+    # F2_V3_3 audit visibility: enumerate the rows that CHANGED band from
+    # review_wrong_paper (at the old 0.95 gate) to review_same_work_variant (at the
+    # new 0.92 gate) -- i.e. SAME_WORK_VARIANT rows whose title_sim sits in
+    # [SAME_WORK_TITLE_SIM_MIN, 0.95). Emitting the PMIDs lets the v3_3 output be
+    # diffed against v3.2 so no row is silently quarantined; these are surfaced for
+    # human audit, not assumed correct.
+    same_work_newly_quarantined = sorted(
+        str(r.get("pmid") or "")
+        for r in records
+        if r.get("verdict") == VERDICT_SAME_WORK_VARIANT
+        and r.get("title_sim") is not None
+        and SAME_WORK_TITLE_SIM_MIN <= r["title_sim"] < _PRIOR_SAME_WORK_TITLE_SIM_MIN
+    )
+
     diag = {
         "n_resolved_cache": len(cache),
         "n_joined": len(items),
@@ -268,6 +292,8 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
         "n_ambiguous_dropped": n_ambiguous,
         "n_unmatched_dropped": n_unmatched,
         "rebanded_from_cache": True,
+        "same_work_newly_quarantined": same_work_newly_quarantined,
+        "n_same_work_newly_quarantined": len(same_work_newly_quarantined),
     }
     return _write_run(records, out_dir=out_dir, out_prefix=out_prefix,
                       version=version, extra=diag)
