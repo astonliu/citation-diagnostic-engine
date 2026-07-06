@@ -90,8 +90,10 @@ def test_31665581_string_name_author_gives_author_match_False(tmp_path):  # spec
 # ======================================================================
 # Defect B -- SAME_WORK_VARIANT quarantine
 # ======================================================================
-def test_threshold_constant_is_095():
-    assert SAME_WORK_TITLE_SIM_MIN == 0.95
+def test_threshold_constant_is_092():
+    # F2_V3_3: lowered 0.95 -> 0.92 to admit the two seam same-work variants
+    # (12199786 / 9802808) that normalize to title_sim ~0.944-0.947.
+    assert SAME_WORK_TITLE_SIM_MIN == 0.92
 
 
 def test_high_titlesim_author_false_diverts():                # spec test 4

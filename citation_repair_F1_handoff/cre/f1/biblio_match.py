@@ -101,7 +101,13 @@ VERDICT_UNRESOLVED   = "unresolved"          # the claimed PMID did NOT resolve
 # field disagreement on it is a same-work variant, not a wrong paper. Title
 # similarity alone gates this -- source-agnostic (no StatPearls / journal
 # allowlist).
-SAME_WORK_TITLE_SIM_MIN = 0.95
+# F2_V3_3: lowered 0.95 -> 0.92. Two confirmed same-work formatting variants
+# (seam rows 12199786 / 9802808) normalize to title_sim ~0.944-0.947 -- just under
+# the old gate -- and were mis-banding review_wrong_paper (false HIGH). 0.92 admits
+# both as review_same_work_variant while staying clear of the genuine-F2 guards
+# (all title_sim < 0.92). The gate expression is unchanged and stays source-agnostic;
+# newly-crossed rows are surfaced (never silently moved) via reband audit.
+SAME_WORK_TITLE_SIM_MIN = 0.92
 
 
 # =====================================================================

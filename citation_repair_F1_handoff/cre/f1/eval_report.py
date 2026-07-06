@@ -420,13 +420,15 @@ def assert_f2_fixes_loaded() -> None:
     loaded -- the backstop against a stale ``sys.modules`` / stale-checkout run
     (the module silently runs old code). Call at the top of the v3 runner.
 
-    Checks: (Defect B) ``biblio_match`` exposes ``SAME_WORK_TITLE_SIM_MIN == 0.95``
-    and the ``review_same_work_variant`` verdict; (Defect A) the parser extracts a
-    ``<string-name><surname>`` author from a tiny inline fixture."""
+    Checks: (Defect B) ``biblio_match`` exposes ``SAME_WORK_TITLE_SIM_MIN == 0.92``
+    (F2_V3_3 threshold; was 0.95 through v3.2) and the ``review_same_work_variant``
+    verdict; (Defect A) the parser extracts a ``<string-name><surname>`` author from
+    a tiny inline fixture."""
     from . import biblio_match as bm
-    if getattr(bm, "SAME_WORK_TITLE_SIM_MIN", None) != 0.95:
+    if getattr(bm, "SAME_WORK_TITLE_SIM_MIN", None) != 0.92:
         raise RuntimeError("STALE MODULE: biblio_match.SAME_WORK_TITLE_SIM_MIN "
-                           "missing or != 0.95 -- Defect B fix not loaded.")
+                           "missing or != 0.92 (F2_V3_3 threshold) -- Defect B fix "
+                           "not loaded.")
     if getattr(bm, "VERDICT_SAME_WORK_VARIANT", None) != "review_same_work_variant":
         raise RuntimeError("STALE MODULE: biblio_match.VERDICT_SAME_WORK_VARIANT "
                            "missing -- Defect B fix not loaded.")

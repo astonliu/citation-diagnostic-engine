@@ -21,6 +21,13 @@ F2_V3_2 (resolved-side gate): a row whose resolved record came back UNRESOLVED
       denominator_scoreable (counted as resolved_unresolved_excluded). Tri-state:
       only explicit ``resolved is False`` -- resolved=None (unknown) is NOT swept in.
 
+F2_V3_3 (SAME_WORK threshold): SAME_WORK_TITLE_SIM_MIN lowered 0.95 -> 0.92 so the
+      two confirmed seam variants (12199786 / 9802808, title_sim ~0.944-0.947) band
+      review_same_work_variant instead of review_wrong_paper. The gate expression is
+      unchanged; reband_from_cache emits same_work_newly_quarantined (the PMIDs that
+      crossed the gate) so no row moves silently. The 7 regression guards all sit at
+      title_sim < 0.92 and stay review_wrong_paper.
+
 Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_f2_v3_1.py -q
 """
 from __future__ import annotations
@@ -552,3 +559,113 @@ def test_resolved_none_not_swept_into_unresolved_gate():
     out = high_band_rate_of_scoreable([rec])
     assert out["resolved_unresolved_excluded"] == 0
     assert out["denominator_scoreable"] == 1
+
+
+# ======================================================================
+# F2_V3_3 -- SAME_WORK_TITLE_SIM_MIN lowered 0.95 -> 0.92
+# ======================================================================
+def test_same_work_threshold_constant_is_092():
+    # single-constant change (v3.3). Pin the value so the gate can't drift silently.
+    assert SAME_WORK_TITLE_SIM_MIN == 0.92
+
+
+# The two confirmed seam rows. The REAL titles live in the Colab resolved cache
+# (unreachable here); these reconstruct the MECHANISM -- title_sim in [0.92, 0.95)
+# with a confident field disagreement -- exactly as test_f2_recall_guard.py uses
+# constructed inputs for the guard PMIDs (spec C6). What is pinned is the
+# threshold-dependent band flip, not the exact real title strings.
+_SEAM_ROWS = [
+    # 12199786: title near-identical, YEAR typo (2022 vs 2002); authors agree so
+    # year is the sole confident disagreement.
+    ("12199786",
+     "Molecular mechanisms of insulin resistance in type 2 diabetes",
+     "Molecular mechanism of insulin resistance in type 2 diabetes",
+     "Tanaka", "Tanaka", 2022, 2002),
+    # 9802808: title differs only by a dropped word ("injury"); an AUTHOR formatting
+    # artifact reads as a confident disagreement; years agree.
+    ("9802808",
+     "Spinal cord injury and functional recovery in the adult rat model",
+     "Spinal cord and functional recovery in the adult rat model",
+     "Nakamura", "Yamamoto", 2010, 2010),
+]
+
+
+@pytest.mark.parametrize("pmid,ct,rt,ca,ra,cy,ry", _SEAM_ROWS)
+def test_seam_rows_same_work_variant_at_092_wrong_paper_at_095(
+        pmid, ct, rt, ca, ra, cy, ry, monkeypatch):     # DoD test (pin to constant)
+    # The band is pinned to the CONSTANT: at 0.92 (v3.3) the seam row quarantines as
+    # review_same_work_variant; at 0.95 (v3.2) the SAME row banded review_wrong_paper
+    # (false HIGH). title_sim sits in [0.92, 0.95) -- normalization already works;
+    # only the threshold moved.
+    import cre.f1.biblio_match as bm
+    claimed = ClaimedRef(title=ct, authors=[ca], year=cy)
+    resolved = RetrievedRecord(resolved=True, title=rt, authors=[ra], year=ry)
+    m = match_score(claimed, resolved)
+    assert SAME_WORK_TITLE_SIM_MIN <= m.title_sim < 0.95, (
+        f"{pmid} title_sim {m.title_sim} must sit in the [0.92, 0.95) seam band")
+    # confident disagreement present (is False, not None) -> reaches the gate
+    assert (m.fields.author_match is False) or (m.fields.year_match is False)
+    # new gate (module default 0.92): quarantined same-work variant
+    v092, _ = flag_verdict(claimed, resolved)
+    assert v092 == VERDICT_SAME_WORK_VARIANT, pmid
+    # old gate (0.95): the very same row was HIGH wrong-paper
+    monkeypatch.setattr(bm, "SAME_WORK_TITLE_SIM_MIN", 0.95)
+    v095, _ = flag_verdict(claimed, resolved)
+    assert v095 == VERDICT_WRONG_PAPER, pmid
+
+
+def test_title_sim_just_below_092_stays_wrong_paper(monkeypatch):   # DoD test
+    # The gate is 0.92, NOT lower: a row with title_sim just under 0.92 and a
+    # confident disagreement stays review_wrong_paper. Dropping the gate to 0.90
+    # would (wrongly) quarantine it -- proving the boundary is exactly 0.92.
+    import cre.f1.biblio_match as bm
+    claimed = ClaimedRef(
+        title="Regulation of glucose metabolism by circadian clock proteins",
+        authors=["Alpha"], year=2015)
+    resolved = RetrievedRecord(
+        resolved=True,
+        title="Regulation of glucose transport by circadian clock proteins",
+        authors=["Beta"], year=2015)
+    m = match_score(claimed, resolved)
+    assert 0.90 <= m.title_sim < SAME_WORK_TITLE_SIM_MIN, (
+        f"fixture title_sim {m.title_sim} must sit just below the 0.92 gate")
+    v, _ = flag_verdict(claimed, resolved)
+    assert v == VERDICT_WRONG_PAPER
+    # gate really is 0.92: at 0.90 the same row would quarantine (boundary proof)
+    monkeypatch.setattr(bm, "SAME_WORK_TITLE_SIM_MIN", 0.90)
+    v90, _ = flag_verdict(claimed, resolved)
+    assert v90 == VERDICT_SAME_WORK_VARIANT
+
+
+def test_reband_surfaces_newly_quarantined_seam_row(tmp_path):     # audit visibility
+    # A seam row (title_sim in [0.92, 0.95)) that bands review_same_work_variant at
+    # 0.92 is enumerated in same_work_newly_quarantined so the 0.95 -> 0.92 move can
+    # be audited row-by-row; a genuine wrong-paper (title_sim < 0.92) is NOT listed.
+    from cre.f1.f2_run_v3 import reband_from_cache
+    xml_dir = tmp_path / "xml"; xml_dir.mkdir()
+    _write_xml(str(xml_dir), "PMC0001", [
+        ("r1", "Spinal cord injury and functional recovery in the adult rat model",
+         "Nakamura", 2010, "9802808"),
+        ("r2", "Disseminated varicella infection", "Pannu", 2019, "111"),
+    ])
+    cache = tmp_path / "resolved.jsonl"
+    _write_cache(str(cache), [
+        {"src_pmcid": "PMC0001", "pmid": "9802808", "rec": {
+            "resolved": True,
+            "title": "Spinal cord and functional recovery in the adult rat model",
+            "authors": ["Yamamoto"], "year": 2010}},
+        {"src_pmcid": "PMC0001", "pmid": "111", "rec": {
+            "resolved": True, "title": "Purple Urine after Catheterization",
+            "authors": ["Sabanis"], "year": 2019}},
+    ])
+    summary = reband_from_cache(str(xml_dir), str(cache), out_dir=str(tmp_path),
+                                version="v3_3")
+    recs = {json.loads(l)["pmid"]: json.loads(l)
+            for l in open(summary["records_path"])}
+    assert recs["9802808"]["verdict"] == VERDICT_SAME_WORK_VARIANT
+    assert 0.92 <= recs["9802808"]["title_sim"] < 0.95
+    assert recs["111"]["verdict"] == VERDICT_WRONG_PAPER
+    # the newly-quarantined seam row is surfaced; the genuine wrong-paper is not.
+    assert summary["same_work_newly_quarantined"] == ["9802808"]
+    assert summary["n_same_work_newly_quarantined"] == 1
+    assert "111" not in summary["same_work_newly_quarantined"]
