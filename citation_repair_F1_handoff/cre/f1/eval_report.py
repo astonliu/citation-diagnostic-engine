@@ -29,7 +29,7 @@ from typing import Optional
 from .schema import F1, F2, UNVERIFIABLE, UNSCOREABLE, ClaimedRef, RetrievedRecord
 from .biblio_match import (match_score, flag_verdict, VERDICT_MATCH,
                            VERDICT_WRONG_PAPER, VERDICT_SAME_WORK_VARIANT,
-                           VERDICT_UNSCOREABLE)
+                           VERDICT_UNSCOREABLE, VERDICT_UNRESOLVED)
 from .unscoreable import classify_unscoreable
 
 
@@ -302,6 +302,16 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
     banded 303 empty-title rows as maximal WRONG_PAPER). ``high_band_rate_of_
     scoreable`` drops these from BOTH the HIGH count and the denominator, exactly
     as ``decide()`` drops UNSCOREABLE on the live path.
+
+    RESOLVED-SIDE GATE (F2_V3_2): after the claimed-side gate, a pair whose
+    resolved record came back UNRESOLVED (``resolved.resolved is False``) is routed
+    to ``verdict=VERDICT_UNRESOLVED`` (``unscoreable_reason="resolved_unresolved"``)
+    with all scores/verdicts ``None``. With no resolved work there is nothing to
+    mismatch against, so scoring against the empty resolved title would falsely
+    band it WRONG_PAPER. It is a DISTINCT, recoverable F1-candidate bucket (not
+    folded into ``unscoreable``), excluded from BOTH the HIGH count and the
+    denominator. Tri-state: ``is False`` ONLY -- ``resolved=None`` (unknown) is
+    NOT swept in and proceeds to normal scoring.
     """
     bucket, _reason = classify_unscoreable(claimed, resolved)
     if bucket:
@@ -315,6 +325,30 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
             "flag": None,                     # not a flag decision; it was gated out
             "verdict": VERDICT_UNSCOREABLE,
             "unscoreable_reason": bucket,
+        }
+
+    # RESOLVED-SIDE GATE (F2_V3_2): a row whose claimed PMID came back UNRESOLVED
+    # (``resolved is False`` -- empty resolved title, no resolved fields) has no
+    # resolved work to mismatch against, so it cannot be an F2. Scoring it would
+    # compare a real claimed title against an empty resolved title (title_sim ~0,
+    # no field agrees) and spuriously band it VERDICT_WRONG_PAPER. Route it to the
+    # DISTINCT, recoverable ``unresolved`` F1-candidate bucket instead; leave every
+    # score/field verdict None (never fabricate 0.0). This runs AFTER the claimed-
+    # side classify_unscoreable gate on purpose: a claimed-side-unscoreable row
+    # (e.g. empty claimed title) stays in its own bucket, so ``unscoreable`` counts
+    # are unchanged. Tri-state -- ``is False`` ONLY; ``resolved=None`` (unknown, not
+    # yet looked up) is NOT swept in and proceeds to normal scoring.
+    if resolved.resolved is False:
+        return {
+            **_raw_fields(pmid, src_pmcid, claimed, resolved),
+            "match_score": None,
+            "title_sim": None,
+            "author_match": None,
+            "year_match": None,
+            "journal_match": None,
+            "flag": None,                     # not a flag decision; nothing resolved
+            "verdict": VERDICT_UNRESOLVED,
+            "unscoreable_reason": "resolved_unresolved",
         }
 
     m = match_score(claimed, resolved, accept=accept)
@@ -344,17 +378,26 @@ def high_band_rate_of_scoreable(records: list[dict]) -> dict:
     identifier resolves to the same work, so it is neither an F2 candidate nor
     part of the scoreable-for-F2 frame. ``unscoreable`` rows (F2_V3_1 Bug 1) are
     likewise excluded from BOTH sides -- a non-title / placeholder / book-container
-    pair is not part of the scoreable-for-F2 frame at all. VERDICT_MATCH /
+    pair is not part of the scoreable-for-F2 frame at all. ``unresolved`` rows
+    (F2_V3_2 -- ``resolved is False``) are ALSO excluded from BOTH sides: with no
+    resolved work there is nothing to mismatch against, so the row is not part of
+    the scoreable-for-F2 frame either (it is a recoverable F1 candidate, counted
+    separately in ``resolved_unresolved_excluded``). VERDICT_MATCH /
     VERDICT_FORMATTING remain in the denominator (scoreable, just not HIGH).
 
     ``records`` are ``build_f2_record`` dicts (each carries a ``verdict``).
     Returns the HIGH count, the denominator, the number of quarantined rows, the
-    number of UNSCOREABLE rows, and the rate (None on an empty frame)."""
+    number of UNSCOREABLE rows, the number of UNRESOLVED rows, and the rate (None
+    on an empty frame)."""
     unscoreable = sum(1 for r in records
                       if r.get("verdict") == VERDICT_UNSCOREABLE)
-    # scoreable frame: has a verdict AND is not an UNSCOREABLE row.
+    unresolved = sum(1 for r in records
+                     if r.get("verdict") == VERDICT_UNRESOLVED)
+    # scoreable frame: has a verdict AND is neither an UNSCOREABLE nor an
+    # UNRESOLVED row (both are structurally out of the scoreable-for-F2 frame).
     scoreable = [r for r in records if r.get("verdict")
-                 and r.get("verdict") != VERDICT_UNSCOREABLE]
+                 and r.get("verdict") not in (VERDICT_UNSCOREABLE,
+                                              VERDICT_UNRESOLVED)]
     frame = [r for r in scoreable
              if r.get("verdict") != VERDICT_SAME_WORK_VARIANT]
     high = sum(1 for r in frame if r.get("verdict") == VERDICT_WRONG_PAPER)
@@ -364,6 +407,7 @@ def high_band_rate_of_scoreable(records: list[dict]) -> dict:
         "denominator_scoreable": n,
         "same_work_variant_excluded": len(scoreable) - n,
         "unscoreable_excluded": unscoreable,
+        "resolved_unresolved_excluded": unresolved,
         "high_band_rate_of_scoreable": (high / n) if n else None,
     }
 

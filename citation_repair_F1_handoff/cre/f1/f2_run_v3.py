@@ -241,9 +241,14 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
 
     # Pre-write reconstruction guard. If the resolved records were read from the
     # wrong level (top-level instead of the nested "rec"), every row reconstructs
-    # to resolved=False + empty title and then bands as spurious wrong-paper. When
+    # to resolved=False + empty title -- which now bands VERDICT_UNRESOLVED (the
+    # F2_V3_2 resolved-side gate), so the whole frame would be spurious "unresolved"
+    # rather than spurious wrong-paper. Either way it is corrupt. UNRESOLVED rows
+    # are DELIBERATELY still counted here (they are non-UNSCOREABLE), so the
+    # wrong-level read still trips the guard; a handful of genuinely-unresolved rows
+    # is a negligible fraction on real data, while a whole-frame flood is not. When
     # >50% of the SCOREABLE (non-UNSCOREABLE) rows carry an empty resolved_title,
-    # the reconstruction/join is broken -- ABORT before writing a corrupt v3_1.
+    # the reconstruction/join is broken -- ABORT before writing a corrupt run.
     scoreable_recs = [r for r in records
                       if r.get("verdict") != VERDICT_UNSCOREABLE]
     n_empty_resolved = sum(1 for r in scoreable_recs
