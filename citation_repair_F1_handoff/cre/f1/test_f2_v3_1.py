@@ -13,6 +13,14 @@ Plus: the offline reband_from_cache entry point (join on (src_pmcid, claimed_pmi
       no re-fetch, writes *_seed7_v3_1.*, preserves v3), and the six regression
       guards staying HIGH after both fixes.
 
+F2_V3_2 (resolved-side gate): a row whose resolved record came back UNRESOLVED
+      (RetrievedRecord.resolved is False) has no resolved work to mismatch against,
+      so build_f2_record routes it to VERDICT_UNRESOLVED (reason
+      "resolved_unresolved") instead of banding it review_wrong_paper, and
+      high_band_rate_of_scoreable drops it from BOTH flagged_f2_high and
+      denominator_scoreable (counted as resolved_unresolved_excluded). Tri-state:
+      only explicit ``resolved is False`` -- resolved=None (unknown) is NOT swept in.
+
 Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_f2_v3_1.py -q
 """
 from __future__ import annotations
@@ -27,7 +35,8 @@ from cre.f1.biblio_match import (normalize_title, title_sim, field_agreement,
                                  match_score, flag_verdict, _norm,
                                  SAME_WORK_TITLE_SIM_MIN, VERDICT_MATCH,
                                  VERDICT_WRONG_PAPER, VERDICT_FORMATTING,
-                                 VERDICT_SAME_WORK_VARIANT, VERDICT_UNSCOREABLE)
+                                 VERDICT_SAME_WORK_VARIANT, VERDICT_UNSCOREABLE,
+                                 VERDICT_UNRESOLVED)
 from cre.f1.eval_report import (build_f2_record, high_band_rate_of_scoreable,
                                 _F2_RECORD_KEYS)
 from cre.f1.lookup import _normalize
@@ -459,3 +468,87 @@ def test_reband_aborts_when_resolved_titles_mostly_empty(tmp_path):
                           version="v3_1")
     # nothing written -- the abort precedes the write.
     assert not (tmp_path / "f2_random_oa_seed7_v3_1.jsonl").exists()
+
+
+# ======================================================================
+# F2_V3_2 -- resolved-side (unresolved) gate
+# ======================================================================
+def test_reband_unresolved_row_bands_unresolved_not_wrong_paper(tmp_path):
+    # A cache line whose resolved record came back UNRESOLVED (rec.resolved=False,
+    # empty title) has no resolved work to mismatch against -> it MUST NOT band
+    # review_wrong_paper. It routes to the distinct, recoverable `unresolved`
+    # bucket (reason "resolved_unresolved"), scores stay None (never fabricated to
+    # 0.0), and it leaves BOTH the HIGH count and the scoreable denominator. The
+    # genuine resolved=True wrong-paper row on the same source is unaffected.
+    from cre.f1.f2_run_v3 import reband_from_cache
+    xml_dir = tmp_path / "xml"; xml_dir.mkdir()
+    # PMC0001: 111 real wrong-paper (resolved=True); 222 + 444 unresolved
+    # (resolved=False); the two resolved=True rows keep the guard well under 50%.
+    _write_xml(str(xml_dir), "PMC0001", [
+        ("r1", "Disseminated varicella infection", "Pannu", 2019, "111"),
+        ("r2", "A perfectly valid claimed title", "Norris", 2019, "222"),
+        ("r3", "A shared correct title", "Lee", 2020, "333"),
+        ("r4", "Another valid claimed title", "Ochoa", 2015, "444"),
+    ])
+    cache = tmp_path / "resolved.jsonl"
+    _write_cache(str(cache), [
+        {"src_pmcid": "PMC0001", "pmid": "111", "rec": {
+            "resolved": True, "title": "Purple Urine after Catheterization",
+            "authors": ["Sabanis"], "year": 2019}},
+        # UNRESOLVED: the claimed PMID did not resolve (resolved False, empty title).
+        {"src_pmcid": "PMC0001", "pmid": "222", "rec": {
+            "resolved": False, "title": "", "authors": [], "year": None}},
+        {"src_pmcid": "PMC0001", "pmid": "333", "rec": {
+            "resolved": True, "title": "A shared correct title",
+            "authors": ["Lee"], "year": 2020}},
+        {"src_pmcid": "PMC0001", "pmid": "444", "rec": {
+            "resolved": False, "title": "", "authors": [], "year": None}},
+    ])
+    summary = reband_from_cache(str(xml_dir), str(cache), out_dir=str(tmp_path),
+                                version="v3_2")
+    recs = {json.loads(l)["pmid"]: json.loads(l)
+            for l in open(summary["records_path"])}
+    # the unresolved rows: distinct bucket, NOT wrong-paper, scores NOT fabricated
+    for pmid in ("222", "444"):
+        assert recs[pmid]["verdict"] == VERDICT_UNRESOLVED
+        assert recs[pmid]["verdict"] != VERDICT_WRONG_PAPER
+        assert recs[pmid]["unscoreable_reason"] == "resolved_unresolved"
+        assert recs[pmid]["title_sim"] is None
+        assert recs[pmid]["author_match"] is None
+        assert recs[pmid]["match_score"] is None
+        assert recs[pmid]["flag"] is None
+        # the unresolved record keeps the canonical, JSON-round-trippable schema
+        # (these dicts came back through json.dumps -> file -> json.loads).
+        assert set(recs[pmid]) == set(_F2_RECORD_KEYS)
+    # the genuine wrong-paper row is UNAFFECTED (resolved=True, real mismatch)
+    assert recs["111"]["verdict"] == VERDICT_WRONG_PAPER
+    assert recs["333"]["verdict"] == VERDICT_MATCH
+    # metric: HIGH = only 111; the two unresolved rows leave BOTH sides.
+    assert summary["flagged_f2_high"] == 1
+    assert summary["resolved_unresolved_excluded"] == 2
+    # denominator = the two scoreable (resolved=True) rows only: 111 + 333.
+    assert summary["denominator_scoreable"] == 2
+    assert summary["unscoreable_excluded"] == 0
+    assert os.path.exists(tmp_path / "f2_random_oa_seed7_v3_2.jsonl")
+
+
+def test_resolved_none_not_swept_into_unresolved_gate():
+    # TRI-STATE GUARD: resolved=None (unknown -- e.g. not-yet-looked-up) must NOT
+    # be caught by the resolved-side gate, which keys on `is False` ONLY. Such a
+    # row proceeds to NORMAL scoring; here it matches, so it stays a scoreable
+    # MATCH -- never diverted to the `unresolved` bucket.
+    c = ClaimedRef(title="A shared title", authors=["Lee"], year=2020,
+                   journal="J Foo")
+    r = RetrievedRecord(resolved=None, title="A shared title", authors=["Lee"],
+                        year=2020, journal="J Foo")
+    rec = build_f2_record("1", "PMC1", c, r)
+    assert rec["verdict"] != VERDICT_UNRESOLVED
+    assert rec["unscoreable_reason"] != "resolved_unresolved"
+    # scored normally (gate did NOT fire): scores are populated, not None
+    assert rec["title_sim"] is not None
+    assert rec["match_score"] is not None
+    assert rec["verdict"] == VERDICT_MATCH
+    # and the metric keeps it in the scoreable frame (not an unresolved exclusion)
+    out = high_band_rate_of_scoreable([rec])
+    assert out["resolved_unresolved_excluded"] == 0
+    assert out["denominator_scoreable"] == 1

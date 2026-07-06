@@ -87,6 +87,15 @@ VERDICT_UNSCOREABLE  = "unscoreable"         # not a scoreable title comparison
 #   carries ZERO wrong-paper evidence. Named + counted, excluded from BOTH the HIGH
 #   count and the scoreable denominator -- mirrors decide()'s live-path treatment.
 #   Value matches schema.UNSCOREABLE on purpose (same concept, two label spaces).
+VERDICT_UNRESOLVED   = "unresolved"          # the claimed PMID did NOT resolve
+#   (RetrievedRecord.resolved is False): there is NO resolved work to mismatch
+#   against, so the row cannot be an F2 -- scoring it against an empty resolved
+#   title spuriously lands it in WRONG_PAPER. Routed OUT of BOTH the HIGH count and
+#   the scoreable denominator (like UNSCOREABLE), but kept a DISTINCT bucket so the
+#   rows stay recoverable as F1 (fabrication) candidates later. This is a
+#   RESOLVED-side gate, separate from the claimed-side classify_unscoreable gate.
+#   Tri-state: only explicit ``resolved is False`` -- resolved=None (unknown) is
+#   NOT swept in.
 
 # An (near-)identical title means the identifier resolves to the SAME work, so a
 # field disagreement on it is a same-work variant, not a wrong paper. Title
