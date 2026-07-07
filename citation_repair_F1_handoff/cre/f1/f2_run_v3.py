@@ -60,37 +60,45 @@ _RETRIEVED_FIELDS = {f.name for f in dataclasses.fields(RetrievedRecord)}
 
 def run_f2_seed7_v3(items: Iterable[Item], *, out_dir: str = ".",
                     out_prefix: str = "f2_random_oa", version: str = "v3",
-                    accept: float = 0.85) -> dict:
-    """Assemble v3 records from ``items`` and write ``<prefix>_seed7_<version>.*``.
+                    accept: float = 0.85, seed: int = 7) -> dict:
+    """Assemble v3 records from ``items`` and write ``<prefix>_seed<seed>_<version>.*``.
 
     ``items`` yields ``(pmid, src_pmcid, claimed, resolved)`` using the SAME
     objects passed to the scorer. Returns a summary dict (record count + the
-    HIGH-band metric). Halts (RuntimeError) if either revision fix is not loaded,
-    or if asked to write a v2 path (v2 is preserved, never overwritten)."""
-    if version.lower() == "v2":
-        raise RuntimeError("run_f2_seed7_v3 refuses to write v2 paths; v2 is "
-                           "preserved. Use version='v3' (or later).")
+    HIGH-band metric). Halts (RuntimeError) if either revision fix is not loaded.
+
+    ``seed`` labels the run (default ``7``) so a fresh held-out draw (e.g. seed 11)
+    can share this runner and write its own ``*_seed11_*`` files. This runner is
+    what PRODUCES seed-7 v3, so its preserved-version guard is seed-aware and
+    narrow: it blocks the frozen seed-7 v2 path only (v2 was written by an earlier
+    runner), while still emitting seed-7 v3 by default. Held-out seeds are never
+    blocked."""
+    if seed == 7 and version.lower() == "v2":
+        raise RuntimeError("run_f2_seed7_v3 refuses to write the frozen seed-7 v2 "
+                           "path; v2 is preserved. Use version='v3' (or later).")
     assert_f2_fixes_loaded()                      # fail loud BEFORE any write
 
     records = [build_f2_record(pmid, src_pmcid, claimed, resolved, accept=accept)
                for (pmid, src_pmcid, claimed, resolved) in items]
     return _write_run(records, out_dir=out_dir, out_prefix=out_prefix,
-                      version=version)
+                      version=version, seed=seed)
 
 
 def _write_run(records: list, *, out_dir: str, out_prefix: str, version: str,
-               extra: Optional[dict] = None) -> dict:
-    """Write ``<prefix>_seed7_<version>.jsonl`` + ``..._summary.json`` and return
-    the summary. Shared by the fresh-draw runner and the re-band path so the
-    output schema and the HIGH-band metric cannot drift between them."""
+               extra: Optional[dict] = None, seed: int = 7) -> dict:
+    """Write ``<prefix>_seed<seed>_<version>.jsonl`` + ``..._summary.json`` and
+    return the summary. Shared by the fresh-draw runner and the re-band path so the
+    output schema and the HIGH-band metric cannot drift between them. ``seed``
+    (default ``7``) parameterizes both the filenames and the summary ``"seed"``
+    field; ``seed=7`` reproduces the frozen seed-7 paths and summary byte-for-byte."""
     os.makedirs(out_dir, exist_ok=True)
-    records_path = os.path.join(out_dir, f"{out_prefix}_seed7_{version}.jsonl")
-    summary_path = os.path.join(out_dir, f"{out_prefix}_seed7_{version}_summary.json")
+    records_path = os.path.join(out_dir, f"{out_prefix}_seed{seed}_{version}.jsonl")
+    summary_path = os.path.join(out_dir, f"{out_prefix}_seed{seed}_{version}_summary.json")
 
     metric = high_band_rate_of_scoreable(records)
     summary = {
         "version": version,
-        "seed": 7,
+        "seed": seed,
         "records_path": records_path,
         "n_records": len(records),
         **metric,
@@ -127,7 +135,8 @@ def _retrieved_from_cache(line: dict) -> RetrievedRecord:
                               if k in _RETRIEVED_FIELDS})
 
 
-def index_claimed_from_xml_dir(xml_dir: str) -> dict:
+def index_claimed_from_xml_dir(xml_dir: str, *,
+                               src_pmcids: Optional[Iterable[str]] = None) -> dict:
     """Parse every .xml/.nxml under ``xml_dir`` with the FIXED parser and index
     each PMID-bearing reference's ``ClaimedRef`` by ``(src_pmcid, claimed_pmid)``.
 
@@ -135,9 +144,18 @@ def index_claimed_from_xml_dir(xml_dir: str) -> dict:
     {src_pmcid}.xml``. Only references carrying a claimed PMID are indexed -- the
     resolved cache is keyed by the PMID that was looked up, so a no-PMID ref can
     never join to it. Returns ``{(src_pmcid, claimed_pmid): ClaimedRef}``; on a
-    duplicate key the FIRST occurrence wins (deterministic)."""
+    duplicate key the FIRST occurrence wins (deterministic).
+
+    ``src_pmcids`` scopes the index to a held-out seed's source papers when many
+    seeds share one XML dir: when it is not ``None`` (built into a set once), any
+    ref whose ``source_pmcid`` is not in the allow-list is skipped, so the
+    resulting frame -- and thus the reband denominator -- is not contaminated by
+    other seeds' articles. ``None`` indexes the whole dir (original behavior)."""
+    allow = set(src_pmcids) if src_pmcids is not None else None
     index: dict = {}
     for ref in iter_pmc_dir(xml_dir):
+        if allow is not None and (ref.source_pmcid or "") not in allow:
+            continue
         pmid = (ref.claimed.claimed_pmid or "").strip()
         if not pmid:
             continue
@@ -172,11 +190,21 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
                       out_dir: str = ".", out_prefix: str = "f2_random_oa",
                       version: str = "v3_1", accept: float = 0.85,
                       src_pmcid_key: str = "src_pmcid",
-                      pmid_key: str = "pmid") -> dict:
-    """Rebuild the seed=7 F2 frame from the two Drive caches and re-band it with
-    the CURRENTLY-LOADED fixes -- NO NCBI/Crossref call. Writes
-    ``<prefix>_seed7_<version>.*`` (default ``v3_1``); refuses to target a frozen
-    version (v2/v3 are preserved, never overwritten).
+                      pmid_key: str = "pmid", seed: int = 7,
+                      src_pmcids: Optional[Iterable[str]] = None) -> dict:
+    """Rebuild the F2 frame from the two Drive caches and re-band it with the
+    CURRENTLY-LOADED fixes -- NO NCBI/Crossref call. Writes
+    ``<prefix>_seed<seed>_<version>.*`` (default ``seed=7``, ``version="v3_1"``).
+
+    ``seed`` labels the run and its output files; with ``seed=7`` and
+    ``src_pmcids=None`` (the defaults) this reproduces the audited seed-7 output
+    byte-for-byte. The preserved-version guard is seed-aware: it refuses only when
+    ``seed == 7`` and the version is frozen (v2/v3), keeping the seed-7 v2/v3 files
+    untouchable while held-out seeds (11/13/17) may reband at any version.
+
+    ``src_pmcids`` scopes the claimed-index to this seed's source papers when many
+    seeds share one XML dir (see ``index_claimed_from_xml_dir``); ``None`` indexes
+    the whole dir. ``n_src_pmcids`` is reported in the summary for auditability.
 
     Cache format: each resolved-cache line is an envelope
     ``{"pmid": ..., "rec": {resolved, title, authors, ...}}``; the RetrievedRecord
@@ -199,14 +227,17 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
     ``same_work_newly_quarantined`` -- the PMIDs whose band changed from
     review_wrong_paper (at the old 0.95 gate) to review_same_work_variant (at the
     new 0.92 gate), so the threshold move can be audited row-by-row."""
-    if version.lower() in _PRESERVED_VERSIONS:
+    if seed == 7 and version.lower() in _PRESERVED_VERSIONS:
         raise RuntimeError(
-            f"reband_from_cache refuses to write a preserved version "
+            f"reband_from_cache refuses to write a preserved seed-7 version "
             f"({sorted(_PRESERVED_VERSIONS)}); those runs are frozen. Use "
-            f"version='v3_1' (or later).")
+            f"version='v3_1' (or later), or a held-out seed.")
     assert_f2_fixes_loaded()                      # fail loud BEFORE any read/write
 
-    claimed_by_full = index_claimed_from_xml_dir(xml_dir)
+    # Materialize the allow-list once so len() is stable and the set can be passed
+    # to the indexer without re-consuming a generator.
+    src_pmcid_set = set(src_pmcids) if src_pmcids is not None else None
+    claimed_by_full = index_claimed_from_xml_dir(xml_dir, src_pmcids=src_pmcid_set)
     # PMID-only fallback index: pmid -> list of (src_pmcid, ClaimedRef).
     claimed_by_pmid: dict = {}
     for (src_pmcid, pmid), claimed in claimed_by_full.items():
@@ -291,9 +322,10 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
         "n_pmid_only_join": n_pmid_only,
         "n_ambiguous_dropped": n_ambiguous,
         "n_unmatched_dropped": n_unmatched,
+        "n_src_pmcids": len(src_pmcid_set) if src_pmcid_set is not None else None,
         "rebanded_from_cache": True,
         "same_work_newly_quarantined": same_work_newly_quarantined,
         "n_same_work_newly_quarantined": len(same_work_newly_quarantined),
     }
     return _write_run(records, out_dir=out_dir, out_prefix=out_prefix,
-                      version=version, extra=diag)
+                      version=version, extra=diag, seed=seed)
