@@ -62,8 +62,7 @@ from .ncbi_meta import ncbi_pubtypes, is_review, DEFAULT_EMAIL
 # HOLD. Bump these only on a deliberate substrate change (which can invalidate
 # already-collected human labels).
 # --------------------------------------------------------------------------
-CLAIM_EXTRACT_PROMPT_VERSION = "claim_extract_v1"
-COVERAGE_PROMPT_VERSION = "coverage_v1"
+from .band_prompts import CLAIM_EXTRACT_PROMPT_VERSION, COVERAGE_PROMPT_VERSION
 
 # Label space for the F3 slice of the band (the annotator's terminal choices).
 # Coverage-gap -> F6, misattribution -> F3, otherwise ACCURATE.
