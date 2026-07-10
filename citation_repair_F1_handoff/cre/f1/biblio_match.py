@@ -500,10 +500,13 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
                              metadata-drift signature, NOT a wrong reference.
                              Checked BEFORE the wrong-paper branch; audited but
                              excluded from the F2 count. Also reached (F2_V3_5)
-                             when the claimed venue is a preprint server and the
-                             first author agrees (author_match is True) -- a
-                             preprint->published retitle of the same work, keyed
-                             on the preprint signal not title_sim.
+                             when the claimed venue is a preprint server, the
+                             first author agrees (author_match is True), AND a
+                             field confidently disagrees -- a preprint->published
+                             retitle of the same work, keyed on the preprint
+                             signal not title_sim. A cleanly-matching preprint
+                             cite (no disagreement) stays MATCH in the
+                             denominator, not SAME_WORK_VARIANT.
       VERDICT_WRONG_PAPER    below accept AND (author or year disagrees, or no
                              field agrees at all): the wrong-paper signal, the
                              audit's high-precision band.
@@ -529,12 +532,16 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # venue is a preprint server, resolving via its own identifier to a published
     # record, is the SAME work under a revised title -- not a wrong paper. Keyed
     # on the preprint signal (orthogonal to title_sim, so the 0.92 gate is
-    # untouched). Requires author_match is True (the conservative gate): a
-    # genuinely wrong preprint cite by a DIFFERENT author (author_match is False
-    # or None) still lands in WRONG_PAPER, so recall on real F2 is preserved.
+    # untouched). Requires author_match is True AND a real disagreement (the same
+    # ``disagree`` the 0.92 branch uses) so it fires ONLY on preprint rows that
+    # would otherwise be misflagged (author matches, year drifts by the preprint
+    # lag = 35264587). A genuinely wrong preprint cite by a DIFFERENT author
+    # (author_match is False/None) still lands in WRONG_PAPER; a CORRECTLY-cited
+    # preprint that matches cleanly (no disagreement) stays MATCH and remains in
+    # the denominator -- it is a true negative, not an ambiguous same-work row.
     # SAME_WORK_VARIANT is audited (not auto-cleared), so any rare misfire is
     # still seen by a human.
-    if is_preprint_source(claimed) and f.author_match is True:
+    if is_preprint_source(claimed) and f.author_match is True and disagree:
         return VERDICT_SAME_WORK_VARIANT, m
     # A confident disagreement on a NON-identical title is wrong-paper evidence
     # and MUST stay in the HIGH band even when confirmatory field boosts lifted
