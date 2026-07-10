@@ -27,8 +27,8 @@ import os
 import pytest
 
 from cre.f1.biblio_match import (flag_verdict, is_preprint_source,
-                                 SAME_WORK_TITLE_SIM_MIN, VERDICT_WRONG_PAPER,
-                                 VERDICT_SAME_WORK_VARIANT)
+                                 SAME_WORK_TITLE_SIM_MIN, VERDICT_MATCH,
+                                 VERDICT_WRONG_PAPER, VERDICT_SAME_WORK_VARIANT)
 from cre.f1.schema import ClaimedRef, RetrievedRecord
 
 
@@ -100,6 +100,27 @@ def test_preprint_doi_prefix_author_match_true_quarantines():
     v, m = flag_verdict(c, r)
     assert m.title_sim < SAME_WORK_TITLE_SIM_MIN
     assert v == VERDICT_SAME_WORK_VARIANT
+
+
+def test_preprint_venue_clean_match_stays_match():
+    """The ``and disagree`` guard: a CORRECTLY-cited preprint that resolves and
+    matches cleanly (same title, same first author, same year) is a true
+    negative, not a same-work variant. It must stay VERDICT_MATCH so the ~79
+    clean preprint->published matches in seed 7 remain in the denominator --
+    quarantining them would shrink the frame and dump true negatives into the
+    audited same-work queue."""
+    title = "Deep learning for genomic variant calling in cancer"
+    c = ClaimedRef(title=title, authors=["Aguilar"], year=2022,
+                   journal="arXiv:2007.15367")
+    r = RetrievedRecord(resolved=True, title=title, authors=["Aguilar"],
+                        year=2022, journal="Bioinformatics")
+    v, m = flag_verdict(c, r)
+    assert is_preprint_source(c) is True
+    assert m.fields.author_match is True
+    # No confident disagreement -> the preprint branch does NOT fire.
+    assert m.fields.author_match is not False and m.fields.year_match is not False
+    assert m.score >= 0.85
+    assert v == VERDICT_MATCH
 
 
 def test_preprint_venue_author_match_false_stays_wrong_paper():
