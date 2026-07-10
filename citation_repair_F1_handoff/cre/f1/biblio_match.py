@@ -455,6 +455,34 @@ def match_score(claimed: Claimed, cand: RetrievedRecord,
                        override_fired=override_fired)
 
 
+# =====================================================================
+# Preprint-source detector (F2_V3_5)
+# =====================================================================
+# A claimed citation whose venue is a preprint server, resolving via its own
+# identifier to the published record, is the SAME work under a revised title --
+# NOT a wrong paper. The signal lives entirely on the CLAIMED (citing-side)
+# metadata: the venue string names a preprint server, or the claimed DOI carries
+# a preprint-registrant prefix. Orthogonal to title_sim, so the 0.92 same-work
+# gate is untouched.
+_PREPRINT_VENUE_TOKENS = ("arxiv", "biorxiv", "medrxiv", "chemrxiv",
+                          "ssrn", "research square", "researchsquare",
+                          "preprints.org", "preprint", "osf",
+                          "psyarxiv", "techrxiv", "authorea")
+_PREPRINT_DOI_PREFIXES = ("10.1101/", "10.48550/", "10.21203/",
+                          "10.26434/", "10.31234/", "10.31219/")
+
+
+def is_preprint_source(claimed) -> bool:
+    """True iff the CLAIMED citation names a preprint venue (journal string)
+    or carries a preprint-registrant DOI prefix. Signal is on the claimed
+    (citing-side) metadata only -- the resolved record is the published work."""
+    j = (claimed.journal or "").lower()
+    if any(tok in j for tok in _PREPRINT_VENUE_TOKENS):
+        return True
+    doi = (claimed.claimed_doi or "").lower()
+    return any(doi.startswith(p) for p in _PREPRINT_DOI_PREFIXES)
+
+
 def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
                  accept: float = 0.85) -> tuple[str, MatchResult]:
     """Classify a (claimed, resolved-candidate) pair into a priority band.
@@ -471,7 +499,11 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
                              the SAME work, so this is a revision / citing-side
                              metadata-drift signature, NOT a wrong reference.
                              Checked BEFORE the wrong-paper branch; audited but
-                             excluded from the F2 count.
+                             excluded from the F2 count. Also reached (F2_V3_5)
+                             when the claimed venue is a preprint server and the
+                             first author agrees (author_match is True) -- a
+                             preprint->published retitle of the same work, keyed
+                             on the preprint signal not title_sim.
       VERDICT_WRONG_PAPER    below accept AND (author or year disagrees, or no
                              field agrees at all): the wrong-paper signal, the
                              audit's high-precision band.
@@ -492,6 +524,17 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # revision / metadata-drift signature, not wrong-paper evidence. Requires a
     # real disagreement (so an unparsed-field ``None`` never diverts).
     if m.title_sim >= SAME_WORK_TITLE_SIM_MIN and disagree:
+        return VERDICT_SAME_WORK_VARIANT, m
+    # PREPRINT-SOURCE same-work quarantine (F2_V3_5): a citation whose CLAIMED
+    # venue is a preprint server, resolving via its own identifier to a published
+    # record, is the SAME work under a revised title -- not a wrong paper. Keyed
+    # on the preprint signal (orthogonal to title_sim, so the 0.92 gate is
+    # untouched). Requires author_match is True (the conservative gate): a
+    # genuinely wrong preprint cite by a DIFFERENT author (author_match is False
+    # or None) still lands in WRONG_PAPER, so recall on real F2 is preserved.
+    # SAME_WORK_VARIANT is audited (not auto-cleared), so any rare misfire is
+    # still seen by a human.
+    if is_preprint_source(claimed) and f.author_match is True:
         return VERDICT_SAME_WORK_VARIANT, m
     # A confident disagreement on a NON-identical title is wrong-paper evidence
     # and MUST stay in the HIGH band even when confirmatory field boosts lifted
