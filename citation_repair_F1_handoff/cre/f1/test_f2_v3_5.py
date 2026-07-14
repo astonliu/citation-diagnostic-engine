@@ -38,6 +38,7 @@ from cre.f1.schema import ClaimedRef, RetrievedRecord
 @pytest.mark.parametrize("journal", [
     "arXiv:2007.15367",
     "bioRxiv",
+    "BioRvix",  # observed transposition typo in a JATS source citation
     "medRxiv preprint",
     "Research Square",
     "SSRN Electronic Journal",

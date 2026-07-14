@@ -33,6 +33,18 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
         log.decided_by = "unscoreable"
         return ref
 
+    # A deterministic identity rule found evidence of a translation, correction,
+    # revision, or malformed rendering of the resolved work.  Keep the row
+    # visible for audit, but do not let an LLM/search disagreement turn it into
+    # an automatic F1/F2 accusation.
+    if log.same_work_reason:
+        ref.label, ref.confidence = HUMAN_REVIEW, "MED"
+        ref.rationale = (f"Resolved identifier appears to represent the same work "
+                         f"or a work variant ({log.same_work_reason}); quarantined "
+                         f"for human adjudication.")
+        log.decided_by = "same_work_variant_quarantine"
+        return ref
+
     # No claimed PMID.
     if not log.pmid_present:
         if not log.noid_lookup_attempted:

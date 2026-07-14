@@ -248,8 +248,7 @@ class ClaimedRef:
     claimed_doi: str = ""
     raw: str = ""
     # Structured fields used by the bibliographic matcher (biblio_match.py).
-    # The PMC parser does not populate these yet; default "" => the matcher
-    # reports field-agreement None ("can't judge") rather than a false mismatch.
+    # Empty remains the safe "can't judge" value for malformed citations.
     volume: str = ""
     pages: str = ""
 
@@ -276,6 +275,12 @@ class RetrievedRecord:
     # signal. The field matcher widens its year tolerance for such a record so a
     # preprint->publication year gap on the SAME work is not read as a mismatch.
     year_from_dep: bool = False
+    # MEDLINE evidence retained for identity-aware same-work decisions.  These
+    # fields are additive and default empty so old caches remain readable.
+    alternate_titles: list[str] = field(default_factory=list)
+    language: str = ""
+    publication_types: list[str] = field(default_factory=list)
+    related_pmids: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -289,10 +294,12 @@ class StageLog:
     # non-invertible Delta=score-ts (a corroborating boost can mask a year/author
     # disagreement, so Delta>=0 does NOT imply "no field disagreed").
     author_match: Optional[bool] = None
+    first_author_match: Optional[bool] = None
     year_match: Optional[bool] = None
     journal_match: Optional[bool] = None
     volume_match: Optional[bool] = None
     pages_match: Optional[bool] = None
+    doi_match: Optional[bool] = None
     author_tripwire: Optional[bool] = None   # True = first-author trip-wire fired
     # True when the strong-corroboration override floored this score to accept
     # (author+journal agree on a low-title-similarity pair). Logged so the eval
@@ -300,6 +307,11 @@ class StageLog:
     # same-journal residual whose size must be measured, not assumed.
     override_fired: bool = False
     mismatch_flagged: bool = False
+    # A proof-backed explanation that the identifier resolves to a version,
+    # translation, correction, or malformed rendering of the same work.  Such
+    # rows are quarantined for human review and never auto-labelled F1/F2.
+    same_work_reason: str = ""
+    identity_signals: list[str] = field(default_factory=list)
     # Set when the (claimed, resolved) pair is not a scoreable title comparison
     # (see UNSCOREABLE). Names the reason; routes the ref out of the F2 numerator.
     unscoreable_reason: Optional[str] = None
@@ -348,10 +360,14 @@ class Reference:
                 "match_score": self.log.match_score,
                 "pmid_resolved": self.log.pmid_resolved,
                 "author_match": self.log.author_match,
+                "first_author_match": self.log.first_author_match,
                 "year_match": self.log.year_match,
                 "journal_match": self.log.journal_match,
                 "volume_match": self.log.volume_match,
                 "pages_match": self.log.pages_match,
+                "doi_match": self.log.doi_match,
+                "same_work_reason": self.log.same_work_reason,
+                "identity_signals": self.log.identity_signals,
                 "author_tripwire": self.log.author_tripwire,
                 "unscoreable_reason": self.log.unscoreable_reason,
                 "llm_verdict": self.log.llm_verdict,

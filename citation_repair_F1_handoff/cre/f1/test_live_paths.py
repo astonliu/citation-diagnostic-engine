@@ -18,7 +18,7 @@ import types
 import pytest
 import requests
 
-from cre.f1 import lookup, confirm, run, ratelimit
+from cre.f1 import lookup, confirm, run, ratelimit, parser
 from cre.f1 import schema as S
 from cre.f1.lookup import _parse_medline, compare_and_flag, fetch_pubmed
 from cre.f1.confirm import (search_pubmed, search_crossref, search_openalex,
@@ -105,6 +105,84 @@ def test_parse_medline_book_title_fallback():
 def test_parse_medline_junk_unresolved():
     rec = _parse_medline("SO  - some trailing junk\nLR  - 20200101\n", "5")
     assert rec.resolved is False             # no PMID and no title
+
+
+def test_parse_medline_retains_identity_metadata():
+    text = """PMID- 12345
+TI  - English indexed title.
+TT  - Título vernáculo.
+AU  - Smith AB
+DP  - 2020
+TA  - J Test
+AID - 10.1234/ABC.5 [doi]
+VI  - 12
+PG  - e10-e20
+LA  - spa
+PT  - Journal Article
+PT  - Corrected and Republished Article
+CIN - Comment in: J Test. 2021. PMID: 99999
+"""
+    rec = _parse_medline(text, "12345")
+    assert rec.doi == "10.1234/ABC.5"
+    assert rec.volume == "12" and rec.pages == "e10-e20"
+    assert rec.alternate_titles == ["Título vernáculo."]
+    assert rec.language == "spa"
+    assert rec.publication_types == [
+        "Journal Article", "Corrected and Republished Article"]
+    assert rec.related_pmids == {"CIN": ["99999"]}
+
+
+def test_parser_retains_volume_pages_and_direct_collaboration(tmp_path):
+    xml = b"""<article><body/><back><ref-list><ref id='r7'>
+      <element-citation>
+        <collab>World Medical Association</collab>
+        <article-title>Ethical principles for medical research</article-title>
+        <source>Bull WHO</source><year>2013</year><volume>91</volume>
+        <fpage>219</fpage><lpage>219</lpage>
+        <pub-id pub-id-type='pmid'>12345</pub-id>
+      </element-citation></ref>
+    </ref-list></back></article>"""
+    path = tmp_path / "PMC7.xml"
+    path.write_bytes(xml)
+    ref = parse_pmc_xml(str(path), source_pmcid="PMC7")[0]
+    assert ref.citation_id == "PMC7:r7"
+    assert ref.claimed.authors == ["World Medical Association"]
+    assert ref.claimed.volume == "91"
+    assert ref.claimed.pages == "219"
+
+
+def test_iter_pmc_dir_scopes_before_parsing(tmp_path, monkeypatch):
+    (tmp_path / "PMC_KEEP.xml").write_text("<article/>")
+    (tmp_path / "PMC_SKIP.xml").write_text("<article/>")
+    parsed = []
+
+    def fake_parse(path, source_pmcid=""):
+        parsed.append(source_pmcid)
+        return []
+
+    monkeypatch.setattr(parser, "parse_pmc_xml", fake_parse)
+    assert list(parser.iter_pmc_dir(
+        str(tmp_path), source_pmcids={"PMC_KEEP"})) == []
+    assert parsed == ["PMC_KEEP"]
+
+
+def test_iter_pmc_dir_scoped_flat_layout_skips_directory_walk(
+        tmp_path, monkeypatch):
+    (tmp_path / "PMC_KEEP.xml").write_text("<article/>")
+    parsed = []
+
+    def fake_parse(path, source_pmcid=""):
+        parsed.append(source_pmcid)
+        return []
+
+    def forbidden_walk(_path):
+        raise AssertionError("flat scoped lookup must not enumerate the corpus")
+
+    monkeypatch.setattr(parser, "parse_pmc_xml", fake_parse)
+    monkeypatch.setattr(parser.os, "walk", forbidden_walk)
+    assert list(parser.iter_pmc_dir(
+        str(tmp_path), source_pmcids={"PMC_KEEP"})) == []
+    assert parsed == ["PMC_KEEP"]
 
 
 # --------------------------------------------------------------------------
@@ -319,6 +397,62 @@ def test_tripwire_no_data_does_not_flag():
                              "Aspirin and mortality in adults", [])
     assert compare_and_flag(ref, 85.0, author_tripwire=True) is False
     assert ref.log.author_tripwire is None
+
+
+def test_live_path_flags_claimed_first_author_only_found_as_coauthor():
+    ref = Reference(
+        "coauthor", "", ClaimedRef(
+            title="Neural semantic networks in older adults",
+            authors=["Alice"], year=2020, journal="J Cognition",
+            claimed_pmid="1"))
+    ref.retrieved = RetrievedRecord(
+        resolved=True,
+        title="Neural semantic processing in younger adults",
+        authors=["Bob", "Alice"], year=2020, journal="J Cognition", pmid="1")
+    assert compare_and_flag(ref, 85.0, author_tripwire=True) is True
+    assert ref.log.author_match is True
+    assert ref.log.first_author_match is False
+    assert ref.log.author_tripwire is True
+    assert "appears later" in ref.log.notes
+    assert ref.log.mismatch_flagged is True
+
+
+def test_identity_variant_live_path_quarantines_instead_of_accusing():
+    ref = Reference(
+        "c-variant", "",
+        ClaimedRef(
+            title="Β1 and Β2-Adrenergic Receptors Polymorphism in Hypertension",
+            authors=["Vriz"], year=2017, journal="Acta Cardiol",
+            claimed_pmid="1"))
+    ref.retrieved = RetrievedRecord(
+        resolved=True,
+        title="beta1 and beta2-adrenergic receptors polymorphism in hypertension",
+        authors=["Vriz"], year=2011, journal="Acta Cardiol", pmid="1")
+    flagged = compare_and_flag(ref, 85.0)
+    assert flagged is True
+    assert ref.log.same_work_reason == "canonical_title_exact"
+    decide(ref, flagged, None, None)
+    assert ref.label == S.HUMAN_REVIEW
+    assert ref.log.decided_by == "same_work_variant_quarantine"
+
+
+def test_near_title_gate_live_path_matches_offline_quarantine():
+    ref = Reference(
+        "near-title", "",
+        ClaimedRef(
+            title="Deep neural networks for detection of rare tumors",
+            authors=["Alpha"], year=2018, journal="J One",
+            claimed_pmid="1"))
+    ref.retrieved = RetrievedRecord(
+        resolved=True,
+        title="Deep neural network for detection of rare tumors",
+        authors=["Beta"], year=2021, journal="J Two", pmid="1")
+    flagged = compare_and_flag(ref, 85.0)
+    assert flagged is True
+    assert ref.log.same_work_reason == "near_identical_title"
+    decide(ref, flagged, None, None)
+    assert ref.label == S.HUMAN_REVIEW
+    assert ref.log.decided_by == "same_work_variant_quarantine"
 
 
 # --------------------------------------------------------------------------

@@ -99,6 +99,12 @@ def process_reference(ref: Reference, complete, *, ncbi_key="",
     if not flagged:
         return decide(ref, flagged, None, None, match_threshold)
 
+    # Identity-proven variants are audited, not accused.  Avoid paying for an
+    # LLM and three confirmation searches when the deterministic layer has
+    # already selected the dedicated human-review quarantine.
+    if ref.log.same_work_reason:
+        return decide(ref, flagged, None, None, match_threshold)
+
     # expensive path (flagged survivors only -- PMID candidates and no-ID
     # references whose cheap lookup found a poor match or nothing)
     verdict = llm_filter(ref, complete)

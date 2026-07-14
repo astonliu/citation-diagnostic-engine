@@ -66,6 +66,7 @@ _REGULATORY_RE = re.compile(
     r"|\bu\.\s*s\.\s*c\.?\b",                  # "U.S.C." with periods (not "USC")
     re.I,
 )
+_AUTHOR_RESIDUE_RE = re.compile(r"^\s*(?:et\s+al\.?|and\s+colleagues)\s*$", re.I)
 
 
 def _despace(s: str) -> str:
@@ -99,6 +100,43 @@ def _is_bilingual_masthead(title: str) -> bool:
     return False
 
 
+def _ordered_journal_abbreviation(left: str, right: str) -> bool:
+    """Tight token-order match for a full masthead versus its abbreviation."""
+    drop = {"the", "of", "and"}
+    a = [t for t in normalize_title(left).split() if t not in drop]
+    b = [t for t in normalize_title(right).split() if t not in drop]
+    if len(a) < 3 or len(a) != len(b):
+        return False
+    return all(x == y or (x.startswith(y) or y.startswith(x))
+               for x, y in zip(a, b))
+
+
+def _is_journal_author_residue(title: str,
+                               resolved: Optional[RetrievedRecord]) -> bool:
+    """A masthead plus author surname accidentally parsed as an article title.
+
+    Example: ``Royal Soc Open Science Titelboim``. The rule requires both the
+    resolved journal's ordered token signature and the resolved first author at
+    the end, so a real title that merely mentions a journal is not excluded.
+    """
+    if resolved is None or not resolved.authors or not resolved.journal:
+        return False
+    ntitle = normalize_title(title)
+    author = normalize_title(resolved.authors[0])
+    if not ntitle or not author:
+        return False
+    aliases = sorted({author, author.split()[0], author.split()[-1]},
+                     key=len, reverse=True)
+    for alias in aliases:
+        suffix = " " + alias
+        if not ntitle.endswith(suffix):
+            continue
+        masthead = ntitle[:-len(suffix)].strip()
+        if _ordered_journal_abbreviation(masthead, resolved.journal):
+            return True
+    return False
+
+
 def classify_unscoreable(claimed: ClaimedRef,
                          resolved: Optional[RetrievedRecord] = None
                          ) -> tuple[Optional[str], str]:
@@ -129,6 +167,11 @@ def classify_unscoreable(claimed: ClaimedRef,
         # this, but naming it keeps the bucket honest).
         return ("no_claimed_title", "claimed reference has no title to compare.")
 
+    if _AUTHOR_RESIDUE_RE.fullmatch(ct):
+        return ("author_residue_as_title",
+                "claimed title contains only an author-list residue, not an "
+                "article title.")
+
     # journal name parked in the title slot
     nj = normalize_title(claimed.journal or "")
     if nj and nct == nj:
@@ -143,6 +186,10 @@ def classify_unscoreable(claimed: ClaimedRef,
         return ("journal_as_title",
                 "claimed title is a bilingual journal masthead "
                 "('Vernacular = Romanization'), not an article title.")
+    if _is_journal_author_residue(ct, resolved):
+        return ("journal_author_residue_as_title",
+                "claimed title contains only a journal masthead plus an author "
+                "surname, not an article title.")
 
     # regulatory / legal code in the title slot
     if _REGULATORY_RE.search(ct):

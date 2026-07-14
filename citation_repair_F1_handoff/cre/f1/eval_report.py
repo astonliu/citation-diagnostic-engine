@@ -27,7 +27,7 @@ from collections import Counter
 from typing import Optional
 
 from .schema import F1, F2, UNVERIFIABLE, UNSCOREABLE, ClaimedRef, RetrievedRecord
-from .biblio_match import (match_score, flag_verdict, VERDICT_MATCH,
+from .biblio_match import (flag_verdict, VERDICT_MATCH,
                            VERDICT_WRONG_PAPER, VERDICT_SAME_WORK_VARIANT,
                            VERDICT_UNSCOREABLE, VERDICT_UNRESOLVED)
 from .unscoreable import classify_unscoreable
@@ -239,12 +239,18 @@ def format_report(report: dict) -> str:
 # journal_match and the preprint year-gap tolerance instead of recomputing them
 # as None). Keep every future run on this function so the schema cannot drift.
 _F2_RECORD_KEYS = (
-    "pmid", "src_pmcid", "written_title", "resolved_title", "written_year",
+    "citation_id", "pmid", "claimed_pmid", "resolved_pmid", "src_pmcid",
+    "written_title", "resolved_title", "written_year",
     "resolved_year", "match_score", "title_sim", "author_match", "year_match",
-    "journal_match", "resolved", "flag",
+    "first_author_match", "journal_match", "volume_match", "pages_match",
+    "doi_match", "resolved", "flag", "score_below_accept",
     "written_first_author", "resolved_first_author", "written_journal",
     "resolved_journal", "written_volume", "resolved_volume", "written_pages",
-    "resolved_pages", "resolved_year_from_dep", "verdict",
+    "resolved_pages", "written_doi", "resolved_doi", "resolved_year_from_dep",
+    "written_authors", "resolved_authors", "written_raw", "resolved_is_container",
+    "resolved_alternate_titles", "resolved_language",
+    "resolved_publication_types", "resolved_related_pmids",
+    "verdict", "same_work_reason", "identity_signals",
     # F2_V3_1 Bug 1: the UNSCOREABLE bucket name, "" for scoreable rows. Present on
     # every record so the schema stays uniform (re-bandable + JSON round-trips).
     "unscoreable_reason",
@@ -252,11 +258,14 @@ _F2_RECORD_KEYS = (
 
 
 def _raw_fields(pmid: str, src_pmcid: str, claimed: ClaimedRef,
-                resolved: RetrievedRecord) -> dict:
+                resolved: RetrievedRecord, citation_id: str = "") -> dict:
     """The identity + raw-string fields shared by every F2 record (scoreable or
     UNSCOREABLE). Kept in one place so the two build paths cannot drift apart."""
     return {
+        "citation_id": citation_id,
         "pmid": pmid,
+        "claimed_pmid": claimed.claimed_pmid or pmid,
+        "resolved_pmid": resolved.pmid or "",
         "src_pmcid": src_pmcid,
         "written_title": claimed.title,
         "resolved_title": resolved.title,
@@ -266,18 +275,30 @@ def _raw_fields(pmid: str, src_pmcid: str, claimed: ClaimedRef,
         # raw strings the verdicts were computed from (enable faithful re-banding)
         "written_first_author":   claimed.authors[0] if claimed.authors else "",
         "resolved_first_author":  resolved.authors[0] if resolved.authors else "",
+        "written_authors":        list(claimed.authors),
+        "resolved_authors":       list(resolved.authors),
+        "written_raw":            claimed.raw or "",
         "written_journal":        claimed.journal or "",
         "resolved_journal":       resolved.journal or "",
         "written_volume":         claimed.volume or "",
         "resolved_volume":        resolved.volume or "",
         "written_pages":          claimed.pages or "",
         "resolved_pages":         resolved.pages or "",
+        "written_doi":            claimed.claimed_doi or "",
+        "resolved_doi":           resolved.doi or "",
+        "resolved_is_container":  bool(getattr(resolved, "is_container", False)),
         "resolved_year_from_dep": bool(getattr(resolved, "year_from_dep", False)),
+        "resolved_alternate_titles": list(getattr(resolved, "alternate_titles", [])),
+        "resolved_language":      getattr(resolved, "language", "") or "",
+        "resolved_publication_types": list(
+            getattr(resolved, "publication_types", [])),
+        "resolved_related_pmids": dict(getattr(resolved, "related_pmids", {})),
     }
 
 
 def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
-                    resolved: RetrievedRecord, accept: float = 0.85) -> dict:
+                    resolved: RetrievedRecord, accept: float = 0.85,
+                    citation_id: str = "") -> dict:
     """Assemble one F2 run-output record from the SAME claimed/resolved objects
     the scorer consumes -- the canonical, re-bandable schema.
 
@@ -288,10 +309,10 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
     preprint year-gap tolerance, which keys on ``resolved_year_from_dep`` -- with
     no re-fetch and no recompute-to-None.
 
-    ``flag`` is True iff the composite is below ``accept`` (the screen's
-    flag line); ``verdict`` is the priority band (match / wrong_paper /
-    formatting). Both are derived from the single ``match_score`` call so they
-    are mutually consistent.
+    ``flag`` records whether the pair was actually sent to a review band;
+    ``score_below_accept`` records the narrower numeric-threshold fact.  Keeping
+    them separate prevents contradictory rows such as ``flag=false`` alongside
+    ``review_wrong_paper`` when a field disagreement is masked by score boosts.
 
     UNSCOREABLE GATE (F2_V3_1 Bug 1): before scoring, the pair runs through the
     SAME ``classify_unscoreable`` gate the live ``lookup.compare_and_flag`` path
@@ -316,14 +337,21 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
     bucket, _reason = classify_unscoreable(claimed, resolved)
     if bucket:
         return {
-            **_raw_fields(pmid, src_pmcid, claimed, resolved),
+            **_raw_fields(pmid, src_pmcid, claimed, resolved, citation_id),
             "match_score": None,
             "title_sim": None,
             "author_match": None,
             "year_match": None,
+            "first_author_match": None,
             "journal_match": None,
+            "volume_match": None,
+            "pages_match": None,
+            "doi_match": None,
             "flag": None,                     # not a flag decision; it was gated out
+            "score_below_accept": None,
             "verdict": VERDICT_UNSCOREABLE,
+            "same_work_reason": "",
+            "identity_signals": [],
             "unscoreable_reason": bucket,
         }
 
@@ -340,28 +368,41 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
     # yet looked up) is NOT swept in and proceeds to normal scoring.
     if resolved.resolved is False:
         return {
-            **_raw_fields(pmid, src_pmcid, claimed, resolved),
+            **_raw_fields(pmid, src_pmcid, claimed, resolved, citation_id),
             "match_score": None,
             "title_sim": None,
             "author_match": None,
             "year_match": None,
+            "first_author_match": None,
             "journal_match": None,
+            "volume_match": None,
+            "pages_match": None,
+            "doi_match": None,
             "flag": None,                     # not a flag decision; nothing resolved
+            "score_below_accept": None,
             "verdict": VERDICT_UNRESOLVED,
+            "same_work_reason": "",
+            "identity_signals": [],
             "unscoreable_reason": "resolved_unresolved",
         }
 
-    m = match_score(claimed, resolved, accept=accept)
-    verdict, _ = flag_verdict(claimed, resolved, accept=accept)
+    verdict, m = flag_verdict(claimed, resolved, accept=accept)
     return {
-        **_raw_fields(pmid, src_pmcid, claimed, resolved),
+        **_raw_fields(pmid, src_pmcid, claimed, resolved, citation_id),
         "match_score": m.score,
         "title_sim": m.title_sim,
         "author_match": m.fields.author_match,
         "year_match": m.fields.year_match,
+        "first_author_match": m.fields.first_author_match,
         "journal_match": m.fields.journal_match,
-        "flag": m.score < accept,
+        "volume_match": m.fields.volume_match,
+        "pages_match": m.fields.pages_match,
+        "doi_match": m.fields.doi_match,
+        "flag": verdict != VERDICT_MATCH,
+        "score_below_accept": m.score < accept,
         "verdict": verdict,
+        "same_work_reason": m.same_work_reason,
+        "identity_signals": list(m.identity_signals),
         "unscoreable_reason": "",
     }
 
@@ -432,6 +473,13 @@ def assert_f2_fixes_loaded() -> None:
     if getattr(bm, "VERDICT_SAME_WORK_VARIANT", None) != "review_same_work_variant":
         raise RuntimeError("STALE MODULE: biblio_match.VERDICT_SAME_WORK_VARIANT "
                            "missing -- Defect B fix not loaded.")
+    if bm.normalize_title("Β1 receptor") != bm.normalize_title("beta1 receptor"):
+        raise RuntimeError("STALE MODULE: shared Greek-letter normalization is "
+                           "not loaded for the structured F2 matcher.")
+    from .work_identity import canonical_title
+    if canonical_title("Mn2+ transporter") == canonical_title("Mn2- transporter"):
+        raise RuntimeError("STALE MODULE: work-identity charge-preserving "
+                           "normalization is not loaded.")
     from .parser import _authors_from
     try:
         from lxml import etree

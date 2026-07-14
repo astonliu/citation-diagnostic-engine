@@ -15,59 +15,19 @@ Set NCBI_API_KEY in config for ~10 req/s; EFetch shares the NCBI rate budget
 with the ESearch/ESummary calls in confirm.py via the shared limiter.
 """
 from __future__ import annotations
-import html
 import re
-import unicodedata
 
 import requests
 from rapidfuzz import fuzz
 
 from .schema import Reference, RetrievedRecord
 from .ratelimit import NCBI, request_with_retry
-from .biblio_match import match_score, retrieve_candidates, best_match
+from .biblio_match import (match_score, flag_verdict, retrieve_candidates,
+                           best_match, VERDICT_SAME_WORK_VARIANT)
 from .unscoreable import classify_unscoreable
+from .textnorm import fold_bibliographic_text
 
 EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-
-
-# Greek letter -> English name. Maps both lowercase and uppercase forms.
-# Needed because PMC/JATS titles carry literal Greek (β-glucans) while
-# PubMed/Crossref records spell them out (beta-glucans); without this the SAME
-# paper scores as a mismatch.
-_GREEK = {
-    "\u03b1": "alpha", "\u0391": "alpha",
-    "\u03b2": "beta",  "\u0392": "beta",
-    "\u03b3": "gamma", "\u0393": "gamma",
-    "\u03b4": "delta", "\u0394": "delta",
-    "\u03b5": "epsilon", "\u0395": "epsilon",
-    "\u03b6": "zeta",  "\u0396": "zeta",
-    "\u03b7": "eta",   "\u0397": "eta",
-    "\u03b8": "theta", "\u0398": "theta",
-    "\u03b9": "iota",  "\u0399": "iota",
-    "\u03ba": "kappa", "\u039a": "kappa",
-    "\u03bb": "lambda", "\u039b": "lambda",
-    "\u03bc": "mu",    "\u039c": "mu",
-    "\u03bd": "nu",    "\u039d": "nu",
-    "\u03be": "xi",    "\u039e": "xi",
-    "\u03bf": "omicron", "\u039f": "omicron",
-    "\u03c0": "pi",    "\u03a0": "pi",
-    "\u03c1": "rho",   "\u03a1": "rho",
-    "\u03c3": "sigma", "\u03c2": "sigma", "\u03a3": "sigma",
-    "\u03c4": "tau",   "\u03a4": "tau",
-    "\u03c5": "upsilon", "\u03a5": "upsilon",
-    "\u03c6": "phi",   "\u03a6": "phi",
-    "\u03c7": "chi",   "\u03a7": "chi",
-    "\u03c8": "psi",   "\u03a8": "psi",
-    "\u03c9": "omega", "\u03a9": "omega",
-    "\u00b5": "mu",    # MICRO SIGN (distinct codepoint from Greek mu)
-}
-
-_TAG_RE = re.compile(r"<[^>]+>")
-_GREEK_RE = re.compile("|".join(map(re.escape, _GREEK)))
-# Unicode dash/hyphen variants folded to ASCII '-' (kept in step with
-# biblio_match.normalize_title; see _normalize step 4b). U+2010..U+2015 + U+2212.
-_DASH_RE = re.compile(
-    "[‐‑‒–—―−]")
 
 
 def _normalize(t: str) -> str:
@@ -92,22 +52,8 @@ def _normalize(t: str) -> str:
     """
     if not t:
         return ""
-    # 1. HTML entities
-    t = html.unescape(t)
-    # 2. HTML/MathML tags
-    t = _TAG_RE.sub(" ", t)
-    # 3. Greek letters -> names
-    t = _GREEK_RE.sub(lambda m: _GREEK[m.group()], t)
-    # 4. fold diacritics / compatibility forms to ASCII
-    t = unicodedata.normalize("NFKD", t)
-    t = "".join(ch for ch in t if not unicodedata.combining(ch))
-    # 4b. fold Unicode dash/hyphen variants to ASCII '-' (F2_V3_1 Bug 2). Here the
-    # next step turns every non-word char into a space, so a Unicode dash and an
-    # ASCII hyphen both become a space either way -- this fold is functionally a
-    # no-op for _normalize, kept only so this normalizer stays byte-for-byte in
-    # step with biblio_match.normalize_title (the fix's real site), where the
-    # intra-token hyphen collapse makes the fold load-bearing.
-    t = _DASH_RE.sub("-", t)
+    # Shared HTML/Greek/Unicode fold.  Token punctuation remains lookup-specific.
+    t = fold_bibliographic_text(t)
     # 5. existing behavior
     t = t.lower()
     t = re.sub(r"[^\w\s]", " ", t)
@@ -177,6 +123,31 @@ def _year_from_medline(fields: dict) -> tuple[int | None, bool]:
     return None, False
 
 
+def _doi_from_medline(fields: dict) -> str:
+    """First DOI from MEDLINE AID/LID values (``... [doi]``)."""
+    for tag in ("AID", "LID"):
+        for value in fields.get(tag, []):
+            m = re.match(r"\s*(10\.\S+?)\s*\[doi\]\s*$", value, re.I)
+            if m:
+                return m.group(1).rstrip(". ")
+    return ""
+
+
+_RELATION_TAGS = ("CIN", "CON", "CRI", "CRF", "EFR", "EIN", "RIN", "ROF",
+                  "RPF", "RPI", "SPIN", "UIN", "UOF")
+
+
+def _related_pmids_from_medline(fields: dict) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for tag in _RELATION_TAGS:
+        ids: list[str] = []
+        for value in fields.get(tag, []):
+            ids.extend(re.findall(r"PMID:\s*(\d+)", value, re.I))
+        if ids:
+            out[tag] = list(dict.fromkeys(ids))
+    return out
+
+
 def _parse_medline(text: str, pmid: str) -> RetrievedRecord:
     # MEDLINE: each field begins with a 2-4 letter tag + '-'; continuation
     # lines are indented. Join continuations onto their field first. Skip blank
@@ -222,8 +193,15 @@ def _parse_medline(text: str, pmid: str) -> RetrievedRecord:
         year=year,
         journal=_first_nonempty(fields, "TA", "JT"),
         pmid=(fields.get("PMID") or [pmid])[0],
+        doi=_doi_from_medline(fields),
+        volume=_first_nonempty(fields, "VI"),
+        pages=_first_nonempty(fields, "PG"),
         is_container=is_container,
         year_from_dep=year_from_dep,
+        alternate_titles=[t for t in fields.get("TT", []) if t and t != title],
+        language=_first_nonempty(fields, "LA"),
+        publication_types=list(fields.get("PT", [])),
+        related_pmids=_related_pmids_from_medline(fields),
     )
 
 
@@ -353,20 +331,25 @@ def _override_quality(fields) -> bool:
     journal -- both agree, and no field disagrees. This is the only corroboration
     strong enough to let a sub-accept title be CLEARED; author-only or
     year-only agreement is not (low entropy, collides across unrelated works)."""
-    if not (fields.author_match is True and fields.journal_match is True):
+    first_author_ok = (fields.first_author_match is True or
+                       (fields.first_author_match is None
+                        and fields.author_match is True))
+    if not (first_author_ok and fields.journal_match is True):
         return False
     return not any(v is False for v in (fields.author_match, fields.year_match,
                                         fields.journal_match, fields.volume_match,
                                         fields.pages_match))
 
 
-def _flag_decision(m, accept: float) -> bool:
+def _flag_decision(m, accept: float, *, author_tripwire: bool = True) -> bool:
     """The F2-screen flag predicate, shared by the PMID and no-PMID paths.
 
     Flag when ANY holds:
       * the composite is below accept;
       * the years confidently disagree (a boost may have buried it -- the 16639420
         paper-series case after the parser author fix);
+      * with the author trip-wire enabled, the claimed first author appears only
+        later in the resolved roster (coauthor overlap is not first-author ID);
       * the title is below accept and is NOT rescued by override-quality
         corroboration -- so confirmatory boosts ALONE (e.g. the lone +0.05 author
         boost the parser fix now adds on a sparse ref whose year+journal are
@@ -377,7 +360,29 @@ def _flag_decision(m, accept: float) -> bool:
     """
     return (m.score < accept
             or _year_disagreement(m.fields)
+            or (author_tripwire and m.fields.first_author_match is False)
             or (m.title_sim < accept and not _override_quality(m.fields)))
+
+
+def _record_author_tripwire(log, match, *, enabled: bool) -> None:
+    """Persist the same positional-author signal used by `_flag_decision`."""
+    if enabled and match.fields.first_author_match is not None:
+        log.author_tripwire = (match.fields.first_author_match is False)
+
+
+def _live_quarantines_variant(verdict: str, match, *,
+                              author_tripwire: bool) -> bool:
+    """Mirror offline quarantine while honoring an explicit author opt-out.
+
+    The generic 0.92 gate needs a real disagreement.  If its *only* disagreement
+    is author position and the caller deliberately disabled author trip-wires,
+    do not re-enable that same signal indirectly through the gate.  Proof-backed
+    rules and year-disagreeing near titles still quarantine.
+    """
+    if verdict != VERDICT_SAME_WORK_VARIANT:
+        return False
+    return (match.same_work_reason != "near_identical_title"
+            or author_tripwire or _year_disagreement(match.fields))
 
 
 def compare_and_flag(ref: Reference, threshold: float = 85.0,
@@ -422,22 +427,34 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
             # Re-score claimed vs the chosen record with the structured matcher
             # (truncation-robust title + field agreement). title_similarity is
             # logged on the established 0..100 scale; match_score on 0..1.
-            m = match_score(ref.claimed, retrieved)
+            verdict, m = flag_verdict(ref.claimed, retrieved, accept=accept)
             log.title_similarity = round(m.title_sim * 100, 1)
             log.match_score = m.score
             log.author_match = m.fields.author_match
+            log.first_author_match = m.fields.first_author_match
             log.year_match = m.fields.year_match
             log.journal_match = m.fields.journal_match
             log.volume_match = m.fields.volume_match
             log.pages_match = m.fields.pages_match
+            log.doi_match = m.fields.doi_match
             log.override_fired = m.override_fired
+            _record_author_tripwire(log, m, enabled=author_tripwire)
+            log.same_work_reason = m.same_work_reason
+            log.identity_signals = list(m.identity_signals)
+            if _live_quarantines_variant(
+                    verdict, m, author_tripwire=author_tripwire):
+                log.mismatch_flagged = True
+                log.notes = (f"Same-work/near-title ambiguity quarantined "
+                             f"({m.same_work_reason}); no-ID citation requires "
+                             f"human review.")
+                return True
             # Same screen predicate as the PMID path (a confident year
             # disagreement or a boost-only sub-accept clear escalates rather than
             # clearing). No-PMID can never become F2, so a flag here only routes
             # to human_review -- but keeping the two paths consistent avoids
             # auto-clearing a year-mismatched pair on one path and flagging it on
             # the other.
-            if not _flag_decision(m, accept):
+            if not _flag_decision(m, accept, author_tripwire=author_tripwire):
                 # Reference exists and points to the right work as far as we can
                 # tell -> cleared (was_flagged=False in decide()).
                 log.mismatch_flagged = False
@@ -477,22 +494,44 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
     # HIGH (field boosts compensate) and is not flagged; a PMID resolving to an
     # unrelated paper scores LOW on title AND fields -> flagged (Dr. Roberts'
     # concern). title_similarity stays on 0..100; match_score is the 0..1 verdict.
-    m = match_score(ref.claimed, ref.retrieved)
+    verdict, m = flag_verdict(ref.claimed, ref.retrieved, accept=accept)
     log.title_similarity = round(m.title_sim * 100, 1)
     log.match_score = m.score
     log.author_match = m.fields.author_match
+    log.first_author_match = m.fields.first_author_match
     log.year_match = m.fields.year_match
     log.journal_match = m.fields.journal_match
     log.volume_match = m.fields.volume_match
     log.pages_match = m.fields.pages_match
+    log.doi_match = m.fields.doi_match
     log.override_fired = m.override_fired
+    _record_author_tripwire(log, m, enabled=author_tripwire)
+    log.same_work_reason = m.same_work_reason
+    log.identity_signals = list(m.identity_signals)
+
+    # Proof-backed variants remain visible, but bypass the F1/F2 accusation
+    # path.  ``process_reference`` sends them directly to ``decide``, which
+    # records a human-review quarantine without an LLM/database round trip.
+    if _live_quarantines_variant(verdict, m,
+                                 author_tripwire=author_tripwire):
+        log.mismatch_flagged = True
+        log.notes = (f"Same-work/near-title ambiguity quarantined "
+                     f"({m.same_work_reason}); "
+                     f"signals={','.join(m.identity_signals) or 'title gate'}.")
+        return True
 
     # Flag via the shared screen predicate (low composite, buried year
     # disagreement, or a sub-accept title not rescued by override-quality
     # corroboration). Recall-first; never raises accept, never auto-clears.
-    flagged = _flag_decision(m, accept)
+    flagged = _flag_decision(m, accept, author_tripwire=author_tripwire)
     if flagged:
-        if m.score < accept:
+        if author_tripwire and m.fields.first_author_match is False:
+            relation = ("appears later in the resolved author list"
+                        if m.fields.author_match is True
+                        else "does not match the resolved first author")
+            log.notes = (f"claimed first author {ref.claimed.authors[0]!r} "
+                         f"{relation}; positional author trip-wire fired.")
+        elif m.score < accept:
             log.notes = (f"match_score {m.score:.2f} < {accept:.2f} "
                          f"(title_sim {m.title_sim:.2f})")
         elif _year_disagreement(m.fields):
@@ -504,18 +543,11 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
                          f"{m.score:.2f} reached accept on confirmatory boosts "
                          f"alone without author+journal corroboration.")
 
-    # Trip-wire: title is similar enough to pass, but the claimed first author
-    # is absent from the record the PMID resolves to -> recombination candidate.
-    if not flagged and author_tripwire:
-        present = _claimed_first_author_present(ref.claimed.authors,
-                                                ref.retrieved.authors)
-        if present is not None:               # None = unjudgeable; leave as None
-            log.author_tripwire = (present is False)
-        if present is False:
-            flagged = True
-            log.notes = (f"title similar (match_score {m.score:.2f}) but claimed "
-                         f"first author {ref.claimed.authors[0]!r} absent from "
-                         f"resolved record")
+    # Trip-wire audit signal: compare position zero to position zero.  The older
+    # anywhere-in-roster check mislabeled a claimed first author found only as a
+    # coauthor as a clean trip-wire pass, even though `_flag_decision` correctly
+    # flagged that positional mismatch.
+    _record_author_tripwire(log, m, enabled=author_tripwire)
 
     log.mismatch_flagged = flagged
     return flagged
