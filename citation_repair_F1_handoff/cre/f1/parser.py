@@ -9,6 +9,7 @@ Dependencies: lxml. Falls back to stdlib ElementTree if lxml is absent.
 """
 from __future__ import annotations
 from typing import Iterator
+import os
 import re
 
 try:
@@ -112,7 +113,12 @@ def _authors_from(node) -> list[str]:
     """
     groups = list(node.iter("person-group"))
     if not groups:
-        return _surnames_under(node)
+        authors = _surnames_under(node)
+        for col in node.iter("collab"):
+            value = _text(col)
+            if value:
+                authors.append(value)
+        return authors
 
     authors: list[str] = []
     for pg in groups:
@@ -134,6 +140,29 @@ def _pub_id(node, id_type: str) -> str:
         if pid.get("pub-id-type") == id_type:
             return _text(pid)
     return ""
+
+
+def _direct_text(node, *tags: str) -> str:
+    """Text of the first matching direct child, never a nested citation field."""
+    for tag in tags:
+        el = node.find(tag)
+        if el is not None:
+            value = _text(el)
+            if value:
+                return value
+    return ""
+
+
+def _pages_from(node) -> str:
+    """JATS page range/eLocator without dropping alphabetic article locators."""
+    explicit = _direct_text(node, "page-range")
+    if explicit:
+        return explicit
+    first = _direct_text(node, "fpage")
+    last = _direct_text(node, "lpage")
+    if first and last:
+        return first if first == last else f"{first}-{last}"
+    return first or last or _direct_text(node, "elocation-id")
 
 
 def _citation_node(ref):
@@ -256,6 +285,8 @@ def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:
             claimed_pmid=_pub_id(cit, "pmid"),
             claimed_doi=_pub_id(cit, "doi"),
             raw=_text(cit),
+            volume=_direct_text(cit, "volume"),
+            pages=_pages_from(cit),
         )
         ref_id = ref.get("id") or f"ref{i}"
         reference = Reference(
@@ -277,13 +308,46 @@ def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:
     return refs
 
 
-def iter_pmc_dir(dirpath: str) -> Iterator[Reference]:
-    """Yield references across every .xml/.nxml in a directory tree."""
-    import os
+def iter_pmc_dir(dirpath: str, *,
+                 source_pmcids: set[str] | None = None) -> Iterator[Reference]:
+    """Yield references across a PMC XML tree, optionally scoped by file stem.
+
+    The filename-level filter runs before XML parsing.  This is load-bearing for
+    held-out rebanding where several seeds share a large Drive directory: parsing
+    every out-of-scope article before discarding it made a 1,225-file run scan the
+    entire corpus and appear hung on cold network-mounted storage.
+    """
+    allow = set(source_pmcids) if source_pmcids is not None else None
+
+    # The normal OA layout is flat (``<dir>/PMC123.xml``).  Resolve a scoped
+    # run directly instead of first listing every entry in a cloud-mounted
+    # directory; on Drive that directory walk can take minutes before the first
+    # wanted article is opened.  Fall back to a recursive walk only for allowed
+    # stems that were not present at the root, preserving support for nested
+    # corpora.
+    if allow is not None:
+        missing = set(allow)
+        for pmcid in sorted(allow):
+            for suffix in (".xml", ".nxml"):
+                path = os.path.join(dirpath, f"{pmcid}{suffix}")
+                if not os.path.isfile(path):
+                    continue
+                missing.discard(pmcid)
+                try:
+                    yield from parse_pmc_xml(path, source_pmcid=pmcid)
+                except Exception as e:                       # noqa: BLE001
+                    print(f"[parse-skip] {pmcid}{suffix}: {e}")
+                break
+        if not missing:
+            return
+        allow = missing
+
     for dp, _, files in os.walk(dirpath):
         for fn in files:
             if fn.endswith((".xml", ".nxml")):
                 pmcid = re.sub(r"\.n?xml$", "", fn)
+                if allow is not None and pmcid not in allow:
+                    continue
                 try:
                     yield from parse_pmc_xml(os.path.join(dp, fn), source_pmcid=pmcid)
                 except Exception as e:                       # noqa: BLE001

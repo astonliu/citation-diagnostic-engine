@@ -49,6 +49,34 @@ def test_regulatory_code():
     assert bucket == "regulatory_code"
 
 
+def test_author_residue_is_not_treated_as_an_article_title():
+    c = ClaimedRef(title="et al.", authors=["Vos"], year=2020,
+                   journal="Lancet", claimed_pmid="33069326")
+    bucket, _ = classify_unscoreable(
+        c, _resolved(title="Global burden of diseases and injuries"))
+    assert bucket == "author_residue_as_title"
+
+
+def test_journal_masthead_plus_resolved_author_is_unscoreable():
+    claimed = ClaimedRef(title="Royal Soc Open Science Titelboim")
+    resolved = RetrievedRecord(
+        resolved=True,
+        title=("Unexpected increase in structural integrity caused by thermally "
+               "induced dwarfism in large benthic foraminifera"),
+        authors=["Titelboim"], journal="R Soc Open Sci")
+    bucket, _ = classify_unscoreable(claimed, resolved)
+    assert bucket == "journal_author_residue_as_title"
+
+
+def test_real_title_mentioning_author_or_journal_remains_scoreable():
+    claimed = ClaimedRef(
+        title="Unexpected structural integrity in Royal Society specimens")
+    resolved = RetrievedRecord(
+        resolved=True, title="A different article", authors=["Titelboim"],
+        journal="R Soc Open Sci")
+    assert classify_unscoreable(claimed, resolved)[0] is None
+
+
 def test_resolved_no_title_placeholder():
     # 30539090: claimed PMID resolves to "[Not Available]".
     c = ClaimedRef(title="Estimation of Relative Load From Bar Velocity",

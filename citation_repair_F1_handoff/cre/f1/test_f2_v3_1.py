@@ -326,15 +326,15 @@ def test_reband_pmid_only_join_when_src_pmcid_absent(tmp_path):
                                "title": "Purple Urine after Catheterization",
                                "authors": ["Sabanis"], "year": 2019}])
     summary = reband_from_cache(str(xml_dir), str(cache), out_dir=str(tmp_path),
-                                version="v3_1")
+                                version="v3_1", src_pmcids={"PMC0001"})
     assert summary["n_joined"] == 1
     assert summary["n_pmid_only_join"] == 1
     assert summary["n_ambiguous_dropped"] == 0
 
 
-def test_reband_drops_ambiguous_pmid_only_join(tmp_path):
-    # same PMID cited by TWO source papers, cache line has no src_pmcid ->
-    # ambiguous, dropped and counted (never silently mis-joined).
+def test_reband_fans_pmid_cache_row_to_every_source_occurrence(tmp_path):
+    # The cache record is the official work for PMID 999, so it is the correct
+    # comparator for every citation occurrence even across source papers.
     from cre.f1.f2_run_v3 import reband_from_cache
     xml_dir = tmp_path / "xml"; xml_dir.mkdir()
     _write_xml(str(xml_dir), "PMC0001", [("r1", "T one", "A", 2019, "999")])
@@ -343,10 +343,68 @@ def test_reband_drops_ambiguous_pmid_only_join(tmp_path):
     _write_cache(str(cache), [{"pmid": "999", "resolved": True,
                                "title": "Resolved", "authors": ["Z"], "year": 2019}])
     summary = reband_from_cache(str(xml_dir), str(cache), out_dir=str(tmp_path),
-                                version="v3_1")
-    assert summary["n_joined"] == 0
-    assert summary["n_ambiguous_dropped"] == 1
-    assert summary["n_records"] == 0
+                                version="v3_1",
+                                src_pmcids={"PMC0001", "PMC0002"})
+    assert summary["n_joined"] == 2
+    assert summary["n_cache_rows_joined"] == 1
+    assert summary["n_occurrence_fanout"] == 1
+    assert summary["n_ambiguous_dropped"] == 0
+    assert summary["n_records"] == 2
+    rows = [json.loads(line) for line in open(summary["records_path"])]
+    assert {row["citation_id"] for row in rows} == {"PMC0001:r1", "PMC0002:r1"}
+
+
+def test_unsourced_cache_requires_explicit_source_frame(tmp_path):
+    from cre.f1.f2_run_v3 import reband_from_cache
+    xml_dir = tmp_path / "xml"; xml_dir.mkdir()
+    _write_xml(str(xml_dir), "PMC0001", [("r1", "A title", "A", 2019, "999")])
+    cache = tmp_path / "resolved.jsonl"
+    _write_cache(str(cache), [{"pmid": "999", "resolved": True,
+                               "title": "A title", "authors": ["A"],
+                               "year": 2019}])
+    with pytest.raises(RuntimeError, match="requires src_pmcids"):
+        reband_from_cache(str(xml_dir), str(cache), out_dir=str(tmp_path),
+                          version="v3_1")
+
+
+def test_reband_preserves_two_same_source_citations_of_one_pmid(tmp_path):
+    from cre.f1.f2_run_v3 import reband_from_cache
+    xml_dir = tmp_path / "xml"; xml_dir.mkdir()
+    _write_xml(str(xml_dir), "PMC0001", [
+        ("r1", "The correctly cited work", "Lee", 2020, "999"),
+        ("r2", "An unrelated written paper", "Jones", 2010, "999"),
+    ])
+    cache = tmp_path / "resolved.jsonl"
+    _write_cache(str(cache), [{"pmid": "999", "resolved": True,
+                               "title": "The correctly cited work",
+                               "authors": ["Lee"], "year": 2020}])
+    summary = reband_from_cache(str(xml_dir), str(cache), out_dir=str(tmp_path),
+                                version="v3_1", src_pmcids={"PMC0001"})
+    rows = [json.loads(line) for line in open(summary["records_path"])]
+    assert [(row["citation_id"], row["verdict"]) for row in rows] == [
+        ("PMC0001:r1", VERDICT_MATCH),
+        ("PMC0001:r2", VERDICT_WRONG_PAPER),
+    ]
+    assert summary["n_joined"] == 2
+    assert summary["n_cache_rows_joined"] == 1
+    assert summary["n_occurrence_fanout"] == 1
+
+
+def test_fresh_runner_assigns_unique_occurrence_ids_for_repeated_pmid(tmp_path):
+    from cre.f1.f2_run_v3 import run_f2_seed7_v3
+    resolved = RetrievedRecord(resolved=True, title="The resolved paper",
+                               authors=["Lee"], year=2020)
+    items = [
+        ("999", "PMC1", ClaimedRef(title="The resolved paper",
+                                    authors=["Lee"], year=2020), resolved),
+        ("999", "PMC1", ClaimedRef(title="A different claimed paper",
+                                    authors=["Jones"], year=2010), resolved),
+    ]
+    summary = run_f2_seed7_v3(items, out_dir=str(tmp_path), version="v4")
+    rows = [json.loads(line) for line in open(summary["records_path"])]
+    assert [row["citation_id"] for row in rows] == [
+        "PMC1:f2occ1", "PMC1:f2occ2"]
+    assert len({row["citation_id"] for row in rows}) == 2
 
 
 def test_reband_counts_unmatched_cache_line(tmp_path):
@@ -438,6 +496,52 @@ def test_retrieved_from_cache_reads_nested_rec():
     assert r.volume == "12" and r.pages == "1-9"
 
 
+def test_resolved_cache_dedupes_identical_rows_and_rejects_conflicts(tmp_path):
+    from cre.f1.f2_run_v3 import load_resolved_cache
+    duplicate = {"pmid": "999", "resolved": True, "title": "Same work",
+                 "authors": ["Lee"], "year": 2020}
+    path = tmp_path / "dupes.jsonl"
+    _write_cache(str(path), [duplicate, duplicate])
+    assert len(load_resolved_cache(str(path))) == 1
+
+    conflict = dict(duplicate, title="Conflicting work")
+    path2 = tmp_path / "conflict.jsonl"
+    _write_cache(str(path2), [duplicate, conflict])
+    with pytest.raises(RuntimeError, match="Conflicting resolved-cache rows"):
+        load_resolved_cache(str(path2))
+
+
+def test_resolved_cache_rejects_envelope_nested_pmid_mismatch(tmp_path):
+    from cre.f1.f2_run_v3 import load_resolved_cache
+    path = tmp_path / "wrong-id.jsonl"
+    _write_cache(str(path), [{
+        "pmid": "111",
+        "rec": {"pmid": "222", "resolved": True, "title": "Work 222"},
+    }])
+    with pytest.raises(RuntimeError, match="PMID mismatch"):
+        load_resolved_cache(str(path))
+
+
+def test_mixed_sourced_and_unsourced_cache_rows_do_not_duplicate_occurrence(
+        tmp_path):
+    from cre.f1.f2_run_v3 import reband_from_cache
+    xml_dir = tmp_path / "xml"; xml_dir.mkdir()
+    _write_xml(str(xml_dir), "PMC1", [
+        ("r1", "The correctly cited work", "Lee", 2020, "999")])
+    resolved = {"pmid": "999", "resolved": True,
+                "title": "The correctly cited work", "authors": ["Lee"],
+                "year": 2020}
+    cache = tmp_path / "mixed.jsonl"
+    _write_cache(str(cache), [resolved, {"src_pmcid": "PMC1", **resolved}])
+    summary = reband_from_cache(
+        str(xml_dir), str(cache), out_dir=str(tmp_path), version="v3_1",
+        src_pmcids={"PMC1"})
+    rows = [json.loads(line) for line in open(summary["records_path"])]
+    assert [row["citation_id"] for row in rows] == ["PMC1:r1"]
+    assert summary["n_records"] == summary["n_joined"] == 1
+    assert summary["n_occurrence_duplicates_deduped"] == 1
+
+
 def test_reband_with_nested_rec_envelope(tmp_path):
     # full reband path against the REAL nested-"rec" cache format.
     from cre.f1.f2_run_v3 import reband_from_cache
@@ -472,7 +576,7 @@ def test_reband_aborts_when_resolved_titles_mostly_empty(tmp_path):
     _write_cache(str(cache), [{"pmid": "111"}, {"pmid": "222"}])   # no rec, no fields
     with pytest.raises(RuntimeError, match="resolved_title"):
         reband_from_cache(str(xml_dir), str(cache), out_dir=str(tmp_path),
-                          version="v3_1")
+                          version="v3_1", src_pmcids={"PMC1"})
     # nothing written -- the abort precedes the write.
     assert not (tmp_path / "f2_random_oa_seed7_v3_1.jsonl").exists()
 

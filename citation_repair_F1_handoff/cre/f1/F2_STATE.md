@@ -1,7 +1,92 @@
-# F2 state — v3.1 re-band
+# F2 state — identity redesign and prospective validation
 
 Working-state note for the F2 (wrong-paper) precision pass. Branch:
 `feat/f2-final-revision`. Module: `cre/f1/`.
+
+## 2026-07-14 redesign status — development only
+
+> **Seeds 19 and 23 are burned development data.** Their 31 original HIGH rows
+> informed the identity redesign. No result from those seeds may be described as
+> held-out or prospective in the paper.
+
+Before independent ratification, the post-fix replay moved all 15 suspected
+false positives to `review_same_work_variant` / human review and retained the 16
+provisionally true-F2 rows as HIGH. The resulting **16/16 = 1.000 (Wilson 95% CI
+[0.8064, 1.000])** was only a preliminary development diagnostic.
+
+The full persisted-output rescore surfaced four additional HIGH rows:
+`31643080`, `33148016`, `35523811`, and `36844755`. Therefore the operative
+development denominator is **20, not 16**. After independent row review, all 20
+are ratified as genuine wrong-paper cases. The post-fix development result is
+therefore **20/20 = 1.000 (Wilson 95% CI [0.8389, 1.000])**. This remains a
+burned-development result and must not be presented as held-out performance.
+
+### Book versus edition-announcement policy (`31643080`)
+
+`31643080` remains `review_wrong_paper` / HIGH. The proposed rule treating an
+edition-announcement editorial as a same-target PubMed surrogate was rejected:
+
+- [Cochrane's official citation instructions](https://training.cochrane.org/handbook)
+  identify the 2019 Handbook as a separate Higgins/Thomas-edited,
+  second-edition Wiley book.
+- [PMID `31643080`](https://pubmed.ncbi.nlm.nih.gov/31643080/) is a
+  Cumpston-led journal editorial with its own DOI, and its PubMed record cites
+  the 2019 Handbook as a separate reference.
+- The engine audits document identity, not topical or citation-family
+  relatedness. An editorial that names, announces, reviews, or cites a book is
+  not the book itself, even when the title, edition year, and some contributors
+  overlap.
+
+Accordingly, no book-to-edition-announcement quarantine rule is implemented.
+`test_work_identity.py` carries both the exact PMID fixture and a generic guard.
+The existing recall invariant is unchanged: genuine ambiguous same-work cases
+still go to human review, never to `match` / `cleared` / `correct`.
+
+### Recall-preservation invariant
+
+All 15 rows moved out of HIGH go to a named human-review quarantine; **none may
+route to `match`, `cleared`, or `correct`**. This is load-bearing: identity rules
+may defer an ambiguous same-work family, but never auto-clear it from the F2
+population. The live and offline paths now share this quarantine behavior.
+
+### Prospective protocol
+
+- Seed 29 is the next untouched seed. Because seeds 19/23 shaped the rules, seed
+  29 is the first eligible source of a held-out precision number.
+- Apply the pre-registered sampling rule unchanged: if pooled fresh HIGH is below
+  20, add another untouched seed. At the observed base rate, plan operationally
+  for seed 29 plus at least one additional fresh seed rather than assuming one
+  seed will yield a defensible interval.
+- Freeze code and adjudication instructions before drawing seed 29. Do not tune
+  rules on seed 29 and still call it held out.
+- Report the 19/23 result only as post-fix development performance and keep it
+  separate from the prospective estimate.
+
+### Overfitting stress point
+
+Fresh data must specifically test whether the derivative-publication split
+generalizes: `25750242` (Gompertz original versus a later commentary) is a
+distinct-work HIGH, while `32187592` (ONETEP corrigendum) is a same-work review
+quarantine. Commentary/review/series blockers and correction rules were tuned on
+few examples, so success on 19/23 is not evidence of generalization.
+
+### Current regression status
+
+The actual checkout passes **344 tests** plus `git diff --check`. A focused
+23-assertion guard run confirms:
+
+- `2280326` (Zimet containment) and `25750242` (Gompertz commentary) remain
+  `review_wrong_paper` / HIGH.
+- `12199786`, `9802808`, and `35264587` remain
+  `review_same_work_variant` / human review.
+- `10233931`, `12187163`, `16205345`, `20713917`, `25480410`, `31035900`,
+  `35737708`, and `36166919` remain `unresolved` with no fabricated scores.
+
+The exact occurrence-aware XML re-band is still required when producing the
+next durable run artifact. The 36,798-row check above was a rescore of persisted
+records; it is broader than the original 31-row audit but is not a fresh seed.
+
+## Historical v3.1 re-band notes
 
 ## What v3.1 fixes (and why)
 

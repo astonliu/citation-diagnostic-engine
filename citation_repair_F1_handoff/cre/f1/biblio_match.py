@@ -26,7 +26,6 @@ the model can't load. Stage 1 ships independently and has no such dependency.
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -35,6 +34,10 @@ from rapidfuzz.distance import JaroWinkler
 
 from .schema import ClaimedRef, RetrievedRecord
 from .ratelimit import CROSSREF, OPENALEX, request_with_retry
+from .textnorm import fold_bibliographic_text, fold_chemical_charges
+from .work_identity import (assess_same_work, first_author_equivalent,
+                            doi_equivalent, journal_equivalent,
+                            is_distinctive_title)
 
 # ``Claimed`` is the handoff's name for the claimed-reference metadata object.
 Claimed = ClaimedRef
@@ -51,10 +54,15 @@ class FieldAgreement:
     """Per-field verdicts. True/False/None where None = can't judge (the field
     is missing on at least one side, so absence is never read as a mismatch)."""
     author_match: Optional[bool] = None
+    # Unlike author_match (written first author appears anywhere in the resolved
+    # roster), this compares first-author position.  Keep both: coauthor overlap
+    # is useful evidence but must not masquerade as high-entropy first-author ID.
+    first_author_match: Optional[bool] = None
     year_match: Optional[bool] = None
     journal_match: Optional[bool] = None
     volume_match: Optional[bool] = None
     pages_match: Optional[bool] = None
+    doi_match: Optional[bool] = None
 
 
 @dataclass
@@ -64,6 +72,8 @@ class MatchResult:
     fields: FieldAgreement
     record: Optional[RetrievedRecord] = None   # the candidate this scores
     override_fired: bool = False       # strong-corroboration override floored the score
+    same_work_reason: str = ""          # auditable identity rule used by flag_verdict
+    identity_signals: tuple[str, ...] = ()
 
 
 @dataclass
@@ -126,17 +136,6 @@ _TITLE_PREFIX_RE = re.compile(
 # only to OFFER a de-prefixed title variant; never the sole representation.
 _LEADING_PREFIX_RE = re.compile(r"^[^.:]{1,80}?[.:]\s+(?=\S)")
 
-# Unicode dash / hyphen variants that must fold to ASCII '-' BEFORE the intra-token
-# hyphen collapse below. Without this fold a U+2010 HYPHEN in 'Topka‐Bielecka'
-# survives to the [^\w\s] step and becomes a SPACE (a word split -> 'topka
-# bielecka'), while the ASCII 'Topka-Bielecka' is collapsed to 'topkabielecka' --
-# so the SAME surname / title mis-compares (F2_V3_1 Bug 2). Folds U+2010..U+2015
-# (hyphen, non-breaking hyphen, figure dash, en dash, em dash, horizontal bar) and
-# U+2212 (minus sign). This is punctuation folding only -- it never widens matching.
-_DASH_RE = re.compile(
-    "[‐‑‒–—―−]")
-
-
 def normalize_title(t: str) -> str:
     """Lowercase, Unicode-fold (strip accents), drop punctuation, collapse
     whitespace. Also strips PubMed translated-title brackets and
@@ -153,14 +152,9 @@ def normalize_title(t: str) -> str:
         s = s[1:-2]
     # drop erratum/corrigendum/correction/retraction decoration
     s = _TITLE_PREFIX_RE.sub("", s)
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = fold_bibliographic_text(s)
+    s = fold_chemical_charges(s)
     s = s.lower()
-    # fold Unicode dash/hyphen variants to ASCII '-' so the intra-token collapse
-    # below treats 'Topka‐Bielecka' (U+2010) identically to 'Topka-Bielecka'
-    # (F2_V3_1 Bug 2). Must precede the collapse: otherwise a Unicode dash reaches
-    # the [^\w\s] step and becomes a word-splitting space instead.
-    s = _DASH_RE.sub("-", s)
     # collapse intra-token hyphens in alphanumeric tokens so "t-rna" == "trna",
     # "pd-l2" == "pdl2" (chemical / gene / variant name formatting)
     s = re.sub(r"(?<=\w)-(?=\w)", "", s)
@@ -311,12 +305,19 @@ def _surname_present(claimed_surname: str, cand_authors: list[str]) -> bool:
         return False
     target_tokens = [t for t in claimed_surname.split() if len(t) >= 3]
     last = target_tokens[-1] if target_tokens else claimed_surname
+    corporate_tokens = {
+        "association", "society", "organization", "organisation", "committee",
+        "council", "consortium", "collaboration", "group", "agency", "college",
+    }
+    claimed_is_corporate = bool(set(claimed_surname.split()) & corporate_tokens)
     for cand in cand_authors:
         c = _norm(cand)
         if not c:
             continue
         if claimed_surname == c:
             return True
+        if claimed_is_corporate:
+            continue
         ctoks = c.split()
         if last and last in ctoks:                  # surname token appears
             return True
@@ -344,12 +345,13 @@ def field_agreement(claimed: Claimed, cand: RetrievedRecord) -> FieldAgreement:
     claimed_sn = _first_author_surname(claimed.authors)
     if claimed_sn and cand.authors:
         fa.author_match = _surname_present(claimed_sn, cand.authors)
+        fa.first_author_match = first_author_equivalent(claimed, cand)
 
-    # journal (bidirectional normalized containment) -- computed before year so
+    # journal (conservative ISO-abbreviation approximation) -- computed before year so
     # the preprint year-tolerance below can require journal corroboration.
     cj, rj = _norm(claimed.journal), _norm(cand.journal)
     if cj and rj:
-        fa.journal_match = (cj in rj) or (rj in cj)
+        fa.journal_match = journal_equivalent(claimed.journal, cand.journal)
 
     # year: agree within +/-1. A 2-year gap is read as CAN'T-JUDGE (None, never a
     # penalty) ONLY when the resolved year is epub/preprint-derived (year_from_dep)
@@ -378,6 +380,9 @@ def field_agreement(claimed: Claimed, cand: RetrievedRecord) -> FieldAgreement:
     cp, rp = _digits(claimed.pages), _digits(cand.pages)
     if cp and rp:
         fa.pages_match = cp == rp
+
+    if claimed.claimed_doi and cand.doi:
+        fa.doi_match = doi_equivalent(claimed.claimed_doi, cand.doi)
 
     return fa
 
@@ -444,7 +449,9 @@ def match_score(claimed: Claimed, cand: RetrievedRecord,
     # those disagrees; ``disagree == 0`` additionally blocks a contradicting
     # year/volume/pages (same author+journal but year off by 5 -> likely a
     # different work, do not rescue).
-    override_fired = (f.author_match is True and f.journal_match is True
+    first_author_ok = (f.first_author_match is True or
+                       (f.first_author_match is None and f.author_match is True))
+    override_fired = (first_author_ok and f.journal_match is True
                       and disagree == 0 and score < accept)
     if override_fired:
         score = accept
@@ -464,7 +471,7 @@ def match_score(claimed: Claimed, cand: RetrievedRecord,
 # metadata: the venue string names a preprint server, or the claimed DOI carries
 # a preprint-registrant prefix. Orthogonal to title_sim, so the 0.92 same-work
 # gate is untouched.
-_PREPRINT_VENUE_TOKENS = ("arxiv", "biorxiv", "medrxiv", "chemrxiv",
+_PREPRINT_VENUE_TOKENS = ("arxiv", "biorxiv", "biorvix", "medrxiv", "chemrxiv",
                           "ssrn", "research square", "researchsquare",
                           "preprints.org", "preprint", "osf",
                           "psyarxiv", "techrxiv", "authorea")
@@ -521,12 +528,28 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     f = m.fields
     # Tri-state: only a REAL disagreement (is False) counts; None (unparsed) does
     # not. A confident author/year disagreement.
-    disagree = (f.author_match is False) or (f.year_match is False)
+    disagree = ((f.first_author_match is False)
+                or (f.author_match is False) or (f.year_match is False))
+    identity = assess_same_work(claimed, cand, title_similarity=m.title_sim)
+    # Clean accepted pairs are ordinary matches, not review variants.  For a
+    # pair that would otherwise be reviewed, prefer a specific identity proof
+    # over the generic near-title gate so the live path can route safely.
+    if not disagree and m.score >= accept:
+        return VERDICT_MATCH, m
+    if identity.same_work:
+        m.same_work_reason = identity.reason
+        m.identity_signals = identity.signals
+        return VERDICT_SAME_WORK_VARIANT, m
     # SAME_WORK_VARIANT quarantine -- checked FIRST. A near-identical title means
     # the PMID resolves to the same work, so author/year drift on it is a
     # revision / metadata-drift signature, not wrong-paper evidence. Requires a
     # real disagreement (so an unparsed-field ``None`` never diverts).
-    if m.title_sim >= SAME_WORK_TITLE_SIM_MIN and disagree:
+    if (m.title_sim >= SAME_WORK_TITLE_SIM_MIN and disagree
+            and is_distinctive_title(claimed.title)
+            and is_distinctive_title(cand.title)
+            and not identity.blocked_by):
+        m.same_work_reason = "near_identical_title"
+        m.identity_signals = ("title_sim>=0.92",)
         return VERDICT_SAME_WORK_VARIANT, m
     # PREPRINT-SOURCE same-work quarantine (F2_V3_5): a citation whose CLAIMED
     # venue is a preprint server, resolving via its own identifier to a published
@@ -541,7 +564,11 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # the denominator -- it is a true negative, not an ambiguous same-work row.
     # SAME_WORK_VARIANT is audited (not auto-cleared), so any rare misfire is
     # still seen by a human.
-    if is_preprint_source(claimed) and f.author_match is True and disagree:
+    first_author_ok = (f.first_author_match is True or
+                       (f.first_author_match is None and f.author_match is True))
+    if is_preprint_source(claimed) and first_author_ok and disagree:
+        m.same_work_reason = "preprint_published_version"
+        m.identity_signals = ("preprint_source", "first_author")
         return VERDICT_SAME_WORK_VARIANT, m
     # A confident disagreement on a NON-identical title is wrong-paper evidence
     # and MUST stay in the HIGH band even when confirmatory field boosts lifted

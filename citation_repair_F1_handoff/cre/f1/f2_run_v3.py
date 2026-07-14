@@ -41,7 +41,8 @@ from .biblio_match import (VERDICT_UNSCOREABLE, VERDICT_SAME_WORK_VARIANT,
 from .eval_report import (build_f2_record, high_band_rate_of_scoreable,
                           assert_f2_fixes_loaded)
 
-Item = Tuple[str, str, ClaimedRef, RetrievedRecord]
+Item = (Tuple[str, str, ClaimedRef, RetrievedRecord]
+        | Tuple[str, str, str, ClaimedRef, RetrievedRecord])
 
 # Output versions that are FROZEN and must never be overwritten by a re-band.
 _PRESERVED_VERSIONS = {"v2", "v3"}
@@ -63,8 +64,10 @@ def run_f2_seed7_v3(items: Iterable[Item], *, out_dir: str = ".",
                     accept: float = 0.85, seed: int = 7) -> dict:
     """Assemble v3 records from ``items`` and write ``<prefix>_seed<seed>_<version>.*``.
 
-    ``items`` yields ``(pmid, src_pmcid, claimed, resolved)`` using the SAME
-    objects passed to the scorer. Returns a summary dict (record count + the
+    ``items`` preferably yields ``(pmid, src_pmcid, citation_id, claimed,
+    resolved)`` using the SAME objects passed to the scorer. The legacy 4-tuple
+    form remains accepted and receives a deterministic occurrence ID instead of
+    the old blank value. Returns a summary dict (record count + the
     HIGH-band metric). Halts (RuntimeError) if either revision fix is not loaded.
 
     ``seed`` labels the run (default ``7``) so a fresh held-out draw (e.g. seed 11)
@@ -78,8 +81,19 @@ def run_f2_seed7_v3(items: Iterable[Item], *, out_dir: str = ".",
                            "path; v2 is preserved. Use version='v3' (or later).")
     assert_f2_fixes_loaded()                      # fail loud BEFORE any write
 
-    records = [build_f2_record(pmid, src_pmcid, claimed, resolved, accept=accept)
-               for (pmid, src_pmcid, claimed, resolved) in items]
+    records = []
+    for occurrence_index, item in enumerate(items, start=1):
+        if len(item) == 5:
+            pmid, src_pmcid, citation_id, claimed, resolved = item
+        elif len(item) == 4:
+            pmid, src_pmcid, claimed, resolved = item
+            citation_id = f"{src_pmcid or 'doc'}:f2occ{occurrence_index}"
+        else:
+            raise ValueError("F2 items must be 4-tuples or 5-tuples with a "
+                             "citation_id")
+        records.append(build_f2_record(
+            pmid, src_pmcid, claimed, resolved, accept=accept,
+            citation_id=citation_id))
     return _write_run(records, out_dir=out_dir, out_prefix=out_prefix,
                       version=version, seed=seed)
 
@@ -135,6 +149,25 @@ def _retrieved_from_cache(line: dict) -> RetrievedRecord:
                               if k in _RETRIEVED_FIELDS})
 
 
+def index_claimed_occurrences_from_xml_dir(
+        xml_dir: str, *, src_pmcids: Optional[Iterable[str]] = None) -> dict:
+    """Index every PMID-bearing citation occurrence without collapsing repeats.
+
+    Values are XML-ordered ``[(citation_id, ClaimedRef), ...]`` lists.  A source
+    article may cite the same PMID more than once, including once correctly and
+    once incorrectly; those are distinct audit units and must both survive.
+    """
+    allow = set(src_pmcids) if src_pmcids is not None else None
+    index: dict = {}
+    for ref in iter_pmc_dir(xml_dir, source_pmcids=allow):
+        pmid = (ref.claimed.claimed_pmid or "").strip()
+        if not pmid:
+            continue
+        key = (ref.source_pmcid or "", pmid)
+        index.setdefault(key, []).append((ref.citation_id, ref.claimed))
+    return index
+
+
 def index_claimed_from_xml_dir(xml_dir: str, *,
                                src_pmcids: Optional[Iterable[str]] = None) -> dict:
     """Parse every .xml/.nxml under ``xml_dir`` with the FIXED parser and index
@@ -151,17 +184,9 @@ def index_claimed_from_xml_dir(xml_dir: str, *,
     ref whose ``source_pmcid`` is not in the allow-list is skipped, so the
     resulting frame -- and thus the reband denominator -- is not contaminated by
     other seeds' articles. ``None`` indexes the whole dir (original behavior)."""
-    allow = set(src_pmcids) if src_pmcids is not None else None
-    index: dict = {}
-    for ref in iter_pmc_dir(xml_dir):
-        if allow is not None and (ref.source_pmcid or "") not in allow:
-            continue
-        pmid = (ref.claimed.claimed_pmid or "").strip()
-        if not pmid:
-            continue
-        key = (ref.source_pmcid or "", pmid)
-        index.setdefault(key, ref.claimed)
-    return index
+    occurrences = index_claimed_occurrences_from_xml_dir(
+        xml_dir, src_pmcids=src_pmcids)
+    return {key: values[0][1] for key, values in occurrences.items()}
 
 
 def load_resolved_cache(resolved_cache_path: str, *, src_pmcid_key: str = "src_pmcid",
@@ -173,6 +198,7 @@ def load_resolved_cache(resolved_cache_path: str, *, src_pmcid_key: str = "src_p
     ``src_pmcid`` from ``src_pmcid_key`` when present, else ``""`` (the join then
     degrades to PMID-only)."""
     out = []
+    seen: dict[tuple[str, str], RetrievedRecord] = {}
     with open(resolved_cache_path) as f:
         for raw in f:
             raw = raw.strip()
@@ -180,8 +206,26 @@ def load_resolved_cache(resolved_cache_path: str, *, src_pmcid_key: str = "src_p
                 continue
             env = json.loads(raw)                 # the whole line envelope
             resolved = _retrieved_from_cache(env)  # descends into env["rec"]
-            pmid = str(env.get(pmid_key) or resolved.pmid or "").strip()
+            envelope_pmid = str(env.get(pmid_key) or "").strip()
+            resolved_pmid = str(resolved.pmid or "").strip()
+            if (envelope_pmid and resolved_pmid
+                    and envelope_pmid != resolved_pmid):
+                raise RuntimeError(
+                    "Resolved-cache PMID mismatch: envelope "
+                    f"{envelope_pmid!r} != nested record {resolved_pmid!r}; "
+                    "refusing to join one work under another identifier.")
+            pmid = envelope_pmid or resolved_pmid
             src_pmcid = str(env.get(src_pmcid_key) or "").strip()
+            key = (src_pmcid, pmid)
+            if pmid and key in seen:
+                if seen[key] != resolved:
+                    raise RuntimeError(
+                        "Conflicting resolved-cache rows for "
+                        f"src_pmcid={src_pmcid!r}, pmid={pmid!r}; refusing to "
+                        "multiply an ambiguous record across citation occurrences.")
+                continue
+            if pmid:
+                seen[key] = resolved
             out.append((src_pmcid, pmid, resolved))
     return out
 
@@ -196,25 +240,26 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
     CURRENTLY-LOADED fixes -- NO NCBI/Crossref call. Writes
     ``<prefix>_seed<seed>_<version>.*`` (default ``seed=7``, ``version="v3_1"``).
 
-    ``seed`` labels the run and its output files; with ``seed=7`` and
-    ``src_pmcids=None`` (the defaults) this reproduces the audited seed-7 output
-    byte-for-byte. The preserved-version guard is seed-aware: it refuses only when
-    ``seed == 7`` and the version is frozen (v2/v3), keeping the seed-7 v2/v3 files
-    untouchable while held-out seeds (11/13/17) may reband at any version.
+    ``seed`` labels the run and its output files. The preserved-version guard is
+    seed-aware: it refuses only when ``seed == 7`` and the version is frozen
+    (v2/v3), keeping the audited seed-7 files untouchable while held-out seeds may
+    reband at any new version.
 
     ``src_pmcids`` scopes the claimed-index to this seed's source papers when many
-    seeds share one XML dir (see ``index_claimed_from_xml_dir``); ``None`` indexes
-    the whole dir. ``n_src_pmcids`` is reported in the summary for auditability.
+    seeds share one XML dir (see ``index_claimed_from_xml_dir``). It is required
+    when cache rows lack their own source-PMCID field, preventing a PMID from
+    leaking across runs that share an XML directory. ``n_src_pmcids`` is reported
+    in the summary for auditability.
 
     Cache format: each resolved-cache line is an envelope
     ``{"pmid": ..., "rec": {resolved, title, authors, ...}}``; the RetrievedRecord
     is reconstructed from the nested ``"rec"`` (see ``_retrieved_from_cache``).
 
-    Join: the resolved cache is joined to the parsed claimed refs on
-    ``(src_pmcid, claimed_pmid)``. When a cache line has no ``src_pmcid``, the join
-    falls back to PMID-only and is accepted ONLY when that PMID is unique across
-    the parsed frame; an ambiguous PMID-only line (same PMID in >1 source paper)
-    is dropped and counted, never silently mis-joined. A cache line that DOES carry
+    Join: the resolved cache is joined to citation OCCURRENCES on
+    ``(src_pmcid, claimed_pmid)``. Because a cache row is the official record for
+    one PMID, it fans out to every in-scope citation occurrence carrying that
+    PMID. When a cache line has no ``src_pmcid``, fanout may span source papers;
+    each occurrence is still compared with the same resolved work. A line that DOES carry
     a ``src_pmcid`` joins ONLY on its exact key -- a present-but-unmatched
     ``src_pmcid`` is dropped as unmatched, never re-joined to another paper. Both
     fixes ride through ``build_f2_record``: the UNSCOREABLE gate (Bug 1) and the
@@ -222,8 +267,10 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
     >50% of scoreable rows have an empty resolved_title (a broken reconstruction).
 
     Returns the run summary plus join diagnostics (``n_resolved_cache``,
-    ``n_joined``, ``n_pmid_only_join``, ``n_ambiguous_dropped``,
-    ``n_unmatched_dropped``) and the F2_V3_3 audit list
+    ``n_joined``, ``n_cache_rows_joined``, ``n_occurrence_fanout``,
+    ``n_occurrence_duplicates_deduped``,
+    ``n_pmid_only_join``, ``n_ambiguous_dropped``, ``n_unmatched_dropped``)
+    and the F2_V3_3 audit list
     ``same_work_newly_quarantined`` -- the PMIDs whose band changed from
     review_wrong_paper (at the old 0.95 gate) to review_same_work_variant (at the
     new 0.92 gate), so the threshold move can be audited row-by-row."""
@@ -237,23 +284,32 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
     # Materialize the allow-list once so len() is stable and the set can be passed
     # to the indexer without re-consuming a generator.
     src_pmcid_set = set(src_pmcids) if src_pmcids is not None else None
-    claimed_by_full = index_claimed_from_xml_dir(xml_dir, src_pmcids=src_pmcid_set)
-    # PMID-only fallback index: pmid -> list of (src_pmcid, ClaimedRef).
-    claimed_by_pmid: dict = {}
-    for (src_pmcid, pmid), claimed in claimed_by_full.items():
-        claimed_by_pmid.setdefault(pmid, []).append((src_pmcid, claimed))
-
     cache = load_resolved_cache(resolved_cache_path, src_pmcid_key=src_pmcid_key,
                                 pmid_key=pmid_key)
+    if src_pmcid_set is None and any(not src for src, _pmid, _rec in cache):
+        raise RuntimeError(
+            "reband_from_cache requires src_pmcids when cache rows do not carry "
+            "src_pmcid. PMID fanout over an unscoped shared XML directory can "
+            "silently mix seeds; pass the run's explicit source-PMCID frame.")
+
+    claimed_by_full = index_claimed_occurrences_from_xml_dir(
+        xml_dir, src_pmcids=src_pmcid_set)
+    # PMID-only fallback index: pmid -> every (source, citation ID, ClaimedRef).
+    claimed_by_pmid: dict = {}
+    for (src_pmcid, pmid), occurrences in claimed_by_full.items():
+        for citation_id, claimed in occurrences:
+            claimed_by_pmid.setdefault(pmid, []).append(
+                (src_pmcid, citation_id, claimed))
 
     items: list = []
-    n_pmid_only = n_ambiguous = n_unmatched = 0
+    item_by_occurrence: dict = {}
+    n_raw_occurrence_joins = n_occurrence_duplicates_deduped = 0
+    n_pmid_only = n_ambiguous = n_unmatched = n_cache_rows_joined = 0
     for src_pmcid, pmid, resolved in cache:
         if not pmid:
             n_unmatched += 1
             continue
-        claimed = None
-        joined_src = src_pmcid
+        occurrences = []
         if src_pmcid:
             # A definitely-sourced cache line joins ONLY on its exact
             # (src_pmcid, claimed_pmid) key. If that key misses (a stale PMCID, or
@@ -261,24 +317,39 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
             # never re-joined to a DIFFERENT source paper via the PMID-only
             # fallback. That fallback is reserved for lines with NO src_pmcid; a
             # present-but-unmatched src_pmcid must never be silently rewritten.
-            claimed = claimed_by_full.get((src_pmcid, pmid))
+            occurrences = [
+                (src_pmcid, citation_id, claimed)
+                for citation_id, claimed in claimed_by_full.get((src_pmcid, pmid), [])
+            ]
         else:
-            # No src_pmcid: fall back to a PMID-only join, accepted only when the
-            # PMID is unique across the parsed frame (else ambiguous -> drop).
-            candidates = claimed_by_pmid.get(pmid, [])
-            if len(candidates) == 1:              # unique PMID -> safe join
-                joined_src, claimed = candidates[0]
+            # The cache stores one resolved record per PMID, so that record is
+            # the correct comparator for every in-scope occurrence of the PMID.
+            occurrences = claimed_by_pmid.get(pmid, [])
+            if occurrences:
                 n_pmid_only += 1
-            elif len(candidates) > 1:             # ambiguous -> never guess
-                n_ambiguous += 1
-                continue
-        if claimed is None:
+        if not occurrences:
             n_unmatched += 1
             continue
-        items.append((pmid, joined_src, claimed, resolved))
+        n_cache_rows_joined += 1
+        for joined_src, citation_id, claimed in occurrences:
+            n_raw_occurrence_joins += 1
+            occurrence_key = (joined_src, citation_id, pmid)
+            prior = item_by_occurrence.get(occurrence_key)
+            item = (pmid, joined_src, citation_id, claimed, resolved)
+            if prior is not None:
+                if prior[4] != resolved:
+                    raise RuntimeError(
+                        "Conflicting resolved-cache rows joined to citation "
+                        f"occurrence {occurrence_key!r}; refusing to score the "
+                        "same citation against two works.")
+                n_occurrence_duplicates_deduped += 1
+                continue
+            item_by_occurrence[occurrence_key] = item
+            items.append(item)
 
-    records = [build_f2_record(pmid, s, c, r, accept=accept)
-               for (pmid, s, c, r) in items]
+    records = [build_f2_record(pmid, s, c, r, accept=accept,
+                               citation_id=citation_id)
+               for (pmid, s, citation_id, c, r) in items]
 
     # Pre-write reconstruction guard. If the resolved records were read from the
     # wrong level (top-level instead of the nested "rec"), every row reconstructs
@@ -315,10 +386,36 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
         and r.get("title_sim") is not None
         and SAME_WORK_TITLE_SIM_MIN <= r["title_sim"] < _PRIOR_SAME_WORK_TITLE_SIM_MIN
     )
+    same_work_newly_quarantined_occurrences = sorted(
+        ({"citation_id": r.get("citation_id") or "",
+          "src_pmcid": r.get("src_pmcid") or "",
+          "pmid": str(r.get("pmid") or "")}
+         for r in records
+         if r.get("verdict") == VERDICT_SAME_WORK_VARIANT
+         and r.get("title_sim") is not None
+         and SAME_WORK_TITLE_SIM_MIN <= r["title_sim"] < _PRIOR_SAME_WORK_TITLE_SIM_MIN),
+        key=lambda row: (row["citation_id"], row["pmid"]),
+    )
+    proof_rule_quarantined_below_gate = sorted(
+        ({"citation_id": r.get("citation_id") or "",
+          "src_pmcid": r.get("src_pmcid") or "",
+          "pmid": str(r.get("pmid") or ""),
+          "reason": r.get("same_work_reason") or ""}
+         for r in records
+         if r.get("verdict") == VERDICT_SAME_WORK_VARIANT
+         and r.get("same_work_reason")
+         and r.get("same_work_reason") != "near_identical_title"
+         and r.get("title_sim") is not None
+         and r["title_sim"] < SAME_WORK_TITLE_SIM_MIN),
+        key=lambda row: (row["citation_id"], row["pmid"]),
+    )
 
     diag = {
         "n_resolved_cache": len(cache),
         "n_joined": len(items),
+        "n_cache_rows_joined": n_cache_rows_joined,
+        "n_occurrence_fanout": n_raw_occurrence_joins - n_cache_rows_joined,
+        "n_occurrence_duplicates_deduped": n_occurrence_duplicates_deduped,
         "n_pmid_only_join": n_pmid_only,
         "n_ambiguous_dropped": n_ambiguous,
         "n_unmatched_dropped": n_unmatched,
@@ -326,6 +423,11 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
         "rebanded_from_cache": True,
         "same_work_newly_quarantined": same_work_newly_quarantined,
         "n_same_work_newly_quarantined": len(same_work_newly_quarantined),
+        "same_work_newly_quarantined_occurrences":
+            same_work_newly_quarantined_occurrences,
+        "proof_rule_quarantined_below_gate": proof_rule_quarantined_below_gate,
+        "n_proof_rule_quarantined_below_gate":
+            len(proof_rule_quarantined_below_gate),
     }
     return _write_run(records, out_dir=out_dir, out_prefix=out_prefix,
                       version=version, extra=diag, seed=seed)

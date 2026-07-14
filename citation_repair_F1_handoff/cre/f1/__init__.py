@@ -36,6 +36,8 @@ from .biblio_match import (
     SAME_WORK_TITLE_SIM_MIN,
 )
 from .biblio_rerank import rerank_stage2
+from .work_identity import (WorkIdentityEvidence, assess_same_work,
+                            canonical_title, is_distinctive_title)
 from .llm_filter import llm_filter, build_prompt, parse_verdict
 from .confirm import confirm as confirm_refs, found_anywhere, all_errored
 from .decide import decide as decide_label
@@ -63,6 +65,8 @@ __all__ = [
     "VERDICT_SAME_WORK_VARIANT", "VERDICT_UNSCOREABLE", "VERDICT_UNRESOLVED",
     "SAME_WORK_TITLE_SIM_MIN",
     "rerank_stage2",
+    "WorkIdentityEvidence", "assess_same_work", "canonical_title",
+    "is_distinctive_title",
     "llm_filter", "build_prompt",
     "parse_verdict", "confirm_refs", "found_anywhere", "all_errored",
     "decide_label", "run_pipeline", "process_reference", "make_completer",
