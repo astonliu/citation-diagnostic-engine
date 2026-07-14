@@ -72,7 +72,7 @@ few examples, so success on 19/23 is not evidence of generalization.
 
 ### Current regression status
 
-The actual checkout passes **344 tests** plus `git diff --check`. A focused
+The isolated F2 freeze snapshot passes **313 tests** plus `git diff --check`. A focused
 23-assertion guard run confirms:
 
 - `2280326` (Zimet containment) and `25750242` (Gompertz commentary) remain
