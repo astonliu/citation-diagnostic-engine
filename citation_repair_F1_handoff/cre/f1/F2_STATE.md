@@ -3,6 +3,134 @@
 Working-state note for the F2 (wrong-paper) precision pass. Branch:
 `feat/f2-final-revision`. Module: `cre/f1/`.
 
+## 2026-07-14 — seed-29 prospective result + wrong-paper-precision redesign
+
+### Frozen prospective result (seed 29)
+
+The first prospective seed (seed 29) produced **16 HIGH rows**. Human
+adjudication: **9 genuine wrong-paper, 7 false positives**. The frozen
+prospective HIGH precision was therefore **9/16 = 0.5625** — recorded here as the
+honest held-out number for that frozen code.
+
+- **Seed 29 is now BURNED DEVELOPMENT DATA.** Its 16 rows drove this redesign and
+  are embedded as regression fixtures. No seed-29 replay after the fix may be
+  described as held-out or prospective — any post-fix seed-29 score is
+  **development-only**.
+- **Seed 31 is the preserved BLINDED HOLDOUT.** It was drawn before this redesign
+  (checkpoint `f2_seed31_blind_checkpoint_before_redesign.json`, selection hash
+  `7fcb276d…`) and must not be inspected, generated, or scored until the revised
+  code is frozen. Only after freezing may seed 31 test the revised engine, and
+  the >0.8 precision target may be claimed only after seed 31 is completed and
+  adjudicated.
+
+### Root causes of the seven false positives
+
+Each FP was a version-family / parser-artifact of the SAME work that the engine
+lacked an evidence rule for, so a confident field disagreement (usually a year
+drift) banded it `review_wrong_paper`:
+
+1. `26297790` — historical republication ("Pillars Article:" reprint of a 1957
+   paper in 2015, different journal/year).
+2. `17261567` — conference/supplement abstract (`J Sci Med Sport` vol 12, page
+   S59) resolving to the later full paper; **DOI matches exactly**.
+3. `33624016` — effectively identical work with spelling typos (aoplipo/apolipo)
+   and print-vs-online year drift; **DOI matches**; was additionally vetoed by
+   the derivative-publication block because both titles legitimately say
+   "meta-analysis".
+4. `33551622`, `33244148` — supplement/poster abstracts (pages S39-S40 / P1025)
+   resolving to the full publications of the same studies.
+5. `12500577` — Russian translation: bracketed PubMed title, `language=rus`, and
+   both the venue (Biophysics/Biofizika) and first author
+   (Yurkevich/Iurkevich) differ only by transliteration, so the standard
+   journal/author corroboration missed it.
+6. `15129193` — shifted-field parser artifact: the article title leaked into the
+   author slot and a tail fragment sat in the title slot; journal+volume+year all
+   corroborate the same MMWR work.
+
+### The fix — five general, auditable same-work rules (no PMID/title memorization)
+
+Added to `work_identity.assess_same_work` (consumed by `biblio_match.flag_verdict`;
+all route to `review_same_work_variant`, never an auto-clear). Each rule was then
+**hardened by a two-round adversarial multi-agent review** that executed crafted
+realistic citations against the real engine; the hardening guards below are the
+ones that survived, and every confirmed break is pinned as a regression test:
+
+- **RULE A `shared_doi_same_work`** — exact shared DOI + first-author POSITION
+  match + `title_sim ≥ 0.92` + NOT a series/edition conflict. Runs BEFORE the
+  derivative block so a DOI-proven same work overrides a *derivative-review* veto
+  (`33624016` — both titles say "meta-analysis"). Hardening: the near-identical
+  floor (0.92) rejects a common-surname run-on collision ("Wang L" sepsis vs
+  "Wang Y" AKI sharing a mis-attached DOI, ts 0.90); `_series_conflict` now flags
+  BOTH Roman-numeral (Part I vs Part II) AND embedded-arabic-year serial editions
+  (AHA Statistics 2017 vs 2019; ADA Standards 2019 vs 2021) so a cross-edition DOI
+  mis-attach stays wrong-paper. Excludes the DOI-matching genuine F2s `14741909`,
+  `34249371`, `33036834` (author disagreement / empty author). Fixes `33624016`.
+- **RULE B `conference_abstract_publication`** — supplement/poster page locator
+  (`^[SP]\d`) + **≥6 distinctive claimed-title tokens** + **roster containment
+  ≥ 0.75** + **abstract-content coverage ≥ 0.77** + `title_sim ≥ 0.87`. This is
+  the hardest class (an abstract→full is metadata-near-identical to two sibling
+  trials by an overlapping team), so it took three adversarial rounds: roster
+  containment (not bare overlap) drops trials sharing only serial co-authors
+  (rivaroxaban, DAPA-HF/CKD, overlap 0.25–0.60); content coverage drops sibling
+  trials whose full title lacks the abstract's endpoint qualifier (round-2 DELIVER,
+  cov 0.75); the ≥6-token specificity gate drops SHORT generic abstract titles
+  ("Dapagliflozin in heart failure") that any sibling trial's title covers
+  trivially (round-3 EMPEROR/DELIVER); the 0.87 floor keeps a different endpoint
+  out (`33148016`, ts 0.85). Fixes `33551622`, `33244148`, `17261567`.
+- **RULE C `historical_republication`** — reprint title prefix (Pillars/Classic/
+  Landmark/Seminal Article, Reprinted from, Republished) OR MEDLINE reprint
+  publication type, + claimed title CONTAINED in resolved + first-author POSITION
+  match + **the resolved title recites the claimed original year AND
+  (volume OR first-page)**. Hardening: the recites-original guard keeps a different
+  longer-titled paper that merely carries a reprint word out ("Classic Article: X
+  in human cancer", "Reprinted from Nature: X in chronic kidney disease"); the
+  reprint marker keeps the Zimet containment F2 (`2280326`) out. Fixes `26297790`.
+- **RULE D `translated_title_transliterated_author`** — resolved title
+  PubMed-**bracketed** + same year + `title_sim ≥ 0.85` + transliterated
+  first-author surname + matching volume. Hardening: requiring the bracket (not a
+  bare non-English tag) keeps two different same-journal/volume/year Russian papers
+  with transliteration-similar surnames out. Fixes `12500577`.
+- **RULE E `shifted_author_title_artifact`** — claimed author-slot text is
+  title-like (≥20 chars, ≥4 words, non-corporate) and contained in the resolved
+  title + **resolved title ≥85% reconstructed from the claimed author-slot ∪
+  title-slot tokens** + year within 1 + journal-or-volume agreement. Hardening: the
+  coverage guard keeps consortium/cohort authors (ADNI/MESA/TCGA) whose group name
+  appears in a *different* paper's title out. Fixes `15129193`.
+
+### Known residual (irreducible, human-review-backed)
+
+Distinguishing a conference abstract from its OWN full publication versus a
+DIFFERENT trial by the same serial team is metadata-irreducible when the two
+trials have specific, similar titles (e.g. a REDUCE-IT stroke sub-analysis vs a
+REDUCE-IT revascularization full paper). RULE B's layered guards close every case
+the adversarial review reproduced, but a genuinely ambiguous same-drug
+sub-analysis cited as an abstract can still route to `review_same_work_variant`.
+That is acceptable because SAME_WORK_VARIANT is **human-reviewed, never
+auto-cleared** — a reviewer who sees "stroke abstract" resolving to
+"revascularization paper" flags it. No same-work rule can route to
+`match`/`cleared`/`correct` (structurally: `flag_verdict` returns those only for
+clean no-disagreement pairs, before any same-work rule is consulted).
+
+### Post-fix seed-29 development diagnostic (NOT held-out)
+
+With the revised engine, all **7 label-0 FPs move to `review_same_work_variant`**
+(each with its named reason) and all **9 label-1 genuine F2s stay
+`review_wrong_paper`**. Development-only HIGH precision on the burned seed is
+therefore 9/9 = 1.000 — this is a memorized-fixture diagnostic, **not** a
+prospective or held-out number.
+
+`SAME_WORK_TITLE_SIM_MIN` is unchanged at 0.92. The revised code must be frozen
+before seed 31 is drawn/scored. Tests: `test_f2_wrong_paper_precision.py` pins all
+16 seed-29 rows, PMID-free generic positives + adversarial negatives per rule, the
+load-bearing wrong-paper guards (`33148016`, `35523811`, `36844755`, plus the
+pre-existing `2280326`/`25750242`/`31643080` fixtures), and a parametrized set of
+the adversarial-review recall breaks (series Part I/II, common-surname DOI
+collision, sibling trials, reprint-word different paper, different foreign paper,
+consortium authors, annual editions, generic-title sibling trials) that must stay
+wrong-paper. Full `cre/f1` suite green (393 passed) + `git diff --check` clean.
+Changed files: `work_identity.py`, `test_f2_wrong_paper_precision.py` (new),
+`F2_STATE.md`.
+
 ## 2026-07-14 redesign status — development only
 
 > **Seeds 19 and 23 are burned development data.** Their 31 original HIGH rows

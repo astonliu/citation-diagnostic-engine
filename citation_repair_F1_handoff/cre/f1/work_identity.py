@@ -43,6 +43,9 @@ _CORPORATE_RE = re.compile(
 _LIVING_SOURCES = ("statpearls", "ncbi bookshelf", "bookshelf")
 _AUTHOR_SUFFIX_ONLY = {"jr", "junior", "sr", "senior", "filho", "neto"}
 _ROMAN_RE = re.compile(r"\b(?:i|ii|iii|iv|v|vi|vii|viii|ix|x)\b", re.I)
+# A 4-digit publication/edition year embedded in a title -- used to detect serial
+# annual editions (e.g. "...Statistics-2017 Update" vs "...-2019 Update").
+_TITLE_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 _STOP = {
     "a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on",
     "or", "the", "to", "with", "paper", "study", "analysis", "medical",
@@ -51,6 +54,54 @@ _GENERIC_TITLES = {
     "introduction", "editorial", "preface", "foreword", "conclusion",
     "discussion", "letter",
 }
+
+# =====================================================================
+# F2 wrong-paper-precision redesign (2026-07-14): version-family same-work
+# signatures that were mis-banding as review_wrong_paper on seed 29. Each is a
+# GENERAL, auditable evidence rule (no PMID/title memorization). All route to
+# review_same_work_variant (human review), never to an auto-clear outcome.
+# =====================================================================
+# A supplement / poster locator: PubMed pages for meeting abstracts start with
+# "S" (supplement, e.g. S39, S39-S40) or a poster/abstract letter+number
+# (e.g. P1025). An "e"-locator ("e171-232") is an ordinary electronic article
+# and is deliberately NOT matched.
+_SUPPLEMENT_PAGE_RE = re.compile(r"^\s*[SP]\d", re.I)
+# Editorial reprint/republication prefixes a journal prepends to a re-run of an
+# earlier work (e.g. J Immunol "Pillars Article:"; "Classic Article",
+# "Reprinted from"). General series markers, not one journal's brand.
+_REPRINT_TITLE_RE = re.compile(
+    r"^\s*(?:pillars?|classic(?:al)?|landmark|seminal)\s+(?:article|paper)\b"
+    r"|^\s*reprint(?:ed)?\b|\breprinted\s+from\b|\brepublished\b", re.I)
+# MEDLINE publication types that mark a record as a reprint of an earlier work.
+_REPRINT_PUBTYPES = {"republished article", "reprint", "classical article"}
+
+# Title-similarity floors for the new same-work rules (kept SEPARATE from and
+# never below the 0.92 near-identical-title gate in biblio_match).
+DOI_SAME_WORK_TITLE_MIN = 0.92          # exact DOI+author only overrides the block at near-identical titles
+CONFERENCE_ABSTRACT_TITLE_MIN = 0.87    # abstract -> full publication of same study
+TRANSLATION_TRANSLIT_TITLE_MIN = 0.85   # translation whose metadata is transliterated
+# Fraction of the abstract's author roster that must reappear on the resolved full
+# paper for RULE B (an abstract->full is one team; two different trials share only
+# some serial co-authors).
+CONFERENCE_ROSTER_CONTAINMENT_MIN = 0.75
+# Fraction of the abstract title's distinctive tokens that must reappear in the
+# resolved full-paper title for RULE B. A same-study abstract->full carries nearly
+# all of the abstract's content; sibling trials sharing a drug/disease template
+# diverge on the key population/endpoint qualifier ("mildly preserved" vs
+# "reduced"), dropping coverage. Second guard beyond roster containment, needed
+# because serial trialists (e.g. the dapagliflozin CV program) put the SAME core
+# team on genuinely different trials.
+CONFERENCE_ABSTRACT_CONTENT_COVERAGE_MIN = 0.77
+# Minimum distinctive-token count for the claimed (abstract) title in RULE B. A
+# short generic title ("Dapagliflozin in heart failure") cannot uniquely identify a
+# study inside a drug's trial family -- its few tokens are trivially covered by ANY
+# sibling trial's full title, so it must not be read as an abstract->full match.
+CONFERENCE_ABSTRACT_MIN_DISTINCTIVE_TOKENS = 6
+# Fraction of the resolved title's distinctive tokens that must be reconstructable
+# from the claimed author+title fields for RULE E (a true shifted-field artifact
+# splits ONE title across the two slots; a consortium author whose name merely
+# appears in a different paper's title does not).
+SHIFTED_TITLE_COVERAGE_MIN = 0.85
 
 
 def canonical_title(text: str) -> str:
@@ -233,7 +284,16 @@ def _locator_match(claimed: ClaimedRef, resolved: RetrievedRecord) -> bool:
 def _series_conflict(claimed_title: str, resolved_title: str) -> bool:
     a = {x.lower() for x in _ROMAN_RE.findall(claimed_title or "")}
     b = {x.lower() for x in _ROMAN_RE.findall(resolved_title or "")}
-    return bool(a and b and a != b)
+    if a and b and a != b:
+        return True
+    # Serial annual/periodic editions differ only by an embedded 4-digit year
+    # ("...Statistics-2017 Update" vs "...-2019 Update"; "Standards of Care-2019"
+    # vs "-2021"). Distinct papers in the same series -- NOT the same work -- even
+    # when title_sim ~1.0, the first author is identical, and a DOI was mis-attached
+    # across editions. Fires only when both titles carry a year and they share NONE.
+    ya = set(_TITLE_YEAR_RE.findall(claimed_title or ""))
+    yb = set(_TITLE_YEAR_RE.findall(resolved_title or ""))
+    return bool(ya and yb and not (ya & yb))
 
 
 def _derivative_block(claimed: ClaimedRef, resolved: RetrievedRecord) -> str:
@@ -319,12 +379,150 @@ def _adjacent_year_transposition(left: int | None, right: int | None) -> bool:
             and a[diff[0]] == b[diff[1]] and a[diff[1]] == b[diff[0]])
 
 
+def _volume_agrees(claimed: ClaimedRef, resolved: RetrievedRecord) -> bool:
+    """Both volumes present and equal after stripping to digits."""
+    cv, rv = re.sub(r"\D", "", claimed.volume or ""), re.sub(r"\D", "", resolved.volume or "")
+    return bool(cv and rv and cv == rv)
+
+
+def _year_within_one(claimed: ClaimedRef, resolved: RetrievedRecord) -> bool:
+    if not (claimed.year and resolved.year):
+        return False
+    return abs(int(claimed.year) - int(resolved.year)) <= 1
+
+
+def _pubmed_bracketed(title: str) -> bool:
+    """PubMed brackets a translated (non-English original) title: '[...]'."""
+    t = (title or "").strip()
+    return t.startswith("[") and t.rstrip(".").endswith("]")
+
+
+def _is_supplement_locator(pages: str) -> bool:
+    return bool(_SUPPLEMENT_PAGE_RE.match(pages or ""))
+
+
+def _is_reprint_record(resolved: RetrievedRecord) -> bool:
+    """The resolved record is an editorial reprint/republication of an earlier
+    work: a reprint title prefix OR a MEDLINE reprint publication type."""
+    if _REPRINT_TITLE_RE.search(resolved.title or ""):
+        return True
+    return bool({p.lower() for p in (resolved.publication_types or [])}
+                & _REPRINT_PUBTYPES)
+
+
+def _author_field_holds_title(claimed: ClaimedRef, resolved: RetrievedRecord) -> bool:
+    """Shifted-field parser artifact: the claimed AUTHOR slot actually holds
+    article-title text (long, multi-word, non-corporate) that is contained in the
+    resolved title -- the citation's title was split across the author and title
+    fields. A real surname is short and does not appear inside the resolved title.
+    """
+    if not claimed.authors:
+        return False
+    a0 = canonical_title(claimed.authors[0])
+    if not a0 or _CORPORATE_RE.search(a0):
+        return False
+    if len(a0) < 20 or len(a0.split()) < 4:
+        return False
+    return a0 in canonical_title(resolved.title)
+
+
+def _shifted_title_coverage(claimed: ClaimedRef, resolved: RetrievedRecord) -> float:
+    """Fraction of the resolved title's DISTINCTIVE tokens reconstructable from the
+    union of the claimed author-slot and title-slot text. A genuine shifted-field
+    artifact splits ONE title across the two slots, so coverage is ~1.0. A
+    consortium author whose group name merely appears in a DIFFERENT paper's title
+    (ADNI/MESA/TCGA cohort papers) covers only the group-name tokens, not the rest
+    of the resolved title -- coverage stays well below 1.0."""
+    rt_tokens = {t for t in canonical_title(resolved.title).split()
+                 if len(t) >= 4 and t not in _STOP}
+    if not rt_tokens:
+        return 0.0
+    have = set(canonical_title(
+        (claimed.authors[0] if claimed.authors else "") + " "
+        + (claimed.title or "")).split())
+    return sum(1 for t in rt_tokens if t in have) / len(rt_tokens)
+
+
+def _surname_set(authors: list[str]) -> set[str]:
+    """Surname-proxy tokens for an author roster (drops given-name initials)."""
+    out: set[str] = set()
+    for a in authors or []:
+        for t in canonical_title(a).split():
+            if len(t) >= 4 and not re.fullmatch(r"[a-z]{1,3}", t):
+                out.add(t)
+    return out
+
+
+def _roster_containment(claimed: ClaimedRef, resolved: RetrievedRecord) -> float:
+    """Fraction of the claimed author roster present on the resolved roster. A
+    conference abstract and its later full publication are one team, so the
+    abstract's authors nearly all reappear (containment ~1.0); two DIFFERENT
+    trials that happen to share serial co-authors overlap only partially."""
+    ca, ra = _surname_set(claimed.authors), _surname_set(resolved.authors)
+    if not ca or not ra:
+        return 0.0
+    return len(ca & ra) / len(ca)
+
+
+def _distinctive_title_tokens(title: str) -> set[str]:
+    return {t for t in canonical_title(title).split() if len(t) >= 4 and t not in _STOP}
+
+
+def _abstract_content_coverage(claimed: ClaimedRef,
+                               resolved: RetrievedRecord) -> float:
+    """Fraction of the claimed (abstract) title's DISTINCTIVE tokens present in the
+    resolved (full-paper) title. A conference abstract and its later full
+    publication describe the SAME study, so the full title carries nearly all of
+    the abstract's content; two different trials sharing a drug/disease template
+    diverge on the key population/endpoint qualifier, dropping coverage."""
+    a = _distinctive_title_tokens(claimed.title)
+    if not a:
+        return 0.0
+    r = set(canonical_title(resolved.title).split())
+    return sum(1 for t in a if t in r) / len(a)
+
+
+def _reprint_recites_original(claimed: ClaimedRef, resolved: RetrievedRecord) -> bool:
+    """The resolved (reprint) title recites the CLAIMED citation's own original
+    year and volume/first-page -- i.e. it reproduces the original publication's
+    citation string, proving it is a re-run of that same work. A different paper
+    that merely carries a reprint marker does not embed the claimed year+locator.
+    """
+    title = resolved.title or ""
+    if not claimed.year or str(claimed.year) not in title:
+        return False
+    vol = re.sub(r"\D", "", claimed.volume or "")
+    fp = re.sub(r"\D", "", _first_page(claimed.pages))
+    has_vol = bool(vol and re.search(rf"\b{re.escape(vol)}\b", title))
+    has_pg = bool(fp and re.search(rf"\b{re.escape(fp)}\b", title))
+    return has_vol or has_pg
+
+
 def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
                      title_similarity: float) -> WorkIdentityEvidence:
     """Return a proof-backed same-work/ambiguous-family reason, if one exists."""
     ct, rt = canonical_title(claimed.title), canonical_title(resolved.title)
     if not ct or not rt:
         return WorkIdentityEvidence(False)
+
+    # RULE A (exact shared DOI). A DOI is a globally unique work identifier: an
+    # exact match on it, with the first-author POSITION agreeing and a
+    # NEAR-IDENTICAL title, lets a DOI-proven same-work override the
+    # derivative-review block (seed 29: 33624016 -- both titles say "meta-analysis"
+    # but the shared DOI proves it is the SAME meta-analysis). Two hardening guards
+    # (found by adversarial review): the near-identical-title floor keeps a
+    # common-surname run-on collision out ("Wang L" sepsis vs "Wang Y" AKI sharing
+    # a mis-attached DOI, title_sim 0.90), and it must NOT override a research-SERIES
+    # ordinal conflict (Part I vs Part II sharing a run-on DOI) -- those stay
+    # wrong-paper. Report-vs-article / run-on DOI carriers (14741909, 34249371,
+    # 33036834) fail the first-author check.
+    if (doi_equivalent(claimed.claimed_doi, resolved.doi)
+            and first_author_equivalent(claimed, resolved)
+            and title_similarity >= DOI_SAME_WORK_TITLE_MIN
+            and not _series_conflict(claimed.title, resolved.title)):
+        return WorkIdentityEvidence(True, "shared_doi_same_work",
+                                    ("exact_doi", "first_author",
+                                     "title_sim>=%.2f" % DOI_SAME_WORK_TITLE_MIN))
 
     blocked = _derivative_block(claimed, resolved)
     if blocked:
@@ -398,6 +596,89 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
         return WorkIdentityEvidence(True, "translated_title_shared_anchors",
                                     ("non_ascii_claimed_title", "year", "journal",
                                      "three_title_anchors"))
+
+    # RULE D (translation whose corroborating metadata is itself transliterated).
+    # A PubMed-BRACKETED resolved title (the authoritative translated-title marker),
+    # same year, high title similarity, corroborated by a transliterated
+    # first-author surname AND a matching journal volume. The standard
+    # journal_equivalent / first_author checks miss this because the venue and
+    # surname differ only by transliteration (seed 29: 12500577 --
+    # Biophysics/Biofizika, Yurkevich/Iurkevich, vol 47). The bracket requirement is
+    # load-bearing (adversarial review): a bare non-English tag would fire on two
+    # DIFFERENT same-journal/same-volume Russian papers with transliteration-similar
+    # surnames (Grigorev/Grigorov, Nikolaev/Nikolaenko) -- those stay wrong-paper.
+    if (_pubmed_bracketed(resolved.title)
+            and same_year and title_similarity >= TRANSLATION_TRANSLIT_TITLE_MIN
+            and _first_author_typo(claimed, resolved)
+            and _volume_agrees(claimed, resolved)):
+        return WorkIdentityEvidence(True, "translated_title_transliterated_author",
+                                    ("pubmed_translated_title", "year",
+                                     "transliterated_first_author", "volume"))
+
+    # RULE C (historical republication / reprint). The resolved record is an
+    # editorial re-run of an earlier work (reprint title prefix such as "Pillars
+    # Article:" or a MEDLINE reprint publication type); the claimed original title
+    # is contained within it and the first author agrees (seed 29: 26297790). The
+    # reprint marker is load-bearing -- containment + author alone is a real
+    # different-paper F2 (Zimet 2280326), so it is NOT sufficient on its own. Also
+    # load-bearing (adversarial review): the resolved title must RECITE the claimed
+    # citation's original year + volume/first-page, proving it re-runs THAT work.
+    # Without this, a longer different paper whose title merely contains the claimed
+    # title and carries a reprint word ("Classic Article: X in human cancer",
+    # "Reprinted from Nature: X in chronic kidney disease") would be swallowed.
+    if (_is_reprint_record(resolved) and len(ct) >= 18 and ct in rt
+            and len(rt) - len(ct) >= 5 and first_author_equivalent(claimed, resolved)
+            and _reprint_recites_original(claimed, resolved)):
+        return WorkIdentityEvidence(True, "historical_republication",
+                                    ("reprint_marker", "title_containment",
+                                     "first_author", "recites_original_citation"))
+
+    # RULE B (conference/supplement abstract -> full publication of the same
+    # study). The claimed citation is a meeting abstract (supplement/poster page
+    # locator, e.g. S39 / P1025), MOST of its author roster reappears on the
+    # resolved full paper, and the abstract title is highly similar to the resolved
+    # full-paper title (seed 29: 33551622, 33244148, 17261567). Two guards keep
+    # DIFFERENT trials out: the 0.87 floor excludes a different endpoint (33148016,
+    # title_sim 0.85), and ROSTER CONTAINMENT (>=0.75, not mere overlap) excludes
+    # sibling trials that share only serial co-authors -- adversarial review showed
+    # bare overlap swallows DAPA-HF vs DAPA-CKD/DELIVER and the rivaroxaban trials
+    # (author overlap 0.25-0.60). Round-2 review then showed serial trialists put
+    # the SAME core team on genuinely different trials (DELIVER vs DAPA-HF cited
+    # "first-3 et al." -> roster containment 1.0), so a SECOND guard requires the
+    # resolved full title to carry most of the abstract's distinctive content
+    # (>=0.77); sibling trials diverge on the population/endpoint qualifier. The
+    # page-locator never fires on a numeric/e-page. A minimum distinctive-token
+    # count keeps a SHORT generic abstract title ("Dapagliflozin in heart failure")
+    # out -- its few tokens are trivially covered by any sibling trial's full title
+    # (the coverage guard is necessarily asymmetric, since a genuine full paper adds
+    # a subtitle), so specificity is required to disambiguate a drug's trial family.
+    if (_is_supplement_locator(claimed.pages)
+            and len(_distinctive_title_tokens(claimed.title)) >= CONFERENCE_ABSTRACT_MIN_DISTINCTIVE_TOKENS
+            and _roster_containment(claimed, resolved) >= CONFERENCE_ROSTER_CONTAINMENT_MIN
+            and _abstract_content_coverage(claimed, resolved) >= CONFERENCE_ABSTRACT_CONTENT_COVERAGE_MIN
+            and title_similarity >= CONFERENCE_ABSTRACT_TITLE_MIN):
+        return WorkIdentityEvidence(True, "conference_abstract_publication",
+                                    ("supplement_locator", "specific_title",
+                                     "roster_containment", "abstract_content_coverage",
+                                     "title_sim>=%.2f" % CONFERENCE_ABSTRACT_TITLE_MIN))
+
+    # RULE E (shifted-field parser artifact). The claimed AUTHOR slot holds the
+    # article title text (contained in the resolved title) while the claimed title
+    # holds the REST of that same title, so the resolved title is nearly fully
+    # reconstructed from the two claimed slots (coverage >= 0.85), and the year plus
+    # journal/volume corroborate the resolved work (seed 29: 15129193). The coverage
+    # guard is load-bearing (adversarial review): a consortium/cohort author whose
+    # group name appears in a DIFFERENT paper's title (ADNI/MESA/TCGA) covers only
+    # the group-name tokens, not the rest of the resolved title -- those stay
+    # wrong-paper. This is a parsing defect on the SAME work, not a wrong reference.
+    if (_author_field_holds_title(claimed, resolved)
+            and _shifted_title_coverage(claimed, resolved) >= SHIFTED_TITLE_COVERAGE_MIN
+            and _year_within_one(claimed, resolved)
+            and (journal_equivalent(claimed.journal, resolved.journal)
+                 or _volume_agrees(claimed, resolved))):
+        return WorkIdentityEvidence(True, "shifted_author_title_artifact",
+                                    ("author_field_holds_title", "year",
+                                     "journal_or_volume"))
 
     # Explicit correction notices are related records, not autonomous F2 calls.
     if (_CORRECTION_RE.match(resolved.title or "") and title_similarity >= 0.80
