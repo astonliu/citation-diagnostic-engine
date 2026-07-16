@@ -240,3 +240,49 @@ def test_pnas_masthead_with_parenthetical_buckets():
     c = ClaimedRef(title="Proc. of the National Academy of Sciences of the "
                          "United States of America (PNAS)", journal="", claimed_pmid="x")
     assert classify_unscoreable(c, _resolved())[0] == "journal_as_title"
+
+
+# ======================================================================
+# 6. numeric_or_year_only_title (seed 31 / R301): a bare number (year / volume /
+#    issue / locator) parsed into the title slot bears zero title evidence.
+#    Seed 31 is BURNED DEVELOPMENT DATA for this gate.
+# ======================================================================
+def test_numeric_or_year_only_title_buckets_a_bare_year():
+    # PMC12511533:R301 -- a JATS field-shift put the year "2001" in the title slot
+    # and the journal masthead "Surgery" in the author slot; there is no <source>.
+    c = ClaimedRef(title="2001", authors=["Surgery"], journal="", volume="130",
+                   pages="748-751", claimed_doi="10.1067/msy.2001.118094",
+                   claimed_pmid="11602907")
+    bucket, _ = classify_unscoreable(
+        c, _resolved(title="Differences in arterial and mixed venous IL-6 levels.",
+                     authors=("Tyburski",), journal="Surgery"))
+    assert bucket == "numeric_or_year_only_title"
+
+
+def test_numeric_or_year_only_title_covers_volume_issue_and_ranges():
+    for title in ("130", "3", "2020", "1999-2001", "45(4)", "12; 4"):
+        c = ClaimedRef(title=title, claimed_pmid="x")
+        assert classify_unscoreable(c, _resolved())[0] == "numeric_or_year_only_title", title
+
+
+def test_numeric_gate_never_swallows_a_title_with_a_distinctive_word():
+    # RECALL GUARD: any title keeping an alphabetic token stays scoreable, even
+    # when it carries a year or an alphanumeric gene/assay token.
+    KEEP = [
+        "COVID-19 outcomes", "p53 signaling", "IL-6",
+        "The 2019 revision of the sepsis guidelines", "5-HT receptors",
+        "IgG4-related disease", "T2-weighted MRI in 130 patients",
+    ]
+    for title in KEEP:
+        c = ClaimedRef(title=title, journal="J Foo", claimed_pmid="x")
+        assert classify_unscoreable(c, _resolved())[0] is None, title
+
+
+def test_numeric_gate_is_recall_safe_for_non_latin_titles():
+    # A real, non-Latin (or bracketed-translation) title always carries letters
+    # and must never be read as numeric-only, even with an embedded number.
+    for title in ("Пиелонефрит у детей 2001",           # Cyrillic
+                  "[Arbovirus infections in Serbia]",     # PubMed bracketed
+                  "腎臓病の治療 2020"):                    # CJK
+        c = ClaimedRef(title=title, claimed_pmid="x")
+        assert classify_unscoreable(c, _resolved())[0] is None, title

@@ -102,6 +102,14 @@ CONFERENCE_ABSTRACT_MIN_DISTINCTIVE_TOKENS = 6
 # splits ONE title across the two slots; a consortium author whose name merely
 # appears in a different paper's title does not).
 SHIFTED_TITLE_COVERAGE_MIN = 0.85
+# Rule-local title floors for translated_title_missing_volume_anchors (RULE F,
+# 2026-07-15; seed 31 is now burned development data for this rule). Kept SEPARATE
+# from and never below the 0.92 near-identical-title gate in biblio_match, and
+# never lowering any GLOBAL threshold. The high tier reuses the existing 0.85
+# transliteration floor; the low tier (0.78) is reached ONLY under the full
+# translation conjunction AND roster containment >= 0.60 as a backstop.
+TRANSLATION_MISSING_VOLUME_TITLE_MIN = 0.78
+TRANSLATION_MISSING_VOLUME_ROSTER_MIN = 0.60
 
 
 def canonical_title(text: str) -> str:
@@ -397,6 +405,57 @@ def _pubmed_bracketed(title: str) -> bool:
     return t.startswith("[") and t.rstrip(".").endswith("]")
 
 
+def _has_non_english_evidence(resolved: RetrievedRecord) -> bool:
+    """Explicit MEDLINE non-English marker: a language other than English, OR an
+    'English Abstract' publication type (PubMed's tag for the translated abstract
+    of a non-English-language article). An independent signal from the bracketed
+    title; empty/unknown language with no such pubtype is NOT read as non-English.
+    """
+    if (resolved.language or "").strip().lower() not in ("", "eng", "en"):
+        return True
+    return "english abstract" in {p.lower()
+                                  for p in (resolved.publication_types or [])}
+
+
+def _first_pages_agree(claimed: ClaimedRef, resolved: RetrievedRecord) -> bool:
+    """Both first pages present and equal after stripping to digits. Used as the
+    numeric anchor that REPLACES volume only when the resolved volume is absent."""
+    a = re.sub(r"\D", "", _first_page(claimed.pages))
+    b = re.sub(r"\D", "", _first_page(resolved.pages))
+    return bool(a and b and a == b)
+
+
+# Generic journal-name words that are NOT a distinctive family token. Private to
+# _journal_family_transliteration (RULE F): its leading-token match must never key
+# on one of these (e.g. two different "Journal of Clinical ..." titles).
+_JOURNAL_FAMILY_GENERIC = frozenset({
+    "journal", "international", "clinical", "medical", "the", "annals",
+    "archives", "acta", "review", "reviews", "bulletin", "research",
+    "national", "european", "american", "science", "sciences",
+})
+
+
+def _journal_family_transliteration(left: str, right: str) -> bool:
+    """Narrow transliteration match on the LEADING DISTINCTIVE journal token, used
+    ONLY inside RULE F (translated_title_missing_volume_anchors). A translated
+    Russian/East-European masthead and its citing transliteration share a
+    distinctive stem that journal_equivalent / _near_transliteration miss when the
+    rest of the two mastheads diverge (e.g. 'Khirurgiya. Zhurnal im. N.I.
+    Pirogova' vs 'Khirurgiia (Mosk)'; 'Anesteziologiya...' vs 'Anesteziol...').
+    Takes the first token of length >= 6 that is not a generic journal word and
+    requires Jaro-Winkler >= 0.90 on those two tokens. Looser than
+    journal_equivalent, so it is confined to this rule's full conjunction."""
+    def lead(value: str) -> str:
+        for tok in canonical_title(value).split():
+            if len(tok) >= 6 and tok not in _JOURNAL_FAMILY_GENERIC:
+                return tok
+        return ""
+    a, b = lead(left), lead(right)
+    if not a or not b:
+        return False
+    return JaroWinkler.similarity(a, b) >= 0.90
+
+
 def _is_supplement_locator(pages: str) -> bool:
     return bool(_SUPPLEMENT_PAGE_RE.match(pages or ""))
 
@@ -614,6 +673,48 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
         return WorkIdentityEvidence(True, "translated_title_transliterated_author",
                                     ("pubmed_translated_title", "year",
                                      "transliterated_first_author", "volume"))
+
+    # RULE F (translation whose only volume anchor is ABSENT in PubMed).  Some
+    # Russian / East-European journals carry NO Volume in PubMed and the citing
+    # source stores the ISSUE in <volume>, so RULE D's _volume_agrees can never
+    # confirm identity (seed 31: r125/15938103, r97/12698653 -- both translated
+    # same-work rows mis-banding review_wrong_paper).  When the resolved volume is
+    # genuinely absent, matching FIRST PAGE stands in as the numeric anchor.  Fires
+    # ONLY on the full conjunction -- PubMed-bracketed translated title, explicit
+    # non-English evidence (language or 'English Abstract' pubtype), EXACT year,
+    # resolved volume ABSENT, matching first page, a transliterated first author,
+    # and journal-family transliteration -- a near-unique key that replaces the one
+    # missing signal.  Tiered title floor (both rule-local; no GLOBAL threshold
+    # touched): the 0.85 transliteration floor fires outright (r97); the 0.78 floor
+    # fires ONLY with roster containment >= 0.60 as a backstop (r125).  The
+    # resolved-volume-ABSENT precondition is load-bearing: when a resolved volume
+    # EXISTS this rule DEFERS and RULE D's volume guard still governs, so a genuine
+    # volume disagreement stays wrong-paper (seed 29's 12500577 keeps volume on both
+    # sides and routes via RULE D, untouched).  The runtime record does not preserve
+    # the resolved issue, so this proves only "translated same work, volume anchor
+    # missing", never issue-to-volume identity.
+    if (_pubmed_bracketed(resolved.title)
+            and _has_non_english_evidence(resolved)
+            and same_year
+            and not re.sub(r"\D", "", resolved.volume or "")
+            and _first_pages_agree(claimed, resolved)
+            and (_first_author_typo(claimed, resolved)
+                 or first_author_equivalent(claimed, resolved))
+            and (journal_equivalent(claimed.journal, resolved.journal)
+                 or _near_transliteration(claimed.journal, resolved.journal)
+                 or _journal_family_transliteration(claimed.journal, resolved.journal))):
+        high_tier = title_similarity >= TRANSLATION_TRANSLIT_TITLE_MIN
+        low_tier = (title_similarity >= TRANSLATION_MISSING_VOLUME_TITLE_MIN
+                    and _roster_containment(claimed, resolved)
+                    >= TRANSLATION_MISSING_VOLUME_ROSTER_MIN)
+        if high_tier or low_tier:
+            return WorkIdentityEvidence(
+                True, "translated_title_missing_volume_anchors",
+                ("pubmed_translated_title", "non_english", "year",
+                 "resolved_volume_absent", "first_page",
+                 "transliterated_first_author", "journal_family",
+                 ("title_sim>=%.2f" % TRANSLATION_TRANSLIT_TITLE_MIN) if high_tier
+                 else ("title_sim>=%.2f+roster" % TRANSLATION_MISSING_VOLUME_TITLE_MIN)))
 
     # RULE C (historical republication / reprint). The resolved record is an
     # editorial re-run of an earlier work (reprint title prefix such as "Pillars
