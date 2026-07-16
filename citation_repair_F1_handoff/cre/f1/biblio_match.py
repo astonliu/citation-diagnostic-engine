@@ -537,10 +537,18 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
                 or ((f.volume_match is False or f.pages_match is False)
                     and m.title_sim < SAME_WORK_TITLE_SIM_MIN))
     identity = assess_same_work(claimed, cand, title_similarity=m.title_sim)
-    # A work-identity guard is affirmative evidence that these are distinct
-    # records (derivative, serial edition, or corporate conflict).  Never let a
-    # high composite assembled from shared bibliographic fields auto-clear it.
-    if identity.blocked_by:
+    # A corporate-author or series/edition conflict is AFFIRMATIVE evidence that
+    # these are distinct records (two organizations, or two editions of a
+    # serial): never let a high composite assembled from shared bibliographic
+    # fields auto-clear one. Deliberately NOT extended to the genre-heuristic
+    # blocks (derivative_publication, uncorroborated_title_wrapper): both titles
+    # of ONE review-genre work carry the same marker, so a clean high-scoring
+    # pair with a one-token drift would be forced HIGH by a blanket early
+    # return (adversarial review, 2026-07-15). Those blocks keep their original
+    # semantics -- suppress same-work rescue, let the score/disagreement path
+    # decide.
+    if identity.blocked_by in ("corporate_author_conflict",
+                               "series_ordinal_conflict"):
         return VERDICT_WRONG_PAPER, m
     # Clean accepted pairs are ordinary matches, not review variants.  For a
     # pair that would otherwise be reviewed, prefer a specific identity proof

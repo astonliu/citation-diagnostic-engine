@@ -47,6 +47,25 @@ hybrid citations with insufficient independent anchors remain HIGH rather than
 being inferred as mixed, while a quarantined mixed citation still requires human
 adjudication.
 
+A second adversarial pass over the three rules closed four boundary gaps (all
+metadata-shape based; no row memorization):
+
+- The corporate formatting comparator folds `&` to `and` (a typographic
+  conjunction, not a token change); abbreviations/deletions still conflict.
+- `_series_conflict` now also detects spelled-out/digit ordinal editions bound
+  to an edition noun ("Second Edition" vs "Third Edition"), which previously
+  escaped HIGH through the shared-DOI rule at title_sim ~0.96. Both titles must
+  carry an ordinal-edition marker and share none, mirroring the year rule.
+- First-page anchoring (RULE G and the mixed rule) requires supplement-locator
+  parity: a meeting-abstract page `S344` never anchors to the co-numbered
+  article page `344`.
+- The affirmative-conflict early return in `flag_verdict` is limited to
+  `corporate_author_conflict` and `series_ordinal_conflict`. The genre-heuristic
+  derivative block keeps its original semantics (suppress same-work rescue
+  only): both titles of ONE review-genre work carry the same marker, so a
+  blanket early return forced a clean, fully-agreeing pair with a one-token
+  title drift into HIGH.
+
 ## 2026-07-15 — seed-31 preview diagnostic + fix (SEED 31 NOW BURNED)
 
 A 4,500-record cached preview of seed 31 surfaced **five HIGH rows**. They were

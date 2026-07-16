@@ -231,6 +231,9 @@ def _corporate_author_format_key(value: str) -> str:
     expansion, or fuzzy matching: distinct organizations retain distinct keys.
     """
     value = fold_bibliographic_text(value or "").lower()
+    # "&" is the typographic form of the conjunction "and" in institutional
+    # names; folding it is a formatting equivalence, not a token change.
+    value = re.sub(r"[&＆]", " and ", value)
     value = re.sub(r"[-‐-―/_]+", " ", value)
     value = re.sub(r"[^\w\s]", " ", value)
     return re.sub(r"\s+", " ", value).strip()
@@ -320,6 +323,25 @@ def _locator_match(claimed: ClaimedRef, resolved: RetrievedRecord) -> bool:
     return bool(all(pages) and pages[0] == pages[1])
 
 
+_ORDINAL_WORDS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+                  "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10}
+# A spelled-out or digit ordinal immediately qualifying an edition-family noun
+# ("Second Edition", "3rd revision", "second revised edition"). Bound to the
+# noun on purpose: a bare "first"/"second" ("first-line therapy") is ordinary
+# title vocabulary and must not read as a series marker.
+_EDITION_ORDINAL_RE = re.compile(
+    r"\b(?:(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)"
+    r"|(\d{1,2})(?:st|nd|rd|th))[\s-]+(?:revised[\s-]+)?"
+    r"(?:edition|update|revision|version|part|report)s?\b", re.I)
+
+
+def _edition_ordinals(title: str) -> set[int]:
+    out: set[int] = set()
+    for word, digits in _EDITION_ORDINAL_RE.findall(title or ""):
+        out.add(int(digits) if digits else _ORDINAL_WORDS[word.lower()])
+    return out
+
+
 def _series_conflict(claimed_title: str, resolved_title: str) -> bool:
     a = {x.lower() for x in _ROMAN_RE.findall(claimed_title or "")}
     b = {x.lower() for x in _ROMAN_RE.findall(resolved_title or "")}
@@ -332,7 +354,16 @@ def _series_conflict(claimed_title: str, resolved_title: str) -> bool:
     # across editions. Fires only when both titles carry a year and they share NONE.
     ya = set(_TITLE_YEAR_RE.findall(claimed_title or ""))
     yb = set(_TITLE_YEAR_RE.findall(resolved_title or ""))
-    return bool(ya and yb and not (ya & yb))
+    if ya and yb and not (ya & yb):
+        return True
+    # Spelled-out/digit ordinal editions ("Second Edition" vs "Third Edition")
+    # are the same serial-edition conflict without a roman numeral or an embedded
+    # year (adversarial review, 2026-07-15: a shared run-on DOI plus title_sim
+    # ~0.96 let a guideline edition family through RULE A). Same both-sides,
+    # share-NONE contract as the year rule.
+    ea = _edition_ordinals(claimed_title)
+    eb = _edition_ordinals(resolved_title)
+    return bool(ea and eb and not (ea & eb))
 
 
 def _derivative_block(claimed: ClaimedRef, resolved: RetrievedRecord) -> str:
@@ -448,7 +479,15 @@ def _has_non_english_evidence(resolved: RetrievedRecord) -> bool:
 
 def _first_pages_agree(claimed: ClaimedRef, resolved: RetrievedRecord) -> bool:
     """Both first pages present and equal after stripping to digits. Used as the
-    numeric anchor that REPLACES volume only when the resolved volume is absent."""
+    numeric anchor that REPLACES volume only when the resolved volume is absent.
+
+    A supplement/poster locator ("S344", "P1025") and a plain article page
+    ("344") are DIFFERENT physical locations in the same volume, so the digit
+    comparison additionally requires supplement-status parity (adversarial
+    review, 2026-07-15: without it, a meeting abstract's S-page anchored RULE G
+    and the mixed-identity rule to the co-numbered full article's slot)."""
+    if _is_supplement_locator(claimed.pages) != _is_supplement_locator(resolved.pages):
+        return False
     a = re.sub(r"\D", "", _first_page(claimed.pages))
     b = re.sub(r"\D", "", _first_page(resolved.pages))
     return bool(a and b and a == b)
