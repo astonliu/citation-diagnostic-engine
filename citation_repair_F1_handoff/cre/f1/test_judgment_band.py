@@ -91,6 +91,35 @@ EXCL_XML = """<article>
 """
 
 
+# Two cited refs, both structurally eligible: R1 (PMID 111), R2 (PMID 222). Used
+# to prove the run_band accounting partition (items_built XOR PARSE_QUARANTINE).
+MIX_XML = """<article>
+  <front><article-meta>
+    <article-id pub-id-type="pmid">3000003</article-id>
+    <title-group><article-title>Mixed outcomes</article-title></title-group>
+  </article-meta></front>
+  <body><sec>
+    <p>Finding one <xref ref-type="bibr" rid="R1">1</xref>. Finding two
+       <xref ref-type="bibr" rid="R2">2</xref>.</p>
+  </sec></body>
+  <back><ref-list>
+    <ref id="R1">
+      <element-citation publication-type="journal">
+        <article-title>First</article-title><source>J</source><year>2011</year>
+        <pub-id pub-id-type="pmid">111</pub-id>
+      </element-citation>
+    </ref>
+    <ref id="R2">
+      <element-citation publication-type="journal">
+        <article-title>Second</article-title><source>J</source><year>2012</year>
+        <pub-id pub-id-type="pmid">222</pub-id>
+      </element-citation>
+    </ref>
+  </ref-list></back>
+</article>
+"""
+
+
 def _write(dirpath, name, content):
     p = os.path.join(dirpath, name)
     with open(p, "w", encoding="utf-8") as f:
@@ -119,6 +148,14 @@ def excl_dir(tmp_path):
     d = tmp_path / "xml"
     d.mkdir()
     _write(str(d), "PMC3000002.xml", EXCL_XML)
+    return str(d)
+
+
+@pytest.fixture
+def mix_dir(tmp_path):
+    d = tmp_path / "xml"
+    d.mkdir()
+    _write(str(d), "PMC3000003.xml", MIX_XML)
     return str(d)
 
 
@@ -341,6 +378,110 @@ def test_annotation_payload_is_blind_and_complete(tmp_path, frame_dir,
     # BLIND: the system's proposed verdict is NOT in the payload
     assert "proposed_route" not in payload
     assert "proposed_verdict" not in payload
+
+
+# ==========================================================================
+# run_band(): malformed-model-output quarantine (finding #1) + sentinel
+# fetch-failed accounting (finding #3)
+# ==========================================================================
+def _raising_judge(claims, evidence):
+    """Mimics the strict coverage parser rejecting a fenced/extra-key reply."""
+    raise ValueError("model output is not one bare JSON object")
+
+
+def test_run_band_quarantines_malformed_coverage_without_aborting(
+        tmp_path, frame_dir, patched_pubtypes):
+    """A ValueError from the coverage judge (strict-parse failure) must NOT
+    abort the batch: the reference is quarantined to a durable row-level record
+    and the run completes with a manifest."""
+    out = str(tmp_path / "out")
+    man = _run(out, frame_dir, judge=_raising_judge)
+    assert man["counts"][jb.ROUTE_PARSE_QUARANTINE] == 1
+    assert man["counts"]["items_built"] == 0        # quarantine is not a built item
+    items = _read(out, "judgment_band_items.jsonl")
+    assert len(items) == 1
+    assert items[0]["proposed_route"] == jb.ROUTE_PARSE_QUARANTINE
+    assert items[0]["proposed_verdict"] is None
+    assert "model output is not one bare JSON object" in items[0]["parse_error"]
+    # stamped and durable, but NOT surfaced to the blind annotation queue
+    assert items[0]["coverage_prompt_version"] == jb.COVERAGE_PROMPT_VERSION
+    assert _read(out, "judgment_band_annotation_queue.jsonl") == []
+
+
+def test_run_band_quarantines_malformed_claim_extraction(
+        tmp_path, frame_dir, patched_pubtypes):
+    """The guard also covers the claim-extraction call (parse_claims failure)."""
+    def raising_extractor(sentence):
+        raise ValueError("claims[0] contains a citation marker")
+    out = str(tmp_path / "out")
+    man = jb.run_band(
+        frame_dir, out, extractor=raising_extractor, coverage_judge=_judge_all(True),
+        fetch_abstract=_abstract, fetch_reflist=_reflist, session=_StubSession())
+    assert man["counts"][jb.ROUTE_PARSE_QUARANTINE] == 1
+    items = _read(out, "judgment_band_items.jsonl")
+    assert items[0]["proposed_route"] == jb.ROUTE_PARSE_QUARANTINE
+    assert "citation marker" in items[0]["parse_error"]
+
+
+def test_run_band_counts_sentinel_abstract_as_no_usable_abstract(
+        tmp_path, frame_dir, patched_pubtypes):
+    """A sentinel-string abstract ('N/A') is unusable per evidence_is_usable, so
+    it is counted under `no_usable_abstract` -- NOT `excluded_fetch_failed` (it is
+    neither necessarily a fetch failure nor an exclusion) (finding #3, decision
+    2). The row still processes and routes HELD without an LLM call."""
+    out = str(tmp_path / "out")
+    man = jb.run_band(
+        frame_dir, out, extractor=_extractor, coverage_judge=_judge_all(None),
+        fetch_abstract=lambda pmid: "N/A", fetch_reflist=_reflist,
+        session=_StubSession())
+    assert man["counts"]["no_usable_abstract"] == 1
+    assert "excluded_fetch_failed" not in man["counts"]    # renamed, not both
+    assert man["counts"][jb.ROUTE_HELD] == 1
+
+
+def test_run_band_operational_error_still_propagates(
+        tmp_path, frame_dir, patched_pubtypes):
+    """The quarantine guard catches ONLY ValueError (malformed output); an
+    operational error (e.g. a network failure surfacing as RuntimeError) must
+    still propagate rather than being silently quarantined."""
+    def boom_judge(claims, evidence):
+        raise RuntimeError("network down")
+    out = str(tmp_path / "out")
+    with pytest.raises(RuntimeError, match="network down"):
+        _run(out, frame_dir, judge=boom_judge)
+
+
+def test_run_band_accounting_partitions_eligible_refs_exactly_once(
+        tmp_path, mix_dir, patched_pubtypes):
+    """Every structurally-eligible reference is counted exactly once as either
+    items_built or PARSE_QUARANTINE, and each is durably recorded once in
+    items.jsonl (decision 1). Mixed run: R1 (PMID 111) routes normally; R2 (PMID
+    222) hits a strict-parse failure and is quarantined."""
+    def mixed_judge(claims, evidence):
+        if "222" in (evidence.get("cited_abstract") or ""):
+            raise ValueError("model output is not one bare JSON object")
+        return [{"established": True, "rationale": "ok"} for _ in claims]
+    out = str(tmp_path / "out")
+    man = jb.run_band(
+        mix_dir, out, extractor=_extractor, coverage_judge=mixed_judge,
+        fetch_abstract=_abstract, fetch_reflist=_reflist, session=_StubSession())
+    c = man["counts"]
+    eligible = (c["refs_seen"] - c[jb.EXCLUDED_NO_CITANCE]
+                - c[jb.EXCLUDED_NO_CITED_PMID])
+    assert eligible == 2
+    assert c["items_built"] == 1
+    assert c[jb.ROUTE_PARSE_QUARANTINE] == 1
+    # exact partition: every eligible ref is items_built XOR quarantined, once.
+    assert c["items_built"] + c[jb.ROUTE_PARSE_QUARANTINE] == eligible
+    # durably recorded exactly once each in items.jsonl (no double-count/drop).
+    items = _read(out, "judgment_band_items.jsonl")
+    ids = [it["citation_id"] for it in items]
+    assert len(ids) == len(set(ids)) == eligible
+    assert sorted(it["proposed_route"] for it in items) == sorted(
+        [jb.ROUTE_FULL_COVERAGE, jb.ROUTE_PARSE_QUARANTINE])
+    # the blind annotation queue carries ONLY the built (routed) item.
+    queue = _read(out, "judgment_band_annotation_queue.jsonl")
+    assert len(queue) == c["items_built"] == 1
 
 
 def test_annotation_worksheet_all_null(tmp_path, frame_dir, patched_pubtypes):

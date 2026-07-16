@@ -62,7 +62,8 @@ from .ncbi_meta import ncbi_pubtypes, is_review, DEFAULT_EMAIL
 # HOLD. Bump these only on a deliberate substrate change (which can invalidate
 # already-collected human labels).
 # --------------------------------------------------------------------------
-from .band_prompts import CLAIM_EXTRACT_PROMPT_VERSION, COVERAGE_PROMPT_VERSION
+from .band_prompts import (
+    CLAIM_EXTRACT_PROMPT_VERSION, COVERAGE_PROMPT_VERSION, evidence_is_usable)
 
 # Label space for the F3 slice of the band (the annotator's terminal choices).
 # Coverage-gap -> F6, misattribution -> F3, otherwise ACCURATE.
@@ -72,6 +73,10 @@ LABEL_SPACE_F3 = ["F6", "F3", "ACCURATE"]
 ROUTE_F6_FLAGGED = "F6_FLAGGED"
 ROUTE_FULL_COVERAGE = "FULL_COVERAGE"
 ROUTE_HELD = "HELD_LOW_CONFIDENCE"
+# Malformed model output: the injected extractor / coverage judge raised while
+# parsing a reply (strict-schema failure). The reference is quarantined to a
+# durable row-level record instead of aborting the whole run_band batch.
+ROUTE_PARSE_QUARANTINE = "PARSE_QUARANTINE"
 
 # Exclusion reasons (structural, counted; NOT taxonomy categories). A cited PMID
 # that fails to FETCH at band time is an operational exclusion handled in
@@ -363,11 +368,12 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
         "items_built": 0,
         EXCLUDED_NO_CITANCE: 0,
         EXCLUDED_NO_CITED_PMID: 0,
-        "excluded_fetch_failed": 0,   # operational (cited abstract unreachable)
+        "no_usable_abstract": 0,      # sentinel/missing/empty abstract (evidence_is_usable False)
         "cited_is_review": 0,
         ROUTE_F6_FLAGGED: 0,
         ROUTE_FULL_COVERAGE: 0,
         ROUTE_HELD: 0,
+        ROUTE_PARSE_QUARANTINE: 0,     # malformed model output, row quarantined
     }
     pubtype_cache: dict = {}
 
@@ -422,13 +428,41 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                 item["evidence"] = assemble_evidence(
                     item, fetch_abstract=fetch_abstract,
                     fetch_reflist=fetch_reflist)
-                if not item["evidence"].get("cited_abstract"):
-                    counts["excluded_fetch_failed"] += 1
-                item["atomic_claims"] = extract_atomic_claims(
-                    item["citing_sentence"], extractor=extractor)
-                item["coverage_verdicts"] = coverage_verdicts(
-                    item["atomic_claims"], item["evidence"],
-                    judge=coverage_judge)
+                # A sentinel / missing / empty abstract is NOT necessarily a fetch
+                # failure and the row is NOT excluded -- it is simply not scoreable
+                # by the coverage judge, which routes it HELD without an LLM call.
+                # Count it under a precise name, with the SAME sufficiency gate the
+                # judge uses so the two agree; a bare truthy-string check would miss
+                # sentinels ("N/A", "unavailable", ...) and under-count.
+                if not evidence_is_usable(item["evidence"]):
+                    counts["no_usable_abstract"] += 1
+                # Claim extraction and coverage parsing run injected model output
+                # through STRICT schema validation, which raises ValueError on a
+                # malformed reply (```json fence, extra/missing key, wrong type).
+                # Guard the pair so one bad reply quarantines THIS reference to a
+                # durable row-level record instead of aborting the whole batch.
+                # Only ValueError (the parse/schema failure) is caught; operational
+                # errors (network, etc.) still propagate as before.
+                try:
+                    item["atomic_claims"] = extract_atomic_claims(
+                        item["citing_sentence"], extractor=extractor)
+                    item["coverage_verdicts"] = coverage_verdicts(
+                        item["atomic_claims"], item["evidence"],
+                        judge=coverage_judge)
+                except ValueError as e:
+                    item["proposed_route"] = ROUTE_PARSE_QUARANTINE
+                    item["proposed_verdict"] = None
+                    item["parse_error"] = str(e)
+                    item["claim_extract_prompt_version"] = CLAIM_EXTRACT_PROMPT_VERSION
+                    item["coverage_prompt_version"] = COVERAGE_PROMPT_VERSION
+                    item["ts"] = int(time.time())
+                    counts[ROUTE_PARSE_QUARANTINE] += 1
+                    print(f"[band-parse-quarantine] {pmcid} "
+                          f"{item['citation_id']}: {e}")
+                    # Durable record for later inspection/retry; not added to the
+                    # blind annotation queue (no coverage verdicts to annotate).
+                    _append_jsonl(items_fh, item)
+                    continue
                 r = route(item["coverage_verdicts"])
                 item["proposed_route"] = r
                 item["proposed_verdict"] = _proposed_verdict(r)
