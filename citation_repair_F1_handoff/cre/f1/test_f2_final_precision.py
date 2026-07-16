@@ -101,3 +101,74 @@ def test_mixed_identity_needs_roster_and_large_year_conflict_not_print_drift():
     drift = _r(title=r.title, authors=r.authors, year=2015, journal=r.journal, volume=r.volume, pages=r.pages, doi=r.doi)
     verdict, match = flag_verdict(c, drift)
     assert not (verdict == VERDICT_SAME_WORK_VARIANT and match.same_work_reason == "mixed_identity_citation")
+
+
+# ---------------------------------------------------------------------
+# Adversarial hardening (2026-07-15 review of the three new rules)
+# ---------------------------------------------------------------------
+
+def test_corporate_ampersand_conjunction_is_formatting_only():
+    """'&' vs 'and' is a conjunction/typography difference, never a veto."""
+    c = _c(title="Patient safety in the emergency department", authors=["Committee on Quality & Safety"], year=2019, journal="Emergency Care", volume="12", pages="10-18", claimed_doi="10.1000/amp")
+    r = _r(title="Patient safety in the emergency department", authors=["Committee on Quality and Safety"], year=2019, journal="Emergency Care", volume="12", pages="10-18", doi="10.1000/amp")
+    verdict, match = flag_verdict(c, r)
+    assert verdict != VERDICT_WRONG_PAPER
+    assert verdict == VERDICT_MATCH or match.same_work_reason == "shared_doi_same_work"
+
+
+def test_corporate_abbreviation_is_a_token_change_and_stays_high():
+    """Formatting-only comparator: an abbreviated organization name deletes and
+    replaces tokens, so it is NOT formatting equivalence -- the conflict holds."""
+    c = _c(title="Feeding guidance for healthy infants", authors=["AAP Committee on Nutrition"], year=2014, journal="Pediatrics", volume="133", pages="e100-e108", claimed_doi="10.1000/abbr")
+    r = _r(title="Feeding guidance for healthy infants", authors=["American Academy of Pediatrics Committee on Nutrition"], year=2014, journal="Pediatrics", volume="133", pages="e100-e108", doi="10.1000/abbr")
+    assert flag_verdict(c, r)[0] == VERDICT_WRONG_PAPER
+
+
+@pytest.mark.parametrize("authors", [
+    ["National Perioperative Care Committee"],   # corporate edition family
+    ["Rhodes"],                                  # personal-author edition family
+])
+def test_spelled_out_edition_conflict_stays_high(authors):
+    """'Second Edition' vs 'Third Edition' is a serial-edition conflict even
+    without a roman numeral or an embedded 4-digit year; a shared run-on DOI
+    plus near-identical titles must not route it out of HIGH."""
+    c = _c(title="Practice guidelines for perioperative care, Second Edition", authors=authors, year=2017, journal="Periop Med", volume="6", pages="1-40", claimed_doi="10.1000/edfam")
+    r = _r(title="Practice guidelines for perioperative care, Third Edition", authors=authors, year=2020, journal="Periop Med", volume="9", pages="1-44", doi="10.1000/edfam")
+    assert flag_verdict(c, r)[0] == VERDICT_WRONG_PAPER
+
+
+def test_same_edition_ordinal_on_both_sides_is_not_a_conflict():
+    """Both titles naming the SAME edition share the ordinal -- no series
+    conflict, so the anchored pair stays out of HIGH (review via shared DOI)."""
+    c = _c(title="Practice guidelines for perioperative care, Second Edition", authors=["Rhodes"], year=2017, journal="Periop Med", volume="6", pages="1-40", claimed_doi="10.1000/edsame")
+    r = _r(title="Practice guidelines for perioperative care, 2nd Edition", authors=["Rhodes"], year=2017, journal="Periop Med", volume="6", pages="1-40", doi="10.1000/edsame")
+    assert flag_verdict(c, r)[0] != VERDICT_WRONG_PAPER
+
+
+def test_anchor_rejects_supplement_versus_article_first_page():
+    """A meeting-abstract locator (S100) and a plain article page (100) are
+    different physical slots: RULE G must not anchor across them."""
+    c = _c(title="Longitudinal outcomes after comprehensive cardiac rehabilitation", authors=["Given", "Names"], year=2018, journal="Clinical Cardiology", volume="41", pages="S100-S108", claimed_doi="10.1000/anchor")
+    r = _r(title="Longitudinal outcomes following comprehensive cardiac rehabilitation", authors=["Surname", "Other"], year=2018, journal="Clinical Cardiology", volume="41", pages="100-108", doi="10.1000/anchor")
+    verdict, match = flag_verdict(c, r)
+    assert match.same_work_reason != "overwhelming_bibliographic_anchor"
+    assert verdict == VERDICT_WRONG_PAPER
+
+
+def test_mixed_identity_requires_locator_parity():
+    """The mixed-identity quarantine must not treat an S-page as the article
+    page's slot; without the page anchor the row stays HIGH."""
+    c = _c(title="Outcomes of dapagliflozin in chronic kidney disease progression", authors=["Heer", "Field", "Stone", "Water"], year=2019, journal="Nephrology Today", volume="30", pages="S344", claimed_doi="10.1000/mx")
+    r = _r(title="Dapagliflozin and renal outcomes in chronic kidney disease", authors=["Heer", "Berg"], year=2021, journal="Nephrology Today", volume="30", pages="344-352", doi="10.1000/mx")
+    verdict, match = flag_verdict(c, r)
+    assert match.same_work_reason != "mixed_identity_citation"
+    assert verdict == VERDICT_WRONG_PAPER
+
+
+def test_derivative_genre_clean_high_scoring_pair_is_not_forced_high():
+    """Both titles of ONE review-genre work carry the same genre marker; a
+    one-token drift with every field agreeing is a clean match, and the
+    derivative block must not force it into the HIGH band."""
+    c = _c(title="A systematic review of exercise interventions for adolescent depression", authors=["Carter", "Morres"], year=2016, journal="J Affect Disord", volume="191", pages="62-71")
+    r = _r(title="A systematic review of exercise interventions for adolescents depression", authors=["Carter", "Morres"], year=2016, journal="J Affect Disord", volume="191", pages="62-71", doi="10.1016/j.jad.2015.11.014")
+    assert flag_verdict(c, r)[0] == VERDICT_MATCH
