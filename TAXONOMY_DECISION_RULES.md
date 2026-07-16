@@ -146,10 +146,11 @@ These are real examples from claims_test.jsonl used to calibrate annotators on b
 
 | Index | Correct label | Sarol label | Key lesson |
 |---|---|---|---|
-| 0 | F6 | NOT_ACCURATE | General mechanism supported; ApoE-deficient model not confirmed — specificity boundary |
-| 1 | ACCURATE | NOT_ACCURATE | All atomic claims directly supported; clean ACCURATE baseline |
-| 2 | F6 | ACCURATE | **Sarol false negative.** First clause (cardiovascular correlation) unsupported; second clause (omnivore/vegan TMAO) supported. Best error analysis example. |
-| 3 | ACCURATE | ACCURATE | Paper reports finding confidently despite broader literature uncertainty — paper-level vs. literature-level uncertainty rule |
+| 0 | F6 | NOT_ACCURATE | FMO3-knockdown clause not addressed by cited abstract (paper covers the L-carnitine/TMAO/atherosclerosis axis but is silent on FMO3 knockdown) — coverage gap |
+| 1 | F6 | NOT_ACCURATE | General mechanism supported; ApoE-deficient model not confirmed (cited abstract discusses "mice" generally) — specificity boundary |
+| 2 | ACCURATE | ACCURATE | All atomic claims (L-carnitine→TMAO, mouse atherosclerosis via disrupted cholesterol metabolism + foam-cell macrophage activity) directly supported — clean ACCURATE baseline |
+| 3 | F6 | ACCURATE | **Sarol false negative.** First clause (ℓ-carnitine/TMAO ↔ cardiovascular-events correlation in humans) unsupported by the cited abstract; second clause (omnivore/vegan TMAO difference) supported. Best error-analysis example — two-clause coverage split. |
+| 4 | ACCURATE | ACCURATE | Prevotella/meat-diet association reported as real despite broader-literature uncertainty — paper-level vs. literature-level uncertainty rule (F4 boundary) |
 
 ---
 
