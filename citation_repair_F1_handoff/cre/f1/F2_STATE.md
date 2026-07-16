@@ -3,6 +3,50 @@
 Working-state note for the F2 (wrong-paper) precision pass. Branch:
 `feat/f2-final-revision`. Module: `cre/f1/`.
 
+## 2026-07-15 — final six-row precision repair (seed 31 remains burned)
+
+The seed-31 resolver remains **paused at 9,395 / 24,702 cached PMIDs**. Only six
+already inspected HIGH rows were used for this repair; no additional seed-31 rows
+were opened, and seed 37 remains untouched. The six labels are **3 genuine
+wrong-paper, 2 false HIGHs, and 1 ambiguous mixed citation**, so the provisional
+development precision is **3/6 = 0.50**. This is burned development evidence, not
+a prospective or held-out performance claim.
+
+Three general, review-only identity rules were added. All route to
+`review_same_work_variant` (human-review quarantine), never `match`, `correct`,
+or `cleared`:
+
+- Corporate-author formatting now has a strict formatting-only comparator:
+  punctuation, whitespace, capitalization, and word-separator hyphenation may
+  differ, but no tokens may be deleted, expanded, or fuzzily matched. Different
+  organizations remain blocked as `corporate_author_conflict`.
+- `overwhelming_bibliographic_anchor` handles a given-name/surname field
+  inversion only when exact DOI, exact year, journal evidence, matching volume,
+  matching first page, and a substantive non-generic title all concur. The short
+  `Med. J` style abbreviation support is private to this conjunction; it does
+  not relax global journal or author matching.
+- `mixed_identity_citation` quarantines an internally contradictory hybrid only
+  with exact DOI + journal + volume + first-page anchors, a >=2-year conflict,
+  substantive but non-near-identical titles, and at least two claimed roster
+  names absent from the resolved roster. This excludes normal online-first/print
+  year drift, truncation, translations, and harmless title variants.
+
+The six authorized rows route as follows: `24478674`, `15268348`, and `15267790`
+remain `review_wrong_paper`; `22291118` is quarantined as
+`shared_doi_same_work`; `22905060` as `overwhelming_bibliographic_anchor`; and
+`21680844` as `mixed_identity_citation` (ambiguity, not proof of same work).
+The mixed route stays in durable accounting as human review and is excluded from
+the HIGH denominator; it is not an automatic clear.
+
+Adversarial tests pin different corporate groups, annual/ordinal editions,
+exact-DOI-only collisions, adjacent same-journal articles, coordinate conflicts,
+and online/print year drift. The derivative, series, annual-edition, consortium,
+sibling-trial, conference-abstract, translation, unresolved, and recall guards
+remain in force. Remaining risk is the intended review-only boundary: unusual
+hybrid citations with insufficient independent anchors remain HIGH rather than
+being inferred as mixed, while a quarantined mixed citation still requires human
+adjudication.
+
 ## 2026-07-15 — seed-31 preview diagnostic + fix (SEED 31 NOW BURNED)
 
 A 4,500-record cached preview of seed 31 surfaced **five HIGH rows**. They were

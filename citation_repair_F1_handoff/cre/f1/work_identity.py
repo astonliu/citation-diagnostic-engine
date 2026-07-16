@@ -39,7 +39,7 @@ _DOCUMENT_RE = re.compile(
     r"recommendations?|standard)\b", re.I)
 _CORPORATE_RE = re.compile(
     r"\b(association|society|organization|organisation|college|academy|world|"
-    r"national|international|committee|council)\b", re.I)
+    r"national|international|committee|council|institute|foundation|board)\b", re.I)
 _LIVING_SOURCES = ("statpearls", "ncbi bookshelf", "bookshelf")
 _AUTHOR_SUFFIX_ONLY = {"jr", "junior", "sr", "senior", "filho", "neto"}
 _ROMAN_RE = re.compile(r"\b(?:i|ii|iii|iv|v|vi|vii|viii|ix|x)\b", re.I)
@@ -78,6 +78,10 @@ _REPRINT_PUBTYPES = {"republished article", "reprint", "classical article"}
 # Title-similarity floors for the new same-work rules (kept SEPARATE from and
 # never below the 0.92 near-identical-title gate in biblio_match).
 DOI_SAME_WORK_TITLE_MIN = 0.92          # exact DOI+author only overrides the block at near-identical titles
+# Rule-local floor for a malformed author field whose DOI, publication year,
+# venue, volume, and first page independently identify the work.  It is NOT a
+# relaxation of RULE A: this rule requires all five bibliographic anchors.
+DOI_BIBLIOGRAPHIC_ANCHOR_TITLE_MIN = 0.85
 CONFERENCE_ABSTRACT_TITLE_MIN = 0.87    # abstract -> full publication of same study
 TRANSLATION_TRANSLIT_TITLE_MIN = 0.85   # translation whose metadata is transliterated
 # Fraction of the abstract's author roster that must reappear on the resolved full
@@ -218,7 +222,34 @@ def _first_author_aliases(authors: list[str]) -> set[str]:
     return aliases
 
 
+def _corporate_author_format_key(value: str) -> str:
+    """Formatting-only key for an institutional author name.
+
+    Hyphens between words are separators here (``patient-and`` vs ``patient
+    and``), unlike personal-name normalization where a hyphen can be part of a
+    family name.  This deliberately does no token deletion, abbreviation
+    expansion, or fuzzy matching: distinct organizations retain distinct keys.
+    """
+    value = fold_bibliographic_text(value or "").lower()
+    value = re.sub(r"[-‐-―/_]+", " ", value)
+    value = re.sub(r"[^\w\s]", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _corporate_author_equivalent(claimed: ClaimedRef,
+                                 resolved: RetrievedRecord) -> bool:
+    if not claimed.authors or not resolved.authors:
+        return False
+    left, right = claimed.authors[0] or "", resolved.authors[0] or ""
+    if not (_CORPORATE_RE.search(left) and _CORPORATE_RE.search(right)):
+        return False
+    a, b = _corporate_author_format_key(left), _corporate_author_format_key(right)
+    return bool(a and b and a == b)
+
+
 def first_author_equivalent(claimed: ClaimedRef, resolved: RetrievedRecord) -> bool:
+    if _corporate_author_equivalent(claimed, resolved):
+        return True
     left = _first_author_aliases(claimed.authors)
     right = _first_author_aliases(resolved.authors)
     return bool(left and right and left & right)
@@ -312,12 +343,10 @@ def _derivative_block(claimed: ClaimedRef, resolved: RetrievedRecord) -> str:
         return "derivative_publication"
     if _series_conflict(claimed.title, resolved.title):
         return "series_ordinal_conflict"
-    left_author = _first_author_value(claimed.authors)
-    right_author = _first_author_value(resolved.authors)
-    if (left_author and right_author and left_author != right_author
-            and left_author not in right_author and right_author not in left_author
-            and _CORPORATE_RE.search(left_author)
-            and _CORPORATE_RE.search(right_author)):
+    left_raw = claimed.authors[0] if claimed.authors else ""
+    right_raw = resolved.authors[0] if resolved.authors else ""
+    if (_CORPORATE_RE.search(left_raw) and _CORPORATE_RE.search(right_raw)
+            and not _corporate_author_equivalent(claimed, resolved)):
         return "corporate_author_conflict"
     ct, rt = canonical_title(claimed.title), canonical_title(resolved.title)
     return ""
@@ -425,6 +454,28 @@ def _first_pages_agree(claimed: ClaimedRef, resolved: RetrievedRecord) -> bool:
     return bool(a and b and a == b)
 
 
+def _mixed_identity_citation(claimed: ClaimedRef, resolved: RetrievedRecord,
+                             *, title_similarity: float, journal: bool) -> bool:
+    """Strictly quarantine a citation assembled from two different works.
+
+    The resolved-work anchors must be unusually complete (exact DOI, venue,
+    volume, and first page), while the cited-work identity disagrees in both a
+    substantive title and a non-trivial author roster.  A >=2-year gap keeps
+    ordinary online-first/print-year drift out of this ambiguity-only rule.
+    """
+    if not (doi_equivalent(claimed.claimed_doi, resolved.doi)
+            and journal and _volume_agrees(claimed, resolved)
+            and _first_pages_agree(claimed, resolved)
+            and claimed.year and resolved.year
+            and abs(int(claimed.year) - int(resolved.year)) >= 2
+            and is_distinctive_title(claimed.title)
+            and is_distinctive_title(resolved.title)
+            and 0.55 <= title_similarity < DOI_BIBLIOGRAPHIC_ANCHOR_TITLE_MIN):
+        return False
+    claimed_names, resolved_names = _surname_set(claimed.authors), _surname_set(resolved.authors)
+    return len(claimed_names - resolved_names) >= 2
+
+
 # Generic journal-name words that are NOT a distinctive family token. Private to
 # _journal_family_transliteration (RULE F): its leading-token match must never key
 # on one of these (e.g. two different "Journal of Clinical ..." titles).
@@ -454,6 +505,23 @@ def _journal_family_transliteration(left: str, right: str) -> bool:
     if not a or not b:
         return False
     return JaroWinkler.similarity(a, b) >= 0.90
+
+
+def _abbreviated_journal_anchor(left: str, right: str) -> bool:
+    """Very narrow ``Med. J``-style evidence, private to RULE G.
+
+    Short journal abbreviations are too ambiguous to relax global journal
+    matching.  Here they are only one corroborator among an exact DOI, year,
+    volume, first page, and substantive title, so accept a two-token form ending
+    in ``J`` when its substantive token prefixes a word in a full ``... Journal``
+    title.
+    """
+    a, b = canonical_title(left).split(), canonical_title(right).split()
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    if len(short) != 2 or short[-1] != "j" or len(short[0]) < 3:
+        return False
+    return ("journal" in long
+            and any(tok.startswith(short[0]) for tok in long if len(tok) >= 4))
 
 
 def _is_supplement_locator(pages: str) -> bool:
@@ -593,6 +661,30 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
     doi = _doi_match(claimed, resolved)
     locator = _locator_match(claimed, resolved)
     same_year = bool(claimed.year and resolved.year and claimed.year == resolved.year)
+
+    # RULE G (overwhelming bibliographic anchor).  A malformed author field can
+    # invert given names into the surname position.  Do not relax author matching
+    # globally: quarantine only when an exact DOI is independently corroborated
+    # by exact year, equivalent venue, matching volume AND first page, plus a
+    # substantive title.  Derivative/series/corporate conflicts were rejected
+    # above, so this cannot turn a related report or edition into a same work.
+    if (_mixed_identity_citation(claimed, resolved, title_similarity=title_similarity,
+                                 journal=journal)):
+        return WorkIdentityEvidence(True, "mixed_identity_citation",
+                                    ("exact_doi", "journal", "volume", "first_page",
+                                     "year_gap>=2", "title_and_roster_conflict"))
+
+    if (doi and same_year
+            and (journal or _abbreviated_journal_anchor(claimed.journal, resolved.journal))
+            and _volume_agrees(claimed, resolved)
+            and _first_pages_agree(claimed, resolved)
+            and title_similarity >= DOI_BIBLIOGRAPHIC_ANCHOR_TITLE_MIN
+            and is_distinctive_title(claimed.title)
+            and is_distinctive_title(resolved.title)):
+        return WorkIdentityEvidence(True, "overwhelming_bibliographic_anchor",
+                                    ("exact_doi", "year", "journal", "volume",
+                                     "first_page",
+                                     "title_sim>=%.2f" % DOI_BIBLIOGRAPHIC_ANCHOR_TITLE_MIN))
 
     # Authoritative alternate/vernacular title retained from MEDLINE TT.
     for alternate in resolved.alternate_titles:
