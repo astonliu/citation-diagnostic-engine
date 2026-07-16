@@ -67,6 +67,30 @@ _REGULATORY_RE = re.compile(
     re.I,
 )
 _AUTHOR_RESIDUE_RE = re.compile(r"^\s*(?:et\s+al\.?|and\s+colleagues)\s*$", re.I)
+# A run of >=2 ASCII letters -- a distinctive lexical (word-shaped) token. Its
+# ABSENCE from a normalized title marks a numeric/year/locator-only slot.
+_DISTINCTIVE_ALPHA_RE = re.compile(r"[a-z]{2,}")
+
+
+def _numeric_or_year_only_title(raw: str, normalized: str) -> bool:
+    """A year / volume / issue / page-locator number parked in the title slot
+    ("2001", "130", "3", "1999-2001"). Such a slot carries ZERO title evidence,
+    the same category error as ``journal_as_title`` / ``regulatory_code``, so it
+    is not a scoreable title comparison.
+
+    RECALL-SAFE BY CONSTRUCTION (keys only on content shape): fires ONLY when the
+    normalized title has no run of >=2 ASCII letters, the raw title carries no
+    non-ASCII letter (a real, possibly non-Latin or transliterated title always
+    has letters -- e.g. Cyrillic, a bracketed translation), AND at least one digit
+    is present (so a stray single letter is never bucketed here). Any title that
+    keeps a distinctive word -- "COVID-19 outcomes", "p53 signaling", "IL-6",
+    "The 2019 revision..." -- retains an alphabetic token and stays scoreable.
+    """
+    if _DISTINCTIVE_ALPHA_RE.search(normalized):
+        return False
+    if any(ch.isalpha() and ord(ch) > 127 for ch in (raw or "")):
+        return False
+    return any(ch.isdigit() for ch in normalized)
 
 
 def _despace(s: str) -> str:
@@ -190,6 +214,13 @@ def classify_unscoreable(claimed: ClaimedRef,
         return ("journal_author_residue_as_title",
                 "claimed title contains only a journal masthead plus an author "
                 "surname, not an article title.")
+
+    # a bare number (year / volume / issue / locator) parked in the title slot
+    if _numeric_or_year_only_title(ct, nct):
+        return ("numeric_or_year_only_title",
+                "claimed title has no distinctive lexical content -- only a "
+                "number (year / volume / issue / page locator) sits in the title "
+                "slot, so it bears zero title evidence.")
 
     # regulatory / legal code in the title slot
     if _REGULATORY_RE.search(ct):

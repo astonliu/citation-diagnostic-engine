@@ -3,6 +3,95 @@
 Working-state note for the F2 (wrong-paper) precision pass. Branch:
 `feat/f2-final-revision`. Module: `cre/f1/`.
 
+## 2026-07-15 — seed-31 preview diagnostic + fix (SEED 31 NOW BURNED)
+
+A 4,500-record cached preview of seed 31 surfaced **five HIGH rows**. They were
+diagnosed against the live engine and cross-checked against canonical NCBI PubMed
+metadata; the diagnosis was approved as the implementation spec for two narrow,
+general mechanisms below.
+
+- **SEED 31 IS NOW BURNED DEVELOPMENT DATA** for these two mechanisms. Tuning code
+  to its rows means no seed-31 replay may be described as held-out or prospective
+  for the changed code. This preview was a partial diagnostic (4,500 of 24,702
+  cached PMIDs), **not** a precision estimate.
+- **Seed 37 is the next clean holdout** — still undrawn and untouched. Any post-fix
+  held-out precision claim must come from seed 37 (or a later fresh seed), never
+  from seed 31.
+- No other seed-31 rows were inspected; seed 37 was not accessed, drawn, resolved,
+  or scored; `main` is untouched. Global thresholds are unchanged —
+  `SAME_WORK_TITLE_SIM_MIN` stays **0.92**, and no global floor was lowered.
+
+### The five preview rows (provisional labels confirmed by primary source)
+
+| citation | now → after | mechanism |
+|---|---|---|
+| `PMC12511533:R301\|11602907` (label 0) | `review_wrong_paper` → `unscoreable` | 3a numeric-title gate |
+| `PMC8353697:r125\|15938103` (label 0) | `review_wrong_paper` → `review_same_work_variant` | 3b RULE F (low tier + roster) |
+| `PMC8353697:r97\|12698653` (label 0) | `review_wrong_paper` → `review_same_work_variant` | 3b RULE F (high tier) |
+| `PMC12841101:B131\|15268348` (label 1) | `review_wrong_paper` (unchanged) | not bracketed → 3b never fires |
+| `PMC12841101:B331\|15267790` (label 1) | `review_wrong_paper` (unchanged) | not bracketed → 3b never fires |
+
+R301 is a JATS field-shift artifact (the year `2001` parsed into the title slot,
+the masthead `Surgery` into the author slot, no `<source>`); it carries zero title
+evidence. r125/r97 are Russian articles whose PubMed record carries **no Volume**
+(the citing source stored the ISSUE in `<volume>`), so RULE D's `_volume_agrees`
+can never confirm the same-work identity. B131/B331 are genuinely distinct
+`J Chem Phys` works and correctly stay HIGH. All three label-0 rows leave HIGH;
+both label-1 rows stay HIGH; no diverted row routes to `match`/`correct`/`cleared`.
+
+### 3a — `numeric_or_year_only_title` UNSCOREABLE gate (`unscoreable.py`)
+
+A claimed title whose normalized form has **no run of ≥2 ASCII letters**, no
+non-ASCII letter (recall guard for real non-Latin / bracketed-translation titles),
+and at least one digit is a bare year/volume/issue/locator parked in the title
+slot — the same category error as `journal_as_title`/`regulatory_code`. Routed to
+the counted `unscoreable` bucket (excluded from BOTH the HIGH numerator and the
+scoreable denominator by `high_band_rate_of_scoreable`), so R301 is neither HIGH
+nor auto-cleared. Recall-safe by construction: any title keeping a distinctive word
+("COVID-19 outcomes", "p53 signaling", "IL-6", "The 2019 revision…") stays
+scoreable. Per-occurrence and content-shape keyed — no PMID dedup.
+
+### 3b — RULE F `translated_title_missing_volume_anchors` (`work_identity.py`)
+
+Added to `assess_same_work` **after RULE D**, routing to `review_same_work_variant`
+(human-reviewed, never auto-cleared). Fires only on the full conjunction:
+PubMed-**bracketed** resolved title, explicit **non-English** evidence (language or
+`English Abstract` pubtype), **exact year**, **resolved volume ABSENT**, **matching
+first page** (the numeric anchor that replaces the missing volume), a
+**transliterated first author** (`_first_author_typo` or `first_author_equivalent`),
+and **journal-family agreement** (`journal_equivalent` / `_near_transliteration` /
+the rule-private `_journal_family_transliteration`). Tiered title floor, both
+**rule-local** (no global threshold touched): `title_sim ≥ 0.85` fires (r97);
+`0.78 ≤ title_sim < 0.85` fires **only** with roster containment ≥ 0.60 (r125).
+
+Load-bearing guards: the resolved-volume-**absent** precondition makes the rule
+**defer** whenever a resolved volume exists, so RULE D's volume guard still governs
+and a genuine volume disagreement stays `review_wrong_paper` (seed-29 `12500577`
+keeps volume on both sides and remains `translated_title_transliterated_author`).
+The name is deliberate: the runtime record does not preserve the resolved issue, so
+this proves only "translated same work, volume anchor missing", **never**
+issue-to-volume identity. `_journal_family_transliteration` is private to this rule
+and rejects generic leading tokens (`journal`, `international`, `clinical`,
+`medical`, `the`, …); no global fuzzy-author/-journal rule was added.
+
+### Tests & status
+
+`test_f2_seed31.py` (new) pins all five preview rows (exact metadata) via
+`build_f2_record` + the `high_band_rate_of_scoreable` quarantine accounting, RULE F
+PMID-free generic positives (high tier; low tier with the roster backstop and its
+`<0.60` negative), the adversarial negatives (resolved-volume-present, different
+first page, different journals, year gap, English-not-bracketed), a
+`_journal_family_transliteration` unit test (matches stem, rejects generic tokens),
+the rule-local-floor constants, and a two-occurrence XML fixture proving the
+malformed field-shift occurrence becomes `unscoreable` while a well-formed
+occurrence with the **same PMID** survives independently (no PMID dedup).
+`test_unscoreable.py` adds the numeric-title gate signal (positives, the
+distinctive-word recall guard, and the non-Latin recall guard). Clean-archive
+`cre/f1` suite green (**388 passed**, up from the tracked 362 baseline; the earlier
+393 was contaminated by 31 unrelated uncommitted tests) + `git diff --check` clean.
+Changed files: `unscoreable.py`, `work_identity.py`, `test_unscoreable.py`,
+`test_f2_seed31.py` (new), `F2_STATE.md`.
+
 ## 2026-07-14 — seed-29 prospective result + wrong-paper-precision redesign
 
 ### Frozen prospective result (seed 29)
@@ -22,6 +111,11 @@ honest held-out number for that frozen code.
   code is frozen. Only after freezing may seed 31 test the revised engine, and
   the >0.8 precision target may be claimed only after seed 31 is completed and
   adjudicated.
+  > **SUPERSEDED 2026-07-15 — SEED 31 IS NOW BURNED.** A 4,500-record seed-31
+  > preview was inspected and its five HIGH rows drove two code changes (see the
+  > 2026-07-15 section at the top of this file). Seed 31 can no longer back a
+  > held-out precision claim for the changed code. **Seed 37** is the next clean,
+  > undrawn holdout.
 
 ### Root causes of the seven false positives
 
