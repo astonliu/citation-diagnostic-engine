@@ -529,8 +529,19 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # Tri-state: only a REAL disagreement (is False) counts; None (unparsed) does
     # not. A confident author/year disagreement.
     disagree = ((f.first_author_match is False)
-                or (f.author_match is False) or (f.year_match is False))
+                or (f.author_match is False) or (f.year_match is False)
+                # A coordinate mismatch below the near-identical-title gate is
+                # an adjacent-record signal, not harmless pagination formatting.
+                # This prevents a same-journal/volume neighbour from being
+                # auto-cleared solely by the composite's other boosts.
+                or ((f.volume_match is False or f.pages_match is False)
+                    and m.title_sim < SAME_WORK_TITLE_SIM_MIN))
     identity = assess_same_work(claimed, cand, title_similarity=m.title_sim)
+    # A work-identity guard is affirmative evidence that these are distinct
+    # records (derivative, serial edition, or corporate conflict).  Never let a
+    # high composite assembled from shared bibliographic fields auto-clear it.
+    if identity.blocked_by:
+        return VERDICT_WRONG_PAPER, m
     # Clean accepted pairs are ordinary matches, not review variants.  For a
     # pair that would otherwise be reviewed, prefer a specific identity proof
     # over the generic near-title gate so the live path can route safely.
