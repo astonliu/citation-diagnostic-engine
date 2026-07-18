@@ -22,8 +22,8 @@ def _coverage_reply(
     })
 
 
-def test_prompt_versions_are_single_sourced_v2():
-    assert bp.CLAIM_EXTRACT_PROMPT_VERSION == "claim_extract_v2"
+def test_prompt_versions_are_single_sourced():
+    assert bp.CLAIM_EXTRACT_PROMPT_VERSION == "claim_extract_v3"
     assert bp.COVERAGE_PROMPT_VERSION == "coverage_v2"
     assert jb.CLAIM_EXTRACT_PROMPT_VERSION == bp.CLAIM_EXTRACT_PROMPT_VERSION
     assert jb.COVERAGE_PROMPT_VERSION == bp.COVERAGE_PROMPT_VERSION
@@ -174,6 +174,9 @@ def test_prompts_contain_agreed_general_rules_without_natural_citances():
     assert "approved for" in claim_prompt
     assert "used for" in claim_prompt
     assert "Study Q was the first to report" in claim_prompt
+    assert 'Do not split alternatives joined by "or"' in claim_prompt
+    assert "Treatment A may slow or stop disease progression in mice" in claim_prompt
+    assert '{"claims": ["Treatment A may slow or stop disease progression in mice"]}' in claim_prompt
 
     assert "Semantic paraphrase is allowed" in coverage_prompt
     assert "Do not compose an unstated causal pathway" in coverage_prompt

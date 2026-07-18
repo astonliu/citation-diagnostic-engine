@@ -52,7 +52,7 @@ from typing import Callable, List, Optional
 # --------------------------------------------------------------------------
 # Pinned prompt versions (single source of truth; judgment_band imports these)
 # --------------------------------------------------------------------------
-CLAIM_EXTRACT_PROMPT_VERSION = "claim_extract_v2"
+CLAIM_EXTRACT_PROMPT_VERSION = "claim_extract_v3"
 COVERAGE_PROMPT_VERSION = "coverage_v2"
 
 # --------------------------------------------------------------------------
@@ -70,7 +70,9 @@ look like "[28]", "[28,29,30,31]", superscript "102", or "[1]". A sentence-final
 does not automatically attribute the citing authors' own purpose, method, or action (for \
 example, "we compared our results") to the cited source. Drop that framing.
 2. Split every independently judgeable predicate:
-   a. Split coordinated clauses and predicates ("activates A and inhibits B").
+   a. Split coordinated clauses and predicates when each is separately asserted ("activates A and inhibits B"). \
+Do not split alternatives joined by "or" when the sentence asserts only the disjunction \
+under a shared modality; preserve the complete disjunctive predicate as one claim.
    b. Split distinct stacked properties ("first inhibitor developed for X").
    c. Never merge "developed for", "approved for", and "used for".
    d. Split result-bearing source descriptions. A phrase such as "findings from the trial \
@@ -92,6 +94,9 @@ empty list.
 EXAMPLES
 Citing sentence: "Metformin activates AMPK and inhibits hepatic gluconeogenesis in diet-induced obese rats [7]."
 {"claims": ["Metformin activates AMPK", "Metformin inhibits hepatic gluconeogenesis in diet-induced obese rats"]}
+
+Citing sentence: "Treatment A may slow or stop disease progression in mice [7]."
+{"claims": ["Treatment A may slow or stop disease progression in mice"]}
 
 Citing sentence: "We compared our estimates with the associations from a trial conducted by Consortium C [1]."
 {"claims": ["Consortium C conducted the trial", "The trial produced the associations"]}
