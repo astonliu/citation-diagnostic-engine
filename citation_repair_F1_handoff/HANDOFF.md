@@ -76,3 +76,9 @@ After fixing, run `test_schema.py`, `test_pipeline.py`, and `test_adj.py` plus y
 - F2 falls out of the same run for free — capture it; it's a hard-to-source category.
 - Recall is unmeasurable now; defer to the planned P(fail|real) experiment.
 - `secondary_label` exists in all record types but is unpopulated and unvalidated — define its meaning and its own invariant before using it.
+
+## F5 review tooling (`tools/`)
+
+The F5 conformance-review harness lives in `tools/`: `f5_conformance_review.workflow.js` (the adversarial review workflow), `workflow_review_reconcile.py` (a journal↔summary reconciler that fails loud when the aggregation drops verdicts), and `test_workflow_review_reconcile.py` (its 12-test regression suite). Run the suite with `python3 -m pytest tools/test_workflow_review_reconcile.py`.
+
+**Deferred gap (follow-up, NOT this PR).** The `SPEC` and `BLUEPRINT` constants in `tools/f5_conformance_review.workflow.js` still hardcode absolute paths to `~/Documents/CitationRepairEngine/F5_SUPERSESSION_SPEC.md` and `F5_BLUEPRINT.md`, which exist only in the home-level repo, not this checkout. The workflow therefore cannot be fully re-run from a fresh clone until those two docs are relocated into this repo and the constants updated. The `MODULE` / `TESTS` / `ENGINE` constants already point at correct in-repo paths (`cre/f1/f5_supersession.py`, `cre/f1/test_f5_supersession.py`, `cre/f1/judgment_engine.py`).
