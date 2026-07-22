@@ -5,6 +5,12 @@
 **Plan version:** v2.2 (May 29, 2026).
 **Purpose of this document:** Fix the analysis plan in advance so that results cannot be reverse-justified. Referenced by commit hash in the manuscript.
 
+> **Amendments (additive, dated).** Amendments 1–2 in `PREREGISTRATION_AMENDMENTS_2026-06-09.md`;
+> Amendments 3–5 in `PREREGISTRATION_AMENDMENTS_2026-07-22.md` (annotator model + no κ gate;
+> precision-first + scoped case-control recall; synthetic restricted to training). Passages below
+> that those supersede are marked `[SEE AMENDMENTS 2026-07-22]`. The original registered text is
+> not deleted.
+
 ---
 
 ## 1. Claims and their tests
@@ -66,6 +72,7 @@ Reported separately; never averaged.
 - **Confidence intervals:** bootstrap, 1000 resamples. No single point estimates reported as results.
 - **Contamination control:** a held-out experiment using citations from papers published after the model's training cutoff.
 - **Model reporting:** exact Claude model strings and snapshot dates pinned.
+- **Recall / precision scope** `[SEE AMENDMENTS 2026-07-22, Amdt 4]`: precision-first per stratum on the finder's flagged set; a case-control sensitivity lower bound only where an independent confirmed-positive set exists (F2, F3), cases sourced independently of the detector; population recall out of scope for feasibility.
 
 ---
 
@@ -80,9 +87,9 @@ Reported separately; never averaged.
 
 ## 7. Inter-annotator agreement (fixed in advance)
 
-- **Target:** Cohen's κ ≥ 0.60 on the IAA subset (≥100 of the released examples double-annotated); κ ≥ 0.70 is "good".
-- **Taxonomy pre-pilot:** ~20 examples targeting the F3/F6 and F4/F6 confusable pairs only (F5/F8 excluded; F8 is deterministic) *before* volume annotation. Proceed if each pair holds κ ≥ 0.60; otherwise merge the offending pair with the pilot as justification.
-- **Fallback annotator qualification:** any second annotator must reach κ ≥ 0.60 against gold on a 20-example calibration set *before* paid annotation. Calibration κ reported in the manuscript.
+- **Target:** Cohen's κ ≥ 0.60 on the IAA subset (≥100 of the released examples double-annotated); κ ≥ 0.70 is "good". `[SEE AMENDMENTS 2026-07-22, Amdt 3 — no κ value committed in advance; κ measured and reported, not gated.]`
+- **Taxonomy pre-pilot:** ~20 examples targeting the F3/F6 and F4/F6 confusable pairs only (F5/F8 excluded; F8 is deterministic) *before* volume annotation. Proceed if each pair holds κ ≥ 0.60; otherwise merge the offending pair with the pilot as justification. `[SEE AMENDMENTS 2026-07-22, Amdt 3 — κ-gated pre-pilot retired; finder-prompt stabilization is the gate.]`
+- **Fallback annotator qualification:** any second annotator must reach κ ≥ 0.60 against gold on a 20-example calibration set *before* paid annotation. Calibration κ reported in the manuscript. `[SEE AMENDMENTS 2026-07-22, Amdt 3.]`
 
 ---
 
@@ -98,6 +105,6 @@ Reported separately; never averaged.
 ## 9. What would change the plan (decision rules)
 
 - A 2026 biomedical citation *repair-with-replacement* paper appears before submission → re-pitch as comparison/ablation against it.
-- Taxonomy pre-pilot κ < 0.60 on a pair after decision rules → merge that pair, report the pilot evidence.
+- Taxonomy pre-pilot κ < 0.60 on a pair after decision rules → merge that pair, report the pilot evidence. `[SEE AMENDMENTS 2026-07-22, Amdt 3 — no κ gate; merging is a post-hoc response to measured disagreement, not a trigger.]`
 - Zero-shot Claude beats Sarol by >10 F1 on the controlled comparison → that becomes a headline result alongside the taxonomy.
 - Generation top-3 fails to beat the in-domain recommender baseline by ≥10 pts → Generation stays exploratory / demoted, not escalated.

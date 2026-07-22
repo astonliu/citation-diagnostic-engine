@@ -153,9 +153,21 @@ These are real examples from claims_test.jsonl used to calibrate annotators on b
 
 ---
 
-## Pre-pilot gate (run before annotating at volume)
+## Gate to volume annotation
 
-- **40 examples, 5 per category, two annotators**, targeted at Pairs 1–3 above.
-- **Proceed to full 1100–1200** if each pair holds **κ ≥ 0.60** on the pre-pilot.
-- **If F3/F6 or F4/F6 still collide** after these rules: merge the offending pair and report the pre-pilot as the methodological justification ("collapsed after a pilot revealed residual confusion" = methodological care, not retreat).
-- The taxonomy stays **8** unless the pre-pilot says otherwise.
+> **Amended 2026-07-22** (see `PREREGISTRATION_AMENDMENTS_2026-07-22.md`, Amendment 3).
+> The κ-gated pre-pilot is retired; no κ value is committed in advance. Original text
+> struck below, retained for history.
+
+- **Gate:** finder-prompt stabilization on a small candidate batch — run the finder, expose its failure modes, then **freeze and version the finder prompt with the dataset**. Annotate at volume only against the frozen prompt.
+- **Annotators:** two hired annotators **label** the dataset (they do not construct it), independently and blind to each other and to any proposed category.
+- **Reliability:** Cohen's κ is measured on a double-annotated overlap slice and **reported when computed** — no committed value, no pass/fail gate. At-risk pairs to watch: **F3 vs ACCURATE** (provenance) and **F4 vs F6** (strength vs coverage).
+- **Merging** a confusable pair remains available as a **post-hoc** response to measured disagreement, reported as methodological care — not a pre-registered trigger.
+- **No synthetic data** enters any reported number; synthetic is training-side only.
+- The taxonomy stays **8** unless measured disagreement says otherwise.
+
+> *Original "Pre-pilot gate" (superseded 2026-07-22, retained for history):*
+> - ~~40 examples, 5 per category, two annotators, targeted at Pairs 1–3.~~
+> - ~~Proceed to full 1100–1200 if each pair holds κ ≥ 0.60 on the pre-pilot.~~
+> - ~~If F3/F6 or F4/F6 still collide after these rules: merge the offending pair and report the pre-pilot as justification.~~
+> - ~~The taxonomy stays 8 unless the pre-pilot says otherwise.~~
