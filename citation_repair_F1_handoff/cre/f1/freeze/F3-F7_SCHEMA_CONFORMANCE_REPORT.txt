@@ -1,0 +1,67 @@
+CRE F3-F7 finder-freeze — schema conformance report (format v14)
+generated_utc: 2026-07-25T00:24:56.309889+00:00
+validator: python-jsonschema 4.26.0 (Draft202012Validator)
+interpreter: 3.14.6
+command: python gen_conformance.py (extends seed _conf_v11.py)
+schema_file: F3-F7_FINDER_FREEZE_SCHEMAS.json | bytes: 69138 | sha256: 3241cbcce6189cf19f278b452b01ed41fb46ec079a8f2588fd110e50409b53b1
+duplicate_keys: NONE
+meta_schema_draft202012: PASS
+internal_refs: 307 occurrences, 50 unique targets, dangling: NONE
+root_artifact_types (18): prompt_package, config, batch, run_state_manifest, promotion, revocation, selection_artifact, candidate_manifest, exclusion_ledger_entry, exclusion_checkpoint, review_record, annotation_release_manifest, release_attestation, module_manifest, wal_event, stimulus_object, candidate_protocol, exposure_plan
+per-root positive instance validation:
+  prompt_package               PASS
+  config                       PASS
+  batch                        PASS
+  run_state_manifest           PASS
+  promotion                    PASS
+  revocation                   PASS
+  selection_artifact           PASS
+  candidate_manifest           PASS
+  exclusion_ledger_entry       PASS
+  exclusion_checkpoint         PASS
+  review_record                PASS
+  annotation_release_manifest  PASS
+  release_attestation          PASS
+  module_manifest              PASS
+  wal_event                    PASS
+  stimulus_object              PASS
+  candidate_protocol           PASS
+  exposure_plan                PASS
+  batch (release/formal/promo)  PASS
+negative / discriminator checks:
+  root {} (empty object)                     REJECTED
+  root given null                            REJECTED
+  root given 7                               REJECTED
+  wal prepared missing preimage              REJECTED
+  wal sent+boundary false                    REJECTED
+  batch candidate+formal                     REJECTED
+  batch candidate+promotion                  REJECTED
+  batch release+no-promo                     REJECTED
+  batch release+calibration                  REJECTED
+  batch development mode                     REJECTED
+  worksheet choice w/o choices               REJECTED
+  promotion old opaque shape                 REJECTED
+  candidate_protocol 1 prohibited case (<2)  REJECTED
+  system_message omitted+text                REJECTED
+  supplied decimal temperature               REJECTED
+  review_call call_made:true + not_run       REJECTED
+  excluded record w/ non-null stimulus       REJECTED
+  claim_extract with extra slot              REJECTED
+  coverage slots reordered                   REJECTED
+  citation_id with empty ref_id              REJECTED
+  run_state release+calibration+null-promo   REJECTED
+  run_state candidate+promotion              REJECTED
+  provider_error http_status 600             REJECTED
+  model_mismatch http_status 600             REJECTED
+  claim_extract text version != 3            REJECTED
+  coverage text version != 2                 REJECTED
+  slot encoding utf-16                       REJECTED
+  config package_version -1                  REJECTED
+  config stage missing response_schema_sha256 REJECTED
+  selection item empty stratum               REJECTED
+  unused $defs present: none                 REJECTED
+all_root_positive_pass: True
+all_negative_reject: True
+SCOPE: this report covers SCHEMA executability + discriminator behavior only. The
+semantic_validator_v1 SV-* cross-artifact rules and their per-rule fixtures are implemented
+WITH the validator during the build; this report does not assert them.

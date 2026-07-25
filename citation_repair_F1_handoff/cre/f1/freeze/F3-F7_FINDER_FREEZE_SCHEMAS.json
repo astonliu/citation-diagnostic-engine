@@ -1,0 +1,550 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cre:f3f7:finder-freeze:schemas:v14",
+  "title": "CRE F3-F7 finder-freeze artifact schemas (threat model: single-author integrity)",
+  "description": "Every artifact is a $defs member with an artifact_type discriminator; root is a oneOf. A strict byte loader (reject duplicate keys and any float token e.g. 1.0 before parse) and a versioned semantic validator (hash agreement, funnel/reportability equations, canonical ordering+uniqueness, chain/WAL linkage, git reachability+ancestry, RFC3339 semantics, percent-encode round-trip, numeric ranges, cross-field timeout/backoff, candidate==selection correspondence, module role/path exhaustiveness, trusted-constant comparison for repo_identity/canonical_ref) are REQUIRED in addition. Filename digests (config_hash, run_hash) are not fields. Envelope digests exclude themselves.",
+  "type": "object",
+  "required": ["artifact_type"],
+  "oneOf": [
+    { "$ref": "#/$defs/prompt_package" }, { "$ref": "#/$defs/config" }, { "$ref": "#/$defs/batch" },
+    { "$ref": "#/$defs/run_state_manifest" }, { "$ref": "#/$defs/promotion" }, { "$ref": "#/$defs/revocation" },
+    { "$ref": "#/$defs/selection_artifact" }, { "$ref": "#/$defs/candidate_manifest" },
+    { "$ref": "#/$defs/exclusion_ledger_entry" }, { "$ref": "#/$defs/exclusion_checkpoint" },
+    { "$ref": "#/$defs/review_record" }, { "$ref": "#/$defs/annotation_release_manifest" },
+    { "$ref": "#/$defs/release_attestation" }, { "$ref": "#/$defs/module_manifest" },
+    { "$ref": "#/$defs/wal_event" }, { "$ref": "#/$defs/stimulus_object" },
+    { "$ref": "#/$defs/candidate_protocol" }, { "$ref": "#/$defs/exposure_plan" }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "execution_mode": { "enum": ["candidate", "release", "development"] },
+    "git_commit_oid": { "type": "string", "pattern": "^(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$", "$comment": "Semantic validator proves this names a COMMIT object (not tree/blob)." },
+    "candidate_protocol": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "Codex v9 #2: committed BEFORE candidate-config creation. Binds the predeclared freeze criterion, prohibited-case set, and the exact schema+validator contract, so 'predeclared' is provable (not written into a later artifact). CONFIG references candidate_protocol_sha256.",
+      "required": ["artifact_type", "schema_version", "freeze_criterion", "prohibited_cases", "schema_sha256", "semantic_validator_version", "evaluation_policy_version", "recorded_by", "recorded_at"],
+      "properties": {
+        "artifact_type": { "const": "candidate_protocol" }, "schema_version": { "const": "v14" },
+        "freeze_criterion": { "$ref": "#/$defs/nonempty_string" },
+        "prohibited_cases": { "type": "array", "minItems": 2, "uniqueItems": true,
+          "$comment": "minItems 2: the two known confirmed F3 cases (Seeman, idelalisib) must always be present. Keyed on citing_pmcid (the durable contamination key); citation_id and occurrence_identity are optional provenance — requiring them would demand inputs ZD does not have yet (cases known by PMID). Semantic validator (SV-043) enforces uniqueness by citing_pmcid.",
+          "items": { "type": "object", "additionalProperties": false, "required": ["citing_pmcid"],
+            "properties": { "citing_pmcid": { "$ref": "#/$defs/pmcid" }, "citation_id": { "$ref": "#/$defs/citation_id" }, "occurrence_identity": { "$ref": "#/$defs/sha256" } } } },
+        "schema_sha256": { "$ref": "#/$defs/sha256", "$comment": "content hash of THIS schema file, so CONFIG binds the exact validation contract (Codex v9 P1)." },
+        "semantic_validator_version": { "const": "semantic_validator_v1" },
+        "evaluation_policy_version": { "$ref": "#/$defs/nonempty_string" },
+        "recorded_by": { "const": "ZD" }, "recorded_at": { "$ref": "#/$defs/iso8601_tz" }
+      }
+    },
+    "exposure_plan": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "Committed AFTER BATCH finalization but BEFORE any output is revealed in the UI; identifies the exact review records exposed. PROMOTION references this artifact by exposure_plan_sha256 (the older predeclared_exposure_shas array was removed in v10). Introducing commit records the pre-UI time.",
+      "required": ["artifact_type", "schema_version", "run_hash", "exposed", "recorded_by", "recorded_at"],
+      "properties": {
+        "artifact_type": { "const": "exposure_plan" }, "schema_version": { "const": "v14" },
+        "run_hash": { "$ref": "#/$defs/sha256" },
+        "exposed": { "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "type": "object", "additionalProperties": false, "required": ["citation_id", "review_record_sha256"],
+            "properties": { "citation_id": { "$ref": "#/$defs/citation_id" }, "review_record_sha256": { "$ref": "#/$defs/sha256" } } } },
+        "recorded_by": { "const": "ZD" }, "recorded_at": { "$ref": "#/$defs/iso8601_tz" }
+      }
+    },
+    "runtime_observation": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "Reusable; run_state_manifest.observed_runtime_sha256 = SHA256(canon_v1(this)); BATCH embeds the same object.",
+      "required": ["python_implementation", "python_version", "platform", "dependency_lock_sha256", "distribution_inventory_sha256", "transport_library_version", "jcs_library_version", "argv", "cwd", "fresh_interpreter", "matches_config_runtime_profile"],
+      "properties": {
+        "python_implementation": { "type": "string", "minLength": 1 }, "python_version": { "type": "string", "minLength": 1 },
+        "platform": { "type": "string", "minLength": 1 }, "dependency_lock_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "distribution_inventory_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "transport_library_version": { "type": "string", "minLength": 1 },
+        "jcs_library_version": { "type": "string", "minLength": 1 }, "argv": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "cwd": { "type": "string", "minLength": 1 }, "fresh_interpreter": { "const": true }, "matches_config_runtime_profile": { "const": true }
+      }
+    },
+    "idempotency_preimage": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "The LITERAL object hashed for idempotency_key = SHA256(canon_v1(this)). claim_idx is null for the extraction stage.",
+      "required": ["domain", "config_hash", "run_id", "citation_id", "stage", "claim_idx", "request_bytes_sha256"],
+      "properties": {
+        "domain": { "const": "CRE_FINDER_IDEMPOTENCY_V1" },
+        "config_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "run_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "citation_id": { "$ref": "#/$defs/citation_id" },
+        "stage": { "enum": ["claim_extract", "coverage"] },
+        "claim_idx": { "type": ["integer", "null"], "minimum": 0 },
+        "request_bytes_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "sha256_or_null": { "oneOf": [ { "$ref": "#/$defs/sha256" }, { "type": "null" } ] },
+    "git_oid": { "type": "string", "pattern": "^(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$" },
+    "nonneg_decimal_string": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$" },
+    "iso8601_tz": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$", "$comment": "Semantic RFC 3339 (real date, valid offset) enforced by the semantic validator." },
+    "pmcid": { "type": "string", "pattern": "^PMC[0-9]+$" },
+    "citation_id": { "type": "string", "pattern": "^PMC[0-9]+:(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+$", "$comment": "Semantic validator: canonical UTF-8 percent decode/re-encode equality (rejects %ZZ, wrong hex case, doubly-encoded %); item_key == citing_pmcid + ':' + pctencode(ref_id)." },
+    "nonempty_string": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "pattern": "^[0-9a-f]{32}$", "$comment": "128-bit hex, generated once per run; unique (semantic)." },
+    "pos_int_param": {
+      "type": "object", "additionalProperties": false, "required": ["state"],
+      "properties": { "state": { "enum": ["supplied", "omitted", "provider_default", "unsupported"] }, "value": { "type": "integer", "minimum": 1 } },
+      "allOf": [ { "if": { "properties": { "state": { "const": "supplied" } } }, "then": { "required": ["value"] }, "else": { "not": { "required": ["value"] } } } ]
+    },
+    "strlist_param": {
+      "type": "object", "additionalProperties": false, "required": ["state"],
+      "properties": { "state": { "enum": ["supplied", "omitted", "provider_default", "unsupported"] }, "value": { "type": "array", "items": { "type": "string" } } },
+      "allOf": [ { "if": { "properties": { "state": { "const": "supplied" } } }, "then": { "required": ["value"] }, "else": { "not": { "required": ["value"] } } } ]
+    },
+    "endpoint": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "base_url", "host_allowlisted", "api_family", "api_version", "region", "sdk_version", "jcs_library_version", "behavior_headers"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/nonempty_string" },
+        "base_url": { "type": "string", "pattern": "^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[^\\s]*)?$" },
+        "host_allowlisted": { "const": true, "$comment": "Semantic validator confirms host ∈ project allowlist." },
+        "api_family": { "$ref": "#/$defs/nonempty_string" }, "api_version": { "$ref": "#/$defs/nonempty_string" },
+        "region": { "$ref": "#/$defs/nonempty_string" }, "sdk_version": { "$ref": "#/$defs/nonempty_string" },
+        "jcs_library_version": { "$ref": "#/$defs/nonempty_string" },
+        "behavior_headers": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "retry_policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["max_attempts", "retryable_status", "retryable_exceptions", "connect_timeout_seconds", "read_timeout_seconds", "total_timeout_seconds", "backoff_base_seconds", "backoff_cap_seconds", "jitter_seconds", "respect_retry_after", "retry_after_cap_seconds", "idempotency_preimage_version", "record_attempts"],
+      "$comment": "Semantic validator: total_timeout >= max(connect,read); backoff_cap >= backoff_base; retry_after_cap relevant only if respect_retry_after.",
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "retryable_status": { "type": "array", "items": { "type": "integer", "minimum": 400, "maximum": 599 }, "uniqueItems": true },
+        "retryable_exceptions": { "type": "array", "items": { "enum": ["connect_timeout", "read_timeout", "connection_reset", "dns_failure", "tls_error", "rate_limited", "server_5xx"] }, "uniqueItems": true },
+        "connect_timeout_seconds": { "$ref": "#/$defs/nonneg_decimal_string" },
+        "read_timeout_seconds": { "$ref": "#/$defs/nonneg_decimal_string" },
+        "total_timeout_seconds": { "$ref": "#/$defs/nonneg_decimal_string" },
+        "backoff_base_seconds": { "$ref": "#/$defs/nonneg_decimal_string" },
+        "backoff_cap_seconds": { "$ref": "#/$defs/nonneg_decimal_string" },
+        "jitter_seconds": { "$ref": "#/$defs/nonneg_decimal_string" },
+        "respect_retry_after": { "type": "boolean" },
+        "retry_after_cap_seconds": { "$ref": "#/$defs/nonneg_decimal_string" },
+        "idempotency_preimage_version": { "const": "CRE_FINDER_IDEMPOTENCY_V1" },
+        "record_attempts": { "const": true }
+      }
+    },
+    "system_message": {
+      "type": "object", "additionalProperties": false, "required": ["state"],
+      "properties": { "state": { "enum": ["omitted", "supplied"] }, "text_utf8": { "type": "string" }, "sha256": { "$ref": "#/$defs/sha256" } },
+      "allOf": [
+        { "if": { "properties": { "state": { "const": "supplied" } } }, "then": { "required": ["text_utf8", "sha256"] } },
+        { "if": { "properties": { "state": { "const": "omitted" } } }, "then": { "not": { "anyOf": [ { "required": ["text_utf8"] }, { "required": ["sha256"] } ] } } }
+      ]
+    },
+    "no_decimal_param": {
+      "type": "object", "additionalProperties": false, "required": ["state"],
+      "$comment": "Codex v8 #7: supplied decimal params would send a JSON float, breaking exact-request hashing under float-prohibition. Decimal params (temperature, top_p) MUST be omitted/provider_default/unsupported — never supplied. Matches the Opus adapter, which omits temperature.",
+      "properties": { "state": { "enum": ["omitted", "provider_default", "unsupported"] } }
+    },
+    "safe_int_param": {
+      "type": "object", "additionalProperties": false, "required": ["state"],
+      "$comment": "I-JSON safe integer range for seed etc.",
+      "properties": { "state": { "enum": ["supplied", "omitted", "provider_default", "unsupported"] }, "value": { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991 } },
+      "allOf": [ { "if": { "properties": { "state": { "const": "supplied" } } }, "then": { "required": ["value"] }, "else": { "not": { "required": ["value"] } } } ]
+    },
+    "stage_base_props": {
+      "properties": {
+        "model_snapshot": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$", "$comment": "Any pinned provider snapshot id. The old pattern .*-[0-9]{8}$ baked in one provider's dated-snapshot naming and would reject valid pinned ids without a date suffix (e.g. claude-opus-5). Pinning discipline is preserved semantically: the value must equal the ZD-supplied snapshot string in the CANDIDATE_PROTOCOL era CONFIG, and the provider-returned model id must equal it at run time (model_mismatch otherwise)." },
+        "response_parser_version": { "$ref": "#/$defs/nonempty_string" },
+        "tool_schema": { "type": ["string", "null"] },
+        "tool_schema_sha256": { "$ref": "#/$defs/sha256_or_null" },
+        "params": {
+          "type": "object", "additionalProperties": false,
+          "required": ["temperature", "max_tokens", "top_p", "top_k", "stop_sequences", "seed"],
+          "properties": {
+            "temperature": { "$ref": "#/$defs/no_decimal_param" }, "max_tokens": { "$ref": "#/$defs/pos_int_param" },
+            "top_p": { "$ref": "#/$defs/no_decimal_param" }, "top_k": { "$ref": "#/$defs/pos_int_param" },
+            "stop_sequences": { "$ref": "#/$defs/strlist_param" }, "seed": { "$ref": "#/$defs/safe_int_param" }
+          }
+        },
+        "system_message": { "$ref": "#/$defs/system_message" },
+        "endpoint": { "$ref": "#/$defs/endpoint" },
+        "retry": { "$ref": "#/$defs/retry_policy" }
+      }
+    },
+    "claim_extract_stage_config": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model_snapshot", "response_parser_version", "tool_schema", "tool_schema_sha256", "params", "system_message", "endpoint", "retry", "evidence_scope", "response_schema_sha256"],
+      "properties": {
+        "model_snapshot": { "$ref": "#/$defs/stage_base_props/properties/model_snapshot" },
+        "response_parser_version": { "$ref": "#/$defs/stage_base_props/properties/response_parser_version" },
+        "tool_schema": { "$ref": "#/$defs/stage_base_props/properties/tool_schema" },
+        "tool_schema_sha256": { "$ref": "#/$defs/stage_base_props/properties/tool_schema_sha256" },
+        "params": { "$ref": "#/$defs/stage_base_props/properties/params" },
+        "system_message": { "$ref": "#/$defs/stage_base_props/properties/system_message" },
+        "endpoint": { "$ref": "#/$defs/stage_base_props/properties/endpoint" },
+        "retry": { "$ref": "#/$defs/stage_base_props/properties/retry" },
+        "evidence_scope": { "const": "citing_sentence_only" },
+        "response_schema_sha256": { "$ref": "#/$defs/sha256_or_null", "$comment": "Residual #5 delta: content hash of the committed per-stage response-schema file. null until ZD supplies/approves the response schemas (input #1); while null, SV-024 validates shape presence only and says so in its violation message." }
+      },
+      "allOf": [ { "if": { "properties": { "tool_schema": { "type": "null" } } }, "then": { "properties": { "tool_schema_sha256": { "type": "null" } } }, "else": { "properties": { "tool_schema_sha256": { "$ref": "#/$defs/sha256" } } } } ]
+    },
+    "coverage_stage_config": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model_snapshot", "response_parser_version", "tool_schema", "tool_schema_sha256", "params", "system_message", "endpoint", "retry", "evidence_scope", "evidence_reader", "evidence_policy", "response_schema_sha256"],
+      "properties": {
+        "model_snapshot": { "$ref": "#/$defs/stage_base_props/properties/model_snapshot" },
+        "response_parser_version": { "$ref": "#/$defs/stage_base_props/properties/response_parser_version" },
+        "tool_schema": { "$ref": "#/$defs/stage_base_props/properties/tool_schema" },
+        "tool_schema_sha256": { "$ref": "#/$defs/stage_base_props/properties/tool_schema_sha256" },
+        "params": { "$ref": "#/$defs/stage_base_props/properties/params" },
+        "system_message": { "$ref": "#/$defs/stage_base_props/properties/system_message" },
+        "endpoint": { "$ref": "#/$defs/stage_base_props/properties/endpoint" },
+        "retry": { "$ref": "#/$defs/stage_base_props/properties/retry" },
+        "evidence_scope": { "const": "abstract_snapshot" },
+        "evidence_reader": { "const": "content_addressed_only" },
+        "evidence_policy": { "type": "object", "additionalProperties": false, "required": ["retrieval", "pmid_version_policy", "normalization", "missing_evidence_sentinel"], "properties": { "retrieval": { "type": "string" }, "pmid_version_policy": { "type": "string" }, "normalization": { "type": "string" }, "missing_evidence_sentinel": { "type": "string" } } },
+        "response_schema_sha256": { "$ref": "#/$defs/sha256_or_null", "$comment": "Residual #5 delta: content hash of the committed per-stage response-schema file. null until ZD supplies/approves the response schemas (input #1); while null, SV-024 validates shape presence only and says so in its violation message." }
+      },
+      "allOf": [ { "if": { "properties": { "tool_schema": { "type": "null" } } }, "then": { "properties": { "tool_schema_sha256": { "type": "null" } } }, "else": { "properties": { "tool_schema_sha256": { "$ref": "#/$defs/sha256" } } } } ]
+    },
+    "prompt_package": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "self_hash_exclusion: package_sha256. Slot sets are LOCKED (Codex-verified target placeholders); no 'provisional'.",
+      "required": ["artifact_type", "schema_version", "name", "template_text_version", "package_version", "template_utf8", "template_utf8_sha256", "source_blob_oid", "render_contract", "render_contract_sha256", "package_sha256"],
+      "properties": {
+        "artifact_type": { "const": "prompt_package" }, "schema_version": { "const": "v14" },
+        "name": { "enum": ["claim_extract", "coverage"] },
+        "template_text_version": { "type": "integer", "minimum": 1 }, "package_version": { "type": "integer", "minimum": 1 },
+        "template_utf8": { "type": "string" }, "template_utf8_sha256": { "$ref": "#/$defs/sha256" },
+        "source_blob_oid": { "$ref": "#/$defs/git_oid" },
+        "render_contract": { "type": "object", "additionalProperties": false, "required": ["message_construction", "slots", "collision_safe"],
+          "properties": { "message_construction": { "const": "structured" }, "collision_safe": { "const": true },
+            "slots": { "type": "array" } } },
+        "render_contract_sha256": { "$ref": "#/$defs/sha256" }, "package_sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "allOf": [
+        { "if": { "properties": { "name": { "const": "claim_extract" } } }, "then": { "properties": { "template_text_version": { "const": 3, "$comment": "Frozen historical text version (Codex final-pass Q1.3)." }, "render_contract": { "properties": { "slots": {
+            "minItems": 1, "maxItems": 1,
+            "prefixItems": [ { "type": "object", "additionalProperties": false, "required": ["name", "role", "encoding", "order"], "properties": { "name": { "const": "CITING_SENTENCE" }, "role": { "const": "user" }, "encoding": { "const": "utf-8" }, "order": { "const": 0 } } } ],
+            "items": false } } } } } },
+        { "if": { "properties": { "name": { "const": "coverage" } } }, "then": { "properties": { "template_text_version": { "const": 2, "$comment": "Frozen historical text version (Codex final-pass Q1.3)." }, "render_contract": { "properties": { "slots": {
+            "minItems": 2, "maxItems": 2,
+            "prefixItems": [
+              { "type": "object", "additionalProperties": false, "required": ["name", "role", "encoding", "order"], "properties": { "name": { "const": "ATOMIC_CLAIM" }, "role": { "const": "user" }, "encoding": { "const": "utf-8" }, "order": { "const": 0 } } },
+              { "type": "object", "additionalProperties": false, "required": ["name", "role", "encoding", "order"], "properties": { "name": { "const": "EVIDENCE" }, "role": { "const": "user" }, "encoding": { "const": "utf-8" }, "order": { "const": 1 } } }
+            ],
+            "items": false } } } } } }
+      ]
+    },
+    "config": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact_type", "schema_version", "canon", "scope", "candidate_protocol_sha256", "prompt_packages", "stages", "failure_policy", "source", "module_manifest_sha256", "runtime_profile", "codebook_sha256"],
+      "properties": {
+        "artifact_type": { "const": "config" }, "schema_version": { "const": "v14" }, "canon": { "const": "canon_v1" }, "scope": { "const": "finder_frontend_extract_coverage" },
+        "candidate_protocol_sha256": { "$ref": "#/$defs/sha256", "$comment": "Binds the pre-committed CANDIDATE_PROTOCOL (freeze criterion + prohibited set + schema/validator contract)." },
+        "prompt_packages": { "type": "object", "additionalProperties": false, "required": ["claim_extract", "coverage"],
+          "properties": { "claim_extract": { "type": "object", "additionalProperties": false, "required": ["package_version", "package_sha256"], "properties": { "package_version": { "type": "integer", "minimum": 1 }, "package_sha256": { "$ref": "#/$defs/sha256" } } },
+            "coverage": { "type": "object", "additionalProperties": false, "required": ["package_version", "package_sha256"], "properties": { "package_version": { "type": "integer", "minimum": 1 }, "package_sha256": { "$ref": "#/$defs/sha256" } } } } },
+        "stages": { "type": "object", "additionalProperties": false, "required": ["claim_extract", "coverage"], "properties": { "claim_extract": { "$ref": "#/$defs/claim_extract_stage_config" }, "coverage": { "$ref": "#/$defs/coverage_stage_config" } } },
+        "failure_policy": { "type": "object", "additionalProperties": false, "required": ["continue_after_coverage_terminal_failure"], "properties": { "continue_after_coverage_terminal_failure": { "const": true } } },
+        "source": { "type": "object", "additionalProperties": false, "required": ["repo_identity", "canonical_ref", "source_commit_oid", "source_tree_oid"],
+          "$comment": "Semantic validator compares repo_identity & canonical_ref to out-of-band TRUSTED constants; CONFIG cannot nominate its own trust root.",
+          "properties": { "repo_identity": { "$ref": "#/$defs/nonempty_string" }, "canonical_ref": { "type": "string", "pattern": "^refs/heads/[^\\s]+$" }, "source_commit_oid": { "$ref": "#/$defs/git_commit_oid", "$comment": "Residual #10 delta: must name a COMMIT object; the semantic validator (SV-041) proves source_tree_oid IS this commit's tree." }, "source_tree_oid": { "$ref": "#/$defs/git_oid" } } },
+        "module_manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "runtime_profile": { "type": "object", "additionalProperties": false, "required": ["python_implementation", "python_version", "platform_constraint", "dependency_lock_sha256", "distribution_inventory_sha256", "transport_library_version", "jcs_library_version"],
+          "properties": { "python_implementation": { "$ref": "#/$defs/nonempty_string" }, "python_version": { "$ref": "#/$defs/nonempty_string" }, "platform_constraint": { "$ref": "#/$defs/nonempty_string" }, "dependency_lock_sha256": { "$ref": "#/$defs/sha256" }, "distribution_inventory_sha256": { "$ref": "#/$defs/sha256" }, "transport_library_version": { "$ref": "#/$defs/nonempty_string" }, "jcs_library_version": { "$ref": "#/$defs/nonempty_string" }, "container_image_digest": { "type": "string" } } },
+        "codebook_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "module_manifest": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "Semantic validator: exhaustive role coverage; unique (role,repo_path); no duplicate path with differing hash. Pre-import byte-verify.",
+      "required": ["artifact_type", "schema_version", "modules"],
+      "properties": { "artifact_type": { "const": "module_manifest" }, "schema_version": { "const": "v14" },
+        "modules": { "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "type": "object", "additionalProperties": false, "required": ["role", "repo_path", "blob_oid", "content_sha256"],
+            "properties": { "role": { "enum": ["bootstrap", "validator", "canonicalizer", "renderer", "parser", "provider_adapter", "evidence_reader", "runner", "package_init", "strict_loader", "semantic_validator"] }, "repo_path": { "$ref": "#/$defs/nonempty_string" }, "blob_oid": { "$ref": "#/$defs/git_oid" }, "content_sha256": { "$ref": "#/$defs/sha256" } } } } }
+    },
+    "batch": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "FINAL-ONLY. run_hash = SHA256(canon_v1(this)); filename only. In-progress → run_state_manifest.",
+      "required": ["artifact_type", "schema_version", "run_id", "execution_mode", "sample_purpose", "config_hash", "promotion_payload_sha256_at_start", "exclusion_checkpoint_sha256_at_start", "canonical_ref_commit_observed", "selection_artifact_sha256", "candidate_manifest_sha256", "genesis_preimage", "genesis", "chain_tip", "chain_record_count", "chain_hash_version", "wal_tip_sha256", "review_dump_sha256", "status", "observed_runtime", "funnel", "diagnostics", "started", "completed"],
+      "properties": {
+        "artifact_type": { "const": "batch" }, "schema_version": { "const": "v14" },
+        "run_id": { "$ref": "#/$defs/run_id" },
+        "execution_mode": { "$ref": "#/$defs/execution_mode" },
+        "sample_purpose": { "enum": ["calibration", "formal"] },
+        "promotion_payload_sha256_at_start": { "$ref": "#/$defs/sha256_or_null" },
+        "exclusion_checkpoint_sha256_at_start": { "$ref": "#/$defs/sha256" },
+        "canonical_ref_commit_observed": { "$ref": "#/$defs/git_commit_oid" },
+        "config_hash": { "$ref": "#/$defs/sha256" },
+        "selection_artifact_sha256": { "$ref": "#/$defs/sha256" }, "candidate_manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "genesis_preimage": { "type": "object", "additionalProperties": false, "required": ["config_hash", "run_id", "selection_artifact_sha256", "candidate_manifest_sha256"],
+          "$comment": "The actual structured preimage; genesis = SHA256(canon_v1(genesis_preimage)).",
+          "properties": { "config_hash": { "$ref": "#/$defs/sha256" }, "run_id": { "$ref": "#/$defs/run_id" }, "selection_artifact_sha256": { "$ref": "#/$defs/sha256" }, "candidate_manifest_sha256": { "$ref": "#/$defs/sha256" } } },
+        "genesis": { "$ref": "#/$defs/sha256" }, "chain_tip": { "$ref": "#/$defs/sha256" }, "chain_record_count": { "type": "integer", "minimum": 0 },
+        "chain_hash_version": { "const": "canon_v1" }, "legacy_tip_anchor": { "$ref": "#/$defs/sha256" },
+        "wal_tip_sha256": { "$ref": "#/$defs/sha256_or_null" },
+        "review_dump_sha256": { "$ref": "#/$defs/sha256", "$comment": "Codex v8 #10: sidecar removed; the review-record chain (seq/prev/record_sha256) is the recovery structure; chain_tip recomputable from the dump." },
+        "status": { "const": "complete" },
+        "observed_runtime": { "$ref": "#/$defs/runtime_observation" },
+        "funnel": { "type": "object", "additionalProperties": false, "required": ["input_total", "excluded", "runner_accepted", "flagged", "clear", "held", "quarantined"],
+          "$comment": "input_total=excluded+runner_accepted; runner_accepted=flagged+clear+held+quarantined (semantic).",
+          "properties": { "input_total": { "type": "integer", "minimum": 0 }, "excluded": { "type": "integer", "minimum": 0 }, "runner_accepted": { "type": "integer", "minimum": 0 }, "flagged": { "type": "integer", "minimum": 0 }, "clear": { "type": "integer", "minimum": 0 }, "held": { "type": "integer", "minimum": 0 }, "quarantined": { "type": "integer", "minimum": 0 } } },
+        "diagnostics": { "type": "object", "additionalProperties": false, "required": ["refused_items", "truncated_items", "indeterminate_items", "refused_attempts", "truncated_attempts"],
+          "properties": { "refused_items": { "type": "integer", "minimum": 0 }, "truncated_items": { "type": "integer", "minimum": 0 }, "indeterminate_items": { "type": "integer", "minimum": 0 }, "refused_attempts": { "type": "integer", "minimum": 0 }, "truncated_attempts": { "type": "integer", "minimum": 0 } } },
+        "started": { "$ref": "#/$defs/iso8601_tz" }, "completed": { "$ref": "#/$defs/iso8601_tz" }
+      },
+      "allOf": [
+        { "$comment": "Codex v10 #8: mode matrix. candidate→calibration + no promotion-at-start; release→formal + promotion-at-start present; development→never here (only run_state).",
+          "if": { "properties": { "execution_mode": { "const": "candidate" } } },
+          "then": { "properties": { "sample_purpose": { "const": "calibration" }, "promotion_payload_sha256_at_start": { "type": "null" } } } },
+        { "if": { "properties": { "execution_mode": { "const": "release" } } },
+          "then": { "properties": { "sample_purpose": { "const": "formal" }, "promotion_payload_sha256_at_start": { "$ref": "#/$defs/sha256" } } } },
+        { "if": { "properties": { "execution_mode": { "const": "development" } } },
+          "then": false, "$comment": "A development run never produces a BATCH artifact (unattested, nonreportable)." }
+      ]
+    },
+    "run_state_manifest": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "Mutable during a run; binds every immutable input + durable checkpoint so resume cannot switch the dataset.",
+      "required": ["artifact_type", "schema_version", "run_id", "execution_mode", "sample_purpose", "config_hash", "promotion_payload_sha256_at_start", "exclusion_checkpoint_sha256_at_start", "canonical_ref_commit_observed", "selection_artifact_sha256", "candidate_manifest_sha256", "genesis", "status", "chain_tip", "chain_record_count", "wal_tip_sha256", "review_dump_partial_sha256", "output_dir", "observed_runtime", "observed_runtime_sha256"],
+      "properties": {
+        "artifact_type": { "const": "run_state_manifest" }, "schema_version": { "const": "v14" },
+        "run_id": { "$ref": "#/$defs/run_id" },
+        "execution_mode": { "$ref": "#/$defs/execution_mode" },
+        "sample_purpose": { "enum": ["calibration", "formal"] },
+        "promotion_payload_sha256_at_start": { "$ref": "#/$defs/sha256_or_null" },
+        "exclusion_checkpoint_sha256_at_start": { "$ref": "#/$defs/sha256" },
+        "canonical_ref_commit_observed": { "$ref": "#/$defs/git_commit_oid" },
+        "config_hash": { "$ref": "#/$defs/sha256" },
+        "selection_artifact_sha256": { "$ref": "#/$defs/sha256" }, "candidate_manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "genesis": { "$ref": "#/$defs/sha256" }, "status": { "enum": ["in_progress", "finalizing", "complete"] },
+        "chain_tip": { "$ref": "#/$defs/sha256" }, "chain_record_count": { "type": "integer", "minimum": 0 },
+        "wal_tip_sha256": { "$ref": "#/$defs/sha256_or_null" }, "review_dump_partial_sha256": { "$ref": "#/$defs/sha256" },
+        "output_dir": { "$ref": "#/$defs/nonempty_string" },
+        "observed_runtime": { "$ref": "#/$defs/runtime_observation", "$comment": "Codex v8 #8/#12: the actual object is embedded here AND its content hash recorded, so the stored hash references a defined artifact." },
+        "observed_runtime_sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "allOf": [
+        { "$comment": "Codex final-pass Q1.1: the execution-mode matrix applies to run-state too, not only BATCH. development run-state is permitted (a development run has in-progress state but never produces a BATCH).",
+          "if": { "properties": { "execution_mode": { "const": "candidate" } } },
+          "then": { "properties": { "sample_purpose": { "const": "calibration" }, "promotion_payload_sha256_at_start": { "type": "null" } } } },
+        { "if": { "properties": { "execution_mode": { "const": "release" } } },
+          "then": { "properties": { "sample_purpose": { "const": "formal" }, "promotion_payload_sha256_at_start": { "$ref": "#/$defs/sha256" } } } }
+      ]
+    },
+    "wal_event": {
+      "type": "object",
+      "$comment": "Immutable event-sourced record. Genuinely CLOSED oneOf per event_type (Codex v9 #1): each branch sets its own required/forbidden/const fields, additionalProperties:false. event_sha256 = SHA256(canon_v1(event∖event_sha256)). Retryability governed by sent_boundary_crossed. SV-023: the 'prepared' branch requires the literal idempotency_preimage.",
+      "required": ["artifact_type", "event_type"],
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["artifact_type", "schema_version", "logical_call_id", "attempt_id", "attempt_ordinal", "wal_seq", "prev_wal_event_sha256", "attempt_event_seq", "prev_attempt_event_sha256", "event_type", "recorded_at", "request_bytes_sha256", "idempotency_key", "idempotency_preimage", "sent_boundary_crossed", "event_sha256"],
+          "$comment": "PREPARED: pre-send; carries the idempotency preimage (SV-023); boundary false; no response fields.",
+          "properties": {
+            "artifact_type": { "const": "wal_event" }, "schema_version": { "const": "v14" }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "attempt_id": { "$ref": "#/$defs/nonempty_string" }, "attempt_ordinal": { "type": "integer", "minimum": 0 }, "wal_seq": { "type": "integer", "minimum": 0 }, "prev_wal_event_sha256": { "$ref": "#/$defs/sha256_or_null" }, "attempt_event_seq": { "type": "integer", "minimum": 0 }, "prev_attempt_event_sha256": { "$ref": "#/$defs/sha256_or_null" }, "event_type": { "const": "prepared" }, "recorded_at": { "$ref": "#/$defs/iso8601_tz" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "idempotency_preimage": { "$ref": "#/$defs/idempotency_preimage" }, "sent_boundary_crossed": { "const": false }, "event_sha256": { "$ref": "#/$defs/sha256" } } },
+        { "type": "object", "additionalProperties": false, "required": ["artifact_type", "schema_version", "logical_call_id", "attempt_id", "attempt_ordinal", "wal_seq", "prev_wal_event_sha256", "attempt_event_seq", "prev_attempt_event_sha256", "event_type", "recorded_at", "request_bytes_sha256", "idempotency_key", "sent_boundary_crossed", "event_sha256"],
+          "$comment": "SENT: request bytes may have left; boundary true; no response yet.",
+          "properties": {
+            "artifact_type": { "const": "wal_event" }, "schema_version": { "const": "v14" }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "attempt_id": { "$ref": "#/$defs/nonempty_string" }, "attempt_ordinal": { "type": "integer", "minimum": 0 }, "wal_seq": { "type": "integer", "minimum": 0 }, "prev_wal_event_sha256": { "$ref": "#/$defs/sha256_or_null" }, "attempt_event_seq": { "type": "integer", "minimum": 0 }, "prev_attempt_event_sha256": { "$ref": "#/$defs/sha256_or_null" }, "event_type": { "const": "sent" }, "recorded_at": { "$ref": "#/$defs/iso8601_tz" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "sent_boundary_crossed": { "const": true }, "event_sha256": { "$ref": "#/$defs/sha256" } } },
+        { "type": "object", "additionalProperties": false, "required": ["artifact_type", "schema_version", "logical_call_id", "attempt_id", "attempt_ordinal", "wal_seq", "prev_wal_event_sha256", "attempt_event_seq", "prev_attempt_event_sha256", "event_type", "recorded_at", "request_bytes_sha256", "idempotency_key", "sent_boundary_crossed", "transport_exception_class", "event_sha256"],
+          "$comment": "TRANSPORT_FAILED: known pre-send failure; boundary false; nonempty exception; safe to retry.",
+          "properties": {
+            "artifact_type": { "const": "wal_event" }, "schema_version": { "const": "v14" }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "attempt_id": { "$ref": "#/$defs/nonempty_string" }, "attempt_ordinal": { "type": "integer", "minimum": 0 }, "wal_seq": { "type": "integer", "minimum": 0 }, "prev_wal_event_sha256": { "$ref": "#/$defs/sha256_or_null" }, "attempt_event_seq": { "type": "integer", "minimum": 0 }, "prev_attempt_event_sha256": { "$ref": "#/$defs/sha256_or_null" }, "event_type": { "const": "transport_failed" }, "recorded_at": { "$ref": "#/$defs/iso8601_tz" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "sent_boundary_crossed": { "const": false }, "transport_exception_class": { "$ref": "#/$defs/nonempty_string" }, "event_sha256": { "$ref": "#/$defs/sha256" } } },
+        { "type": "object", "additionalProperties": false, "required": ["artifact_type", "schema_version", "logical_call_id", "attempt_id", "attempt_ordinal", "wal_seq", "prev_wal_event_sha256", "attempt_event_seq", "prev_attempt_event_sha256", "event_type", "recorded_at", "request_bytes_sha256", "idempotency_key", "sent_boundary_crossed", "http_status", "response_body_sha256", "response_body_ref", "response_headers_allowlisted", "provider_model_id", "response_id", "finish_reason", "event_sha256"],
+          "$comment": "RESPONSE_PERSISTED: boundary true; preserves transport facts. Provider model/response/finish are REQUIRED-NULLABLE (string|null) — a 4xx/5xx body has none, but the fields are always present so there are no byte-distinct equivalent states (Codex v10 WAL #2). The OK review_call requires the model audit separately.",
+          "properties": {
+            "artifact_type": { "const": "wal_event" }, "schema_version": { "const": "v14" }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "attempt_id": { "$ref": "#/$defs/nonempty_string" }, "attempt_ordinal": { "type": "integer", "minimum": 0 }, "wal_seq": { "type": "integer", "minimum": 0 }, "prev_wal_event_sha256": { "$ref": "#/$defs/sha256_or_null" }, "attempt_event_seq": { "type": "integer", "minimum": 0 }, "prev_attempt_event_sha256": { "$ref": "#/$defs/sha256_or_null" }, "event_type": { "const": "response_persisted" }, "recorded_at": { "$ref": "#/$defs/iso8601_tz" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "sent_boundary_crossed": { "const": true }, "http_status": { "type": "integer", "minimum": 100, "maximum": 599 }, "response_body_sha256": { "$ref": "#/$defs/sha256" }, "response_body_ref": { "$ref": "#/$defs/nonempty_string" }, "response_headers_allowlisted": { "type": "object", "additionalProperties": { "type": "string" } }, "provider_model_id": { "type": ["string", "null"] }, "response_id": { "type": ["string", "null"] }, "finish_reason": { "type": ["string", "null"] }, "event_sha256": { "$ref": "#/$defs/sha256" } } },
+        { "type": "object", "additionalProperties": false, "required": ["artifact_type", "schema_version", "logical_call_id", "attempt_id", "attempt_ordinal", "wal_seq", "prev_wal_event_sha256", "attempt_event_seq", "prev_attempt_event_sha256", "event_type", "recorded_at", "request_bytes_sha256", "idempotency_key", "sent_boundary_crossed", "transport_exception_class", "prev_attempt_terminal_sha256", "event_sha256"],
+          "$comment": "INDETERMINATE: ambiguous post-send; boundary true; must link the prior durable 'sent' event via prev_attempt_terminal_sha256; item quarantined.",
+          "properties": {
+            "artifact_type": { "const": "wal_event" }, "schema_version": { "const": "v14" }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "attempt_id": { "$ref": "#/$defs/nonempty_string" }, "attempt_ordinal": { "type": "integer", "minimum": 0 }, "wal_seq": { "type": "integer", "minimum": 0 }, "prev_wal_event_sha256": { "$ref": "#/$defs/sha256_or_null" }, "attempt_event_seq": { "type": "integer", "minimum": 0 }, "prev_attempt_event_sha256": { "$ref": "#/$defs/sha256_or_null" }, "event_type": { "const": "indeterminate" }, "recorded_at": { "$ref": "#/$defs/iso8601_tz" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "sent_boundary_crossed": { "const": true }, "transport_exception_class": { "$ref": "#/$defs/nonempty_string" }, "prev_attempt_terminal_sha256": { "$ref": "#/$defs/sha256" }, "event_sha256": { "$ref": "#/$defs/sha256" } } }
+      ]
+    },
+    "review_call": {
+      "type": "object",
+      "$comment": "Discriminated on (call_made,status). Wrapped by coverage_item / used directly for extract. retry_wal_event_shas are ordered unique WAL event hashes.",
+      "required": ["call_made", "status"],
+      "oneOf": [
+        { "additionalProperties": false, "required": ["call_made", "status", "reason", "retry_wal_event_shas"],
+          "properties": { "call_made": { "const": false }, "status": { "const": "not_run" }, "reason": { "enum": ["evidence_unavailable", "extraction_failed", "skipped_upstream"] }, "retry_wal_event_shas": { "type": "array", "maxItems": 0 } } },
+        { "additionalProperties": false, "required": ["call_made", "status", "logical_call_id", "request_bytes_sha256", "idempotency_key", "retry_wal_event_shas", "raw_response_body_ref", "raw_response_body_sha256", "response_headers_allowlisted", "http_status", "parsed", "provider_model_id", "response_id", "finish_reason"],
+          "properties": { "call_made": { "const": true }, "status": { "const": "ok" }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "retry_wal_event_shas": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } }, "raw_response_body_ref": { "$ref": "#/$defs/nonempty_string" }, "raw_response_body_sha256": { "$ref": "#/$defs/sha256" }, "response_headers_allowlisted": { "type": "object", "additionalProperties": { "type": "string" } }, "http_status": { "type": "integer", "minimum": 100, "maximum": 599 }, "parsed": {}, "provider_model_id": { "$ref": "#/$defs/nonempty_string" }, "response_id": { "$ref": "#/$defs/nonempty_string" }, "finish_reason": { "$ref": "#/$defs/nonempty_string" } } },
+        { "additionalProperties": false, "required": ["call_made", "status", "logical_call_id", "request_bytes_sha256", "idempotency_key", "retry_wal_event_shas", "provider_model_id"],
+          "$comment": "model_mismatch requires the returned model id.",
+          "properties": { "call_made": { "const": true }, "status": { "const": "model_mismatch" }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "retry_wal_event_shas": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } }, "provider_model_id": { "$ref": "#/$defs/nonempty_string" }, "http_status": { "type": "integer", "minimum": 100, "maximum": 599 }, "raw_response_body_ref": { "type": "string" }, "raw_response_body_sha256": { "$ref": "#/$defs/sha256" }, "response_headers_allowlisted": { "type": "object" }, "response_id": { "type": "string" } } },
+        { "additionalProperties": false, "required": ["call_made", "status", "logical_call_id", "request_bytes_sha256", "idempotency_key", "retry_wal_event_shas", "http_status", "raw_response_body_ref", "raw_response_body_sha256", "response_headers_allowlisted"],
+          "$comment": "provider_error / refusal / truncated / malformed: preserve HTTP status, body, headers.",
+          "properties": { "call_made": { "const": true }, "status": { "enum": ["malformed", "refusal", "truncated", "provider_error"] }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "retry_wal_event_shas": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } }, "http_status": { "type": "integer", "minimum": 100, "maximum": 599 }, "raw_response_body_ref": { "$ref": "#/$defs/nonempty_string" }, "raw_response_body_sha256": { "$ref": "#/$defs/sha256" }, "response_headers_allowlisted": { "type": "object", "additionalProperties": { "type": "string" } }, "provider_model_id": { "type": "string" }, "response_id": { "type": "string" }, "finish_reason": { "type": "string" } } },
+        { "additionalProperties": false, "required": ["call_made", "status", "logical_call_id", "request_bytes_sha256", "idempotency_key", "retry_wal_event_shas", "timeout_phase"],
+          "$comment": "timeout is TERMINAL only when PRE-SEND (connect). read is post-send and total may be either → both become indeterminate, never a terminal timeout (Codex v10 WAL #3).",
+          "properties": { "call_made": { "const": true }, "status": { "const": "timeout" }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "retry_wal_event_shas": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } }, "timeout_phase": { "const": "connect" } } },
+        { "additionalProperties": false, "required": ["call_made", "status", "logical_call_id", "request_bytes_sha256", "idempotency_key", "retry_wal_event_shas", "transport_exception_class", "terminal_wal_event_sha256"],
+          "$comment": "transport_error = exhausted pre-send failure (DNS/TLS/connect) with no HTTP response (Codex v8 #6).",
+          "properties": { "call_made": { "const": true }, "status": { "const": "transport_error" }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "retry_wal_event_shas": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } }, "transport_exception_class": { "$ref": "#/$defs/nonempty_string" }, "terminal_wal_event_sha256": { "$ref": "#/$defs/sha256" } } },
+        { "additionalProperties": false, "required": ["call_made", "status", "logical_call_id", "request_bytes_sha256", "idempotency_key", "retry_wal_event_shas", "empty_kind"],
+          "$comment": "empty distinguishes zero-byte body from valid empty provider result.",
+          "properties": { "call_made": { "const": true }, "status": { "const": "empty" }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "retry_wal_event_shas": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } }, "empty_kind": { "enum": ["zero_byte_body", "valid_empty_result"] }, "http_status": { "type": "integer", "minimum": 100, "maximum": 599 } } },
+        { "additionalProperties": false, "required": ["call_made", "status", "logical_call_id", "request_bytes_sha256", "idempotency_key", "retry_wal_event_shas", "indeterminate_wal_event_sha256"],
+          "$comment": "indeterminate identifies the WAL event proving the ambiguous send; item is quarantined.",
+          "properties": { "call_made": { "const": true }, "status": { "const": "indeterminate" }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "retry_wal_event_shas": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } }, "indeterminate_wal_event_sha256": { "$ref": "#/$defs/sha256" } } }
+      ]
+    },
+    "coverage_item": {
+      "type": "object", "additionalProperties": false, "required": ["claim_idx", "call"],
+      "properties": { "claim_idx": { "type": "integer", "minimum": 0 }, "call": { "$ref": "#/$defs/review_call" } }
+    },
+    "stimulus_object": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "The exact object rendered to the annotator; stimulus_sha256 = SHA256(canon_v1(this)). No forbidden fields (leakage audit).",
+      "required": ["artifact_type", "schema_version", "citing_sentence", "atomic_claims", "evidence", "label_space", "worksheet_schema", "display_instructions", "codebook_content", "codebook_sha256", "rendering_settings"],
+      "properties": {
+        "artifact_type": { "const": "stimulus_object" }, "schema_version": { "const": "v14" },
+        "citing_sentence": { "type": "string" },
+        "atomic_claims": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "required": ["idx", "text"], "properties": { "idx": { "type": "integer", "minimum": 0 }, "text": { "type": "string" } } },
+          "$comment": "Semantic validator: idx contiguous 0..n-1, unique." },
+        "evidence": { "type": "object", "additionalProperties": false, "required": ["evidence_snapshot_sha256", "text"], "properties": { "evidence_snapshot_sha256": { "$ref": "#/$defs/sha256" }, "text": { "type": "string" } } },
+        "label_space": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/nonempty_string" } },
+        "worksheet_schema": { "type": "object", "additionalProperties": false, "required": ["questions"],
+          "$comment": "Closed; recursively free of forbidden provenance fields (SV-070). SV: question ids unique (semantic).",
+          "properties": { "questions": { "type": "array", "minItems": 1,
+            "items": { "type": "object", "additionalProperties": false, "required": ["id", "prompt", "answer_type"],
+              "properties": { "id": { "$ref": "#/$defs/nonempty_string" }, "prompt": { "type": "string" }, "answer_type": { "enum": ["single_choice", "multi_choice", "free_text"] }, "choices": { "type": "array", "minItems": 2, "uniqueItems": true, "items": { "$ref": "#/$defs/nonempty_string" } } },
+              "allOf": [
+                { "if": { "properties": { "answer_type": { "enum": ["single_choice", "multi_choice"] } } }, "then": { "required": ["choices"] }, "else": { "not": { "required": ["choices"] } } }
+              ] } } } },
+        "display_instructions": { "type": "string" },
+        "codebook_content": { "type": "string", "$comment": "Embedded so the UI truly renders solely from this object (Codex v8 #8)." },
+        "codebook_sha256": { "$ref": "#/$defs/sha256", "$comment": "Must equal SHA256(codebook_content UTF-8) (semantic)." },
+        "rendering_settings": { "type": "object", "additionalProperties": false, "required": ["truncation", "redaction", "ordering"], "properties": { "truncation": { "type": "string" }, "redaction": { "type": "string" }, "ordering": { "type": "string" } } }
+      },
+      "not": { "anyOf": [ { "required": ["route"] }, { "required": ["proposed_category"] }, { "required": ["confidence"] }, { "required": ["coverage_verdict"] }, { "required": ["source_frame"] }, { "required": ["sampling_stratum"] }, { "required": ["raw_model_output"] }, { "required": ["internal_id"] } ] }
+    },
+    "review_record": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "One JSONL line per item; run-time FACTS only. coverage: one coverage_item per extracted claim, contiguous 0..n-1. Excluded → stimulus/evidence null.",
+      "required": ["artifact_type", "schema_version", "seq", "prev_record_sha256", "record_sha256", "item_key", "citing_pmcid", "ref_id", "claimed_pmid", "resolved_work_id", "citing_sentence", "config_hash", "run_id", "extract", "coverage", "evidence_snapshot_sha256", "evidence_snapshot_ref", "shape_flags", "stimulus_sha256", "finder_disposition", "sample_purpose", "run_facts", "cluster_id"],
+      "properties": {
+        "artifact_type": { "const": "review_record" }, "schema_version": { "const": "v14" },
+        "seq": { "type": "integer", "minimum": 0, "$comment": "Position in the review chain; chain_tip recomputable from records. genesis is seq -1's prev." },
+        "prev_record_sha256": { "$ref": "#/$defs/sha256_or_null" },
+        "record_sha256": { "$ref": "#/$defs/sha256", "$comment": "= SHA256(canon_v1(record∖record_sha256)); chained via prev_record_sha256; tip = last record_sha256." },
+        "item_key": { "$ref": "#/$defs/citation_id" }, "citing_pmcid": { "$ref": "#/$defs/pmcid" }, "ref_id": { "$ref": "#/$defs/nonempty_string" },
+        "claimed_pmid": { "type": ["string", "null"] }, "resolved_work_id": { "type": ["string", "null"] }, "citing_sentence": { "type": "string" },
+        "config_hash": { "$ref": "#/$defs/sha256" }, "run_id": { "$ref": "#/$defs/run_id" },
+        "extract": { "$ref": "#/$defs/review_call" },
+        "coverage": { "type": "array", "items": { "$ref": "#/$defs/coverage_item" } },
+        "evidence_snapshot_sha256": { "$ref": "#/$defs/sha256_or_null" }, "evidence_snapshot_ref": { "type": ["string", "null"] },
+        "shape_flags": { "type": "array", "uniqueItems": true, "items": { "enum": ["coverage_index_gap", "raw_verdict_claim_count_mismatch", "empty_extraction", "duplicate_claim"] } },
+        "stimulus_sha256": { "$ref": "#/$defs/sha256_or_null" },
+        "finder_disposition": { "enum": ["excluded", "held", "quarantined", "flagged", "clear"] },
+        "sample_purpose": { "enum": ["calibration", "formal"] },
+        "run_facts": { "type": "object", "additionalProperties": false, "required": ["finder_configuration_attested", "finder_freeze_promoted_at_run", "config_hash_used", "promotion_payload_sha256_at_run"],
+          "properties": { "finder_configuration_attested": { "type": "boolean" }, "finder_freeze_promoted_at_run": { "type": "boolean" }, "config_hash_used": { "$ref": "#/$defs/sha256" }, "promotion_payload_sha256_at_run": { "$ref": "#/$defs/sha256_or_null" } } },
+        "cluster_id": { "$ref": "#/$defs/nonempty_string" }
+      },
+      "allOf": [ { "if": { "properties": { "finder_disposition": { "const": "excluded" } } }, "then": { "properties": { "stimulus_sha256": { "type": "null" }, "evidence_snapshot_sha256": { "type": "null" }, "evidence_snapshot_ref": { "type": "null" } } } } ]
+    },
+    "selection_artifact": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "Committed BEFORE first output; sha256 in genesis preimage. Semantic: len>=min_size; coverage met; unique citation_id AND occurrence_identity; canonical sort by citation_id.",
+      "required": ["artifact_type", "schema_version", "sample_purpose", "selection_rule", "min_size", "coverage_targets", "items", "recorded_by"],
+      "properties": {
+        "artifact_type": { "const": "selection_artifact" }, "schema_version": { "const": "v14" },
+        "sample_purpose": { "enum": ["calibration", "formal"] }, "selection_rule": { "$ref": "#/$defs/nonempty_string" },
+        "min_size": { "type": "integer", "minimum": 1 }, "coverage_targets": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "items": { "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "type": "object", "additionalProperties": false,
+            "required": ["citation_id", "citing_pmcid", "ref_id", "occurrence_identity_version", "normalized_ref_key_type", "normalization_contract_sha256", "normalized_ref_key", "occurrence_identity", "source_xml_sha256", "ref_content_utf8", "extraction_contract_version", "source_occurrence_fingerprint", "corpus_source_id", "retrieval_record_sha256", "not_detector_sourced_attestation"],
+            "properties": {
+              "citation_id": { "$ref": "#/$defs/citation_id" }, "citing_pmcid": { "$ref": "#/$defs/pmcid" }, "ref_id": { "$ref": "#/$defs/nonempty_string" },
+              "occurrence_identity_version": { "const": "occ_id_v1", "$comment": "Codex v9 #4 (contradiction removed): occurrence_identity is computed from the CURRENT normalized key and is NOT claimed stable across a later resolution — a resolution change yields a NEW occurrence_identity. This is acceptable because contamination protection does NOT depend on it: exclusion is applied citing-paper-wide keyed on citing_pmcid, so the paper stays excluded regardless of key drift. Precedence resolved_pmid > resolved_doi > normalized_citation_string." },
+              "normalized_ref_key_type": { "enum": ["resolved_pmid", "resolved_doi", "normalized_citation_string"] },
+              "normalization_contract_sha256": { "$ref": "#/$defs/sha256", "$comment": "content hash of the pinned normalization algorithm (DOI lowercase + strip URL prefix; NFC; whitespace/punct collapse; author/title/year rule)." },
+              "normalized_ref_key": { "$ref": "#/$defs/nonempty_string", "$comment": "canonical value under the pinned contract." },
+              "occurrence_identity": { "$ref": "#/$defs/sha256", "$comment": "= SHA256(canon_v1({occurrence_identity_version, citing_pmcid, normalized_ref_key_type, normalized_ref_key})) — these four members EXACTLY, keyed by these field names; normalization_contract_sha256 is deliberately NOT in the preimage (it is stored alongside for recomputability; the contract is versioned via occurrence_identity_version). PROVENANCE/dedup aid only, NOT the contamination key and NOT claimed stable across resolution — exclusion is citing-paper-wide on citing_pmcid (closed decision). Matches SV-061 verbatim (Codex final-pass Q2.2)." },
+              "source_xml_sha256": { "$ref": "#/$defs/sha256" }, "ref_content_utf8": { "type": "string" }, "extraction_contract_version": { "$ref": "#/$defs/nonempty_string" },
+              "source_occurrence_fingerprint": { "$ref": "#/$defs/sha256", "$comment": "= SHA256(canon_v1({source_xml_sha256, ref_content_utf8, extraction_contract_version})); PROVENANCE only, snapshot-dependent." },
+              "corpus_source_id": { "$ref": "#/$defs/nonempty_string" }, "retrieval_record_sha256": { "$ref": "#/$defs/sha256" }, "not_detector_sourced_attestation": { "const": true },
+              "stratum": { "$ref": "#/$defs/nonempty_string", "$comment": "Residual #3 delta — PROPOSED, pending ZD approval with the selection-rule input (#2): names the coverage_targets key this item counts toward. SV-033 enforces value ∈ coverage_targets keys and per-target counts when items carry strata; ZD may instead demote coverage_targets to informational. Optional until ZD decides." }
+            } } },
+        "recorded_by": { "const": "ZD" }
+      }
+    },
+    "candidate_manifest": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "Semantic validator: items exactly equal the selection artifact's ordered item set (same citation_ids, same order).",
+      "required": ["artifact_type", "schema_version", "config_hash", "selection_artifact_sha256", "items"],
+      "properties": {
+        "artifact_type": { "const": "candidate_manifest" }, "schema_version": { "const": "v14" },
+        "config_hash": { "$ref": "#/$defs/sha256" }, "selection_artifact_sha256": { "$ref": "#/$defs/sha256" },
+        "items": { "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "type": "object", "additionalProperties": false, "required": ["citation_id", "resolved_work_id", "resolution_provenance_sha256", "evidence_snapshot_sha256", "source_xml_sha256"],
+            "properties": { "citation_id": { "$ref": "#/$defs/citation_id" }, "resolved_work_id": { "type": ["string", "null"] }, "resolution_provenance_sha256": { "$ref": "#/$defs/sha256" }, "evidence_snapshot_sha256": { "$ref": "#/$defs/sha256" }, "source_xml_sha256": { "$ref": "#/$defs/sha256" } } } }
+      }
+    },
+    "exclusion_ledger_entry": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "Append-only; seq contiguous from 0; prev chain; entry_sha256 = SHA256(canon_v1(entry∖entry_sha256)). Every human-inspected calibration item is excluded citing-paper-wide.",
+      "required": ["artifact_type", "schema_version", "seq", "prev_entry_sha256", "entry_sha256", "citation_id", "occurrence_identity", "citing_pmcid", "cluster_id", "scope", "reason", "recorded_at"],
+      "properties": {
+        "artifact_type": { "const": "exclusion_ledger_entry" }, "schema_version": { "const": "v14" },
+        "seq": { "type": "integer", "minimum": 0 }, "prev_entry_sha256": { "$ref": "#/$defs/sha256_or_null" }, "entry_sha256": { "$ref": "#/$defs/sha256" },
+        "citation_id": { "$ref": "#/$defs/citation_id" }, "occurrence_identity": { "$ref": "#/$defs/sha256" }, "citing_pmcid": { "$ref": "#/$defs/pmcid" },
+        "cluster_id": { "$ref": "#/$defs/nonempty_string" }, "scope": { "enum": ["citing_paper", "occurrence", "duplicate_cluster"] }, "reason": { "enum": ["calibration", "confirmed_f3_positive", "freeze_batch", "human_inspected"] }, "recorded_at": { "$ref": "#/$defs/iso8601_tz" }
+      }
+    },
+    "exclusion_checkpoint": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "empty ledger: entry_count=0, tip_entry_sha256=null.",
+      "required": ["artifact_type", "schema_version", "tip_entry_sha256", "entry_count", "canonical_ref_commit"],
+      "properties": { "artifact_type": { "const": "exclusion_checkpoint" }, "schema_version": { "const": "v14" }, "tip_entry_sha256": { "$ref": "#/$defs/sha256_or_null" }, "entry_count": { "type": "integer", "minimum": 0 }, "canonical_ref_commit": { "$ref": "#/$defs/git_commit_oid" } },
+      "allOf": [
+        { "if": { "properties": { "entry_count": { "const": 0 } } }, "then": { "properties": { "tip_entry_sha256": { "type": "null" } } }, "else": { "properties": { "tip_entry_sha256": { "$ref": "#/$defs/sha256" } } } }
+      ]
+    },
+    "promotion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact_type", "schema_version", "payload", "payload_sha256"],
+      "$comment": "Codex v10 #2: PROMOTION REFERENCES the pre-committed artifacts by hash (no duplication, no opaque array). Semantic validator walks these: candidate_protocol_sha256 == CONFIG's; exposure_plan.run_hash == run_hash and every exposure row ∈ the run's review chain; post_exposure_exclusion_checkpoint_sha256 (N+1) strictly newer than the candidate BATCH's N and citing-paper-wide covers every exposure row; the exposure_plan commit precedes UI access; freeze criterion is the protocol's (not restated); target BATCH is candidate/calibration under the same CONFIG.",
+      "properties": {
+        "artifact_type": { "const": "promotion" }, "schema_version": { "const": "v14" },
+        "payload": { "type": "object", "additionalProperties": false, "required": ["config_hash", "run_hash", "candidate_protocol_sha256", "exposure_plan_sha256", "post_exposure_exclusion_checkpoint_sha256", "recorded_by", "recorded_at"],
+          "properties": { "config_hash": { "$ref": "#/$defs/sha256" }, "run_hash": { "$ref": "#/$defs/sha256" }, "candidate_protocol_sha256": { "$ref": "#/$defs/sha256" }, "exposure_plan_sha256": { "$ref": "#/$defs/sha256" }, "post_exposure_exclusion_checkpoint_sha256": { "$ref": "#/$defs/sha256" }, "recorded_by": { "const": "ZD" }, "recorded_at": { "$ref": "#/$defs/iso8601_tz" } } },
+        "payload_sha256": { "$ref": "#/$defs/sha256" }, "signed_tag_oid": { "$ref": "#/$defs/git_oid" }
+      }
+    },
+    "revocation": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "Blocks future releases as of the introducing commit (ancestry order). No retroactive invalidation.",
+      "required": ["artifact_type", "schema_version", "payload", "payload_sha256"],
+      "properties": {
+        "artifact_type": { "const": "revocation" }, "schema_version": { "const": "v14" },
+        "payload": { "type": "object", "additionalProperties": false, "required": ["target_config_hash", "target_promotion_payload_sha256", "reason", "recorded_by", "recorded_at"],
+          "properties": { "target_config_hash": { "$ref": "#/$defs/sha256" }, "target_promotion_payload_sha256": { "$ref": "#/$defs/sha256" }, "reason": { "$ref": "#/$defs/nonempty_string" }, "recorded_by": { "const": "ZD" }, "recorded_at": { "$ref": "#/$defs/iso8601_tz" } } },
+        "payload_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "annotation_release_manifest": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "The annotation DENOMINATOR: flagged + validator-eligible rows ONLY (not a full-run inventory); eligibility DERIVED not stored; sorted by citation_id, unique by citation_id AND occurrence_identity. Bound to its PRODUCING FORMAL run (source_run_hash + source_review_dump_sha256 + source_selection_hash); each row cites review_record_sha256 + seq and the validator proves the row ∈ that exact release-mode/formal BATCH review chain. Empty inventory permitted → precision reported as undefined.",
+      "required": ["artifact_type", "schema_version", "config_hash", "promotion_payload_sha256", "source_run_hash", "source_review_dump_sha256", "source_selection_hash", "exclusion_checkpoint_sha256", "codebook_sha256", "inventory"],
+      "properties": {
+        "artifact_type": { "const": "annotation_release_manifest" }, "schema_version": { "const": "v14" },
+        "config_hash": { "$ref": "#/$defs/sha256" }, "promotion_payload_sha256": { "$ref": "#/$defs/sha256" },
+        "source_run_hash": { "$ref": "#/$defs/sha256" }, "source_review_dump_sha256": { "$ref": "#/$defs/sha256" }, "source_selection_hash": { "$ref": "#/$defs/sha256" },
+        "exclusion_checkpoint_sha256": { "$ref": "#/$defs/sha256" }, "codebook_sha256": { "$ref": "#/$defs/sha256" },
+        "inventory": { "type": "array", "uniqueItems": true,
+          "items": { "type": "object", "additionalProperties": false,
+            "required": ["citation_id", "occurrence_identity", "source_xml_sha256", "resolved_work_id", "resolution_provenance_sha256", "stimulus_sha256", "evidence_snapshot_sha256", "finder_disposition", "review_record_sha256", "review_record_seq"],
+            "properties": { "citation_id": { "$ref": "#/$defs/citation_id" }, "occurrence_identity": { "$ref": "#/$defs/sha256" }, "source_xml_sha256": { "$ref": "#/$defs/sha256" }, "resolved_work_id": { "type": ["string", "null"] }, "resolution_provenance_sha256": { "$ref": "#/$defs/sha256" }, "stimulus_sha256": { "$ref": "#/$defs/sha256" }, "evidence_snapshot_sha256": { "$ref": "#/$defs/sha256" }, "finder_disposition": { "const": "flagged" }, "review_record_sha256": { "$ref": "#/$defs/sha256" }, "review_record_seq": { "type": "integer", "minimum": 0 } } } }
+      }
+    },
+    "release_attestation": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "Two-phase: (1) commit all referenced inputs; (2) build attestation referencing that parent commit; (3) commit attestation; (4) semantic validator requires the introducing commit's IMMEDIATE PARENT to equal canonical_ref_commit (not merely a descendant — SV-041; no revocation or ledger change can slip in between), and reachable from the canonical ref. valid_at_release is const true (a failed validation is not an attestation).",
+      "required": ["artifact_type", "schema_version", "annotation_release_manifest_sha256", "canonical_ref_commit", "config_hash", "promotion_payload_sha256", "exclusion_checkpoint_sha256", "prereg_amendment_sha256", "valid_at_release", "recorded_by", "recorded_at", "attestation_sha256"],
+      "properties": {
+        "artifact_type": { "const": "release_attestation" }, "schema_version": { "const": "v14" },
+        "annotation_release_manifest_sha256": { "$ref": "#/$defs/sha256" }, "canonical_ref_commit": { "$ref": "#/$defs/git_commit_oid" },
+        "config_hash": { "$ref": "#/$defs/sha256" }, "promotion_payload_sha256": { "$ref": "#/$defs/sha256" }, "exclusion_checkpoint_sha256": { "$ref": "#/$defs/sha256" },
+        "prereg_amendment_sha256": { "$ref": "#/$defs/sha256", "$comment": "F3-DI2 preregistration amendment; publication dependency (see spec Out of scope)." },
+        "valid_at_release": { "const": true }, "recorded_by": { "const": "ZD" }, "recorded_at": { "$ref": "#/$defs/iso8601_tz" }, "attestation_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}
