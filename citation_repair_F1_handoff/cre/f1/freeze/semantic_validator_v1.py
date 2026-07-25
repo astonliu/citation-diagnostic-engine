@@ -49,7 +49,7 @@ from decimal import Decimal
 from datetime import date
 from urllib.parse import urlsplit
 
-from cre.f1.freeze import bootstrap
+from cre.f1.freeze import bootstrap, schema_gate
 from cre.f1.freeze.canon_v1 import CanonV1Error, canon_sha256
 from cre.f1.freeze.strict_loader import StrictLoadError, load_strict
 
@@ -163,7 +163,9 @@ class TrustedConstants:
     cas_root: str = bootstrap.CAS_ROOT
     cas_ref_grammar: str = bootstrap.CAS_REF_GRAMMAR
     known_prohibited_citing_pmcids: tuple = bootstrap.KNOWN_PROHIBITED_CITING_PMCIDS
-    schema_sha256: str = ""  # sha256 of the schema file actually used (SV-043)
+    # sha256 of the schema file actually used (SV-043) — defaults to the
+    # committed pin so the clause binds under the default trust context.
+    schema_sha256: str = schema_gate.PINNED_SCHEMA_SHA256
 
 
 class GitContext:
@@ -291,8 +293,9 @@ def _rfc3339_ok(s):
         date(y, mo, d)
     except ValueError:
         return False
-    if h > 23 or mi > 59 or sec > 59:
-        # Leap second 60 is deliberately rejected under this validator.
+    if h > 23 or mi > 59 or sec > 60:
+        # sec == 60 accepted: RFC 3339 permits the leap second (whether the
+        # instant existed needs an IERS table — out of scope here).
         return False
     off = m.group(8)
     if off != "Z":
@@ -341,6 +344,10 @@ def derive_disposition(record, excluded_pmcids):
         return "excluded", True
     extract = record.get("extract") or {}
     coverage = record.get("coverage") or []
+    if extract.get("status") == "indeterminate":
+        # Crash policy (§6): an ambiguous send quarantines the item — this
+        # outranks the extraction-failure -> held tier.
+        return "quarantined", True
     if extract.get("status") != "ok":
         return "held", True
     claims = _extract_claims(record)
@@ -365,6 +372,9 @@ def derive_disposition(record, excluded_pmcids):
 def derive_reportability(artifacts, trusted):
     """§10 derivation function, computed live — never persisted (SV-050)."""
     config_hash = artifacts.get("config_hash")
+    config = artifacts.get("config") or {}
+    batch = artifacts.get("batch") or {}
+    rsm = artifacts.get("run_state_manifest") or {}
     promotion = artifacts.get("promotion")
     revocations = artifacts.get("revocations") or []
     record = (artifacts.get("review_records") or [None])[0]
@@ -373,13 +383,25 @@ def derive_reportability(artifacts, trusted):
                        promotion.get("payload", {}).get("config_hash") == config_hash))
     eligible = bool(record and record.get("sample_purpose") == "formal"
                     and record.get("finder_disposition") == "flagged")
+    # development ⇒ never eligible/promotable/reportable (SV-045 matrix);
+    # a reportable finder result comes from a release run.
+    mode = batch.get("execution_mode") or rsm.get("execution_mode")
+    if mode is not None and mode != "release":
+        eligible = False
     unrevoked = True
     if promotion:
-        payload_sha = canon_sha256(promotion.get("payload", {}))
-        unrevoked = not any(
-            r.get("payload", {}).get("target_promotion_payload_sha256") == payload_sha
-            for r in revocations)
-    in_scope = True
+        try:
+            payload_sha = canon_sha256(promotion.get("payload", {}))
+        except CanonV1Error:
+            payload_sha = None
+            unrevoked = False  # unhashable promotion payload: fail closed
+        if payload_sha is not None:
+            unrevoked = not any(
+                r.get("payload", {}).get("target_promotion_payload_sha256")
+                == payload_sha for r in revocations)
+    # in-scope = the finder-frontend scope this freeze certifies (Decision 3).
+    in_scope = (config.get("scope") == "finder_frontend_extract_coverage"
+                if config else True)
     finder = promoted and eligible and unrevoked and in_scope
     claims = artifacts.get("reportability_claims") or {}
     discriminator = bool(claims.get("discriminator_result_reportable", False))
@@ -755,19 +777,28 @@ def check_sv022(artifacts, out):
     for lcid, attempts in by_call.items():
         ordinals = sorted(attempts)
         for k in ordinals:
-            terminal = attempts[k][-1]
+            evs = attempts[k]
+            terminal = evs[-1]
             has_next = (k + 1) in attempts
             etype = terminal.get("event_type")
-            if has_next and etype not in ("transport_failed", "response_persisted"):
-                # Retry only when NOT sent_boundary_crossed without a persisted
-                # response: a dangling 'sent' or an 'indeterminate' is never
-                # silently retried (crash policy, Codex v6 #6).
+            # Retry only when NOT sent_boundary_crossed: permitted after any
+            # attempt that never crossed the boundary (dangling 'prepared' /
+            # 'transport_failed' — safe pre-send states), or after a
+            # PERSISTED response (a definite outcome; retryable_status is
+            # what makes post-response retries meaningful). An attempt whose
+            # boundary was crossed without a persisted response ('sent'
+            # dangling, 'indeterminate') is never silently retried (crash
+            # policy, Codex v6 #6).
+            boundary_crossed = any(e.get("sent_boundary_crossed") is True
+                                   for e in evs)
+            if has_next and boundary_crossed and \
+                    etype != "response_persisted":
                 _v(out, "SV-022", f"wal_events(logical_call={lcid!r}, attempt={k})",
-                   f"retry (attempt {k + 1}) after terminal event "
-                   f"{etype!r} with sent_boundary_crossed="
-                   f"{terminal.get('sent_boundary_crossed')} — retry is only "
-                   f"permitted after a pre-send failure or a persisted response")
-            if not has_next and etype in ("sent", "indeterminate"):
+                   f"retry (attempt {k + 1}) after attempt {k} crossed the "
+                   f"send boundary without a persisted response (terminal "
+                   f"event {etype!r})")
+            if not has_next and boundary_crossed and \
+                    etype in ("sent", "indeterminate", "transport_failed"):
                 entry = calls.get(lcid)
                 if entry and entry[1].get("status") != "indeterminate":
                     _v(out, "SV-022", entry[0],
@@ -778,7 +809,16 @@ def check_sv022(artifacts, out):
 
 
 def check_sv023(artifacts, out):
-    for i, ev in enumerate(artifacts.get("wal_events") or []):
+    events = artifacts.get("wal_events") or []
+    attempts = {}
+    for ev in events:
+        attempts.setdefault(ev.get("attempt_id"), []).append(ev)
+    for attempt_id, evs in attempts.items():
+        if not any(e.get("event_type") == "prepared" for e in evs):
+            _v(out, "SV-023", f"wal_events(attempt={attempt_id!r})",
+               "attempt carries no 'prepared' event — the idempotency "
+               "preimage was never persisted, so the key is unrecomputable")
+    for i, ev in enumerate(events):
         if ev.get("event_type") != "prepared":
             continue
         pre = ev.get("idempotency_preimage")
@@ -865,6 +905,15 @@ def check_sv025(artifacts, out):
         path = f"stimulus_objects[{cid!r}]"
         ev = stim.get("evidence") or {}
         sha = ev.get("evidence_snapshot_sha256")
+        rec0 = records.get(cid)
+        if rec0 is not None and rec0.get("evidence_snapshot_sha256") is not None \
+                and sha != rec0.get("evidence_snapshot_sha256"):
+            # Never trust the stimulus's self-declared snapshot: it must be
+            # the record's pinned snapshot, not merely *a* valid snapshot.
+            _v(out, "SV-025", f"{path}.evidence.evidence_snapshot_sha256",
+               f"stimulus evidence snapshot {sha} != the review record's "
+               f"pinned evidence_snapshot_sha256 "
+               f"{rec0.get('evidence_snapshot_sha256')}")
         if snapshots is not None:
             blob = snapshots.get(sha)
             if blob is None:
@@ -962,6 +1011,24 @@ def check_sv026(artifacts, out):
                 _v(out, "SV-026", path,
                    "transport_error review_call must name its terminal "
                    "transport_failed WAL event")
+        elif status == "model_mismatch":
+            # A mismatch is diagnosed FROM a persisted response.
+            if terminal.get("event_type") != "response_persisted":
+                _v(out, "SV-026", path,
+                   f"model_mismatch review_call's terminal WAL event is "
+                   f"{terminal.get('event_type')!r}, not response_persisted")
+            elif call.get("provider_model_id") != terminal.get("provider_model_id"):
+                _v(out, "SV-026", f"{path}.provider_model_id",
+                   "model_mismatch provider_model_id != terminal WAL event's")
+        elif status == "timeout":
+            # Terminal timeout is pre-send connect ONLY (v17); its WAL
+            # evidence is a pre-send failure, never a crossed boundary.
+            if terminal.get("event_type") != "transport_failed" or \
+                    terminal.get("sent_boundary_crossed") is not False:
+                _v(out, "SV-026", path,
+                   f"terminal 'timeout' (connect-only) must end in a pre-send "
+                   f"transport_failed WAL event; got "
+                   f"{terminal.get('event_type')!r}")
         prepared = [e for e in evs if e.get("event_type") == "prepared"]
         for ev in prepared:
             pre = ev.get("idempotency_preimage") or {}
@@ -1005,16 +1072,36 @@ def check_sv030(artifacts, out):
         if manifest.get("source_selection_hash") != batch.get("selection_artifact_sha256"):
             _v(out, "SV-030", "annotation_release_manifest.source_selection_hash",
                "source_selection_hash != BATCH selection_artifact_sha256")
+    sel_items = {i.get("citation_id"): i for i in
+                 (artifacts.get("selection_artifact") or {}).get("items") or []}
     for i, row in enumerate(manifest.get("inventory") or []):
         rec = by_sha.get(row.get("review_record_sha256"))
+        path = f"annotation_release_manifest.inventory[{i}]"
         if rec is None:
-            _v(out, "SV-030", f"annotation_release_manifest.inventory[{i}]",
+            _v(out, "SV-030", path,
                f"row review_record_sha256 {row.get('review_record_sha256')} "
                f"not in the source BATCH review chain")
-        elif rec.get("seq") != row.get("review_record_seq"):
-            _v(out, "SV-030", f"annotation_release_manifest.inventory[{i}]",
+            continue
+        if rec.get("seq") != row.get("review_record_seq"):
+            _v(out, "SV-030", path,
                f"row review_record_seq {row.get('review_record_seq')} != "
                f"chain record seq {rec.get('seq')}")
+        # A row is not merely a pointer: its content must be the record's
+        # (fabricated row fields must not survive a valid pointer).
+        for row_f, rec_f in (("citation_id", "item_key"),
+                             ("resolved_work_id", "resolved_work_id"),
+                             ("stimulus_sha256", "stimulus_sha256"),
+                             ("evidence_snapshot_sha256",
+                              "evidence_snapshot_sha256")):
+            if row.get(row_f) != rec.get(rec_f):
+                _v(out, "SV-030", f"{path}.{row_f}",
+                   f"row {row_f} {row.get(row_f)!r} != chain record's "
+                   f"{rec_f} {rec.get(rec_f)!r}")
+        sel_item = sel_items.get(row.get("citation_id"))
+        if sel_item is not None and row.get("occurrence_identity") != \
+                sel_item.get("occurrence_identity"):
+            _v(out, "SV-030", f"{path}.occurrence_identity",
+               "row occurrence_identity != the selection item's")
 
 
 def check_sv031(artifacts, out):
@@ -1118,14 +1205,15 @@ def _resolve_selection(artifacts, out, rule_id, expected_sha_fields):
             return None
     sel = artifacts.get("selection_artifact")
     if sel is not None:
-        try:
-            actual = canon_sha256(sel)
-        except CanonV1Error:
-            return sel
-        for path, expected in expected_sha_fields:
-            if expected is not None and expected != actual:
-                _v(out, rule_id, path,
-                   f"{path} {expected} != selection canonical hash {actual}")
+        # Fail CLOSED: an uncanonicalizable selection cannot prove the
+        # binding, so the mismatch is reported rather than skipped.
+        actual = _safe_canon_sha256(sel, out, rule_id, "selection_artifact")
+        if actual is not None:
+            for path, expected in expected_sha_fields:
+                if expected is not None and expected != actual:
+                    _v(out, rule_id, path,
+                       f"{path} {expected} != selection canonical hash "
+                       f"{actual}")
     return sel
 
 
@@ -1284,11 +1372,15 @@ def check_sv041(artifacts, repo_ctx, out):
                 _v(out, "SV-041", f"{key}.canonical_ref_commit",
                    f"introducing commit's immediate parent {parent} != "
                    f"validated-state commit {expected}")
-    rev_commits = [repo_ctx.artifact_commits[k]
-                   for k in sorted(repo_ctx.artifact_commits)
-                   if k.startswith("revocations[")]
+    rev_keys = sorted((k for k in repo_ctx.artifact_commits
+                       if k.startswith("revocations[")),
+                      key=lambda k: int(k[len("revocations["):-1]))
+    rev_commits = [repo_ctx.artifact_commits[k] for k in rev_keys]
     for a, b in zip(rev_commits, rev_commits[1:]):
-        if not (repo_ctx.is_ancestor(a, b) or repo_ctx.is_ancestor(b, a)):
+        # Revocation ORDER is commit ancestry, never timestamps: each
+        # revocation's introducing commit must be a strict ancestor of the
+        # next one's (incomparable commits have no defined order).
+        if a == b or not repo_ctx.is_ancestor(a, b):
             _v(out, "SV-041", "revocations",
                f"revocation commits {a} and {b} are not ancestry-ordered")
     config = artifacts.get("config")
@@ -1416,7 +1508,7 @@ def check_sv044(artifacts, repo_ctx, out):
             _v(out, "SV-044", "exposure_plan.run_hash",
                f"exposure_plan.run_hash {plan.get('run_hash')} != promotion "
                f"payload run_hash {payload.get('run_hash')}")
-        seen = set()
+        seen_cid, seen_sha = set(), set()
         records = {(r.get("item_key"), r.get("record_sha256"))
                    for r in artifacts.get("review_records") or []}
         for i, row in enumerate(plan.get("exposed") or []):
@@ -1425,11 +1517,14 @@ def check_sv044(artifacts, repo_ctx, out):
                     and key not in records:
                 _v(out, "SV-044", f"exposure_plan.exposed[{i}]",
                    f"exposure row {key} not in the run's review chain")
-            if key in seen:
+            # Unique by citation_id AND review_record_sha256 = each key
+            # individually unique (as SV-031/SV-033 read the same phrase).
+            if key[0] in seen_cid or key[1] in seen_sha:
                 _v(out, "SV-044", f"exposure_plan.exposed[{i}]",
                    f"exposure rows not unique by citation_id AND "
                    f"review_record_sha256: {key}")
-            seen.add(key)
+            seen_cid.add(key[0])
+            seen_sha.add(key[1])
     if batch and batch.get("execution_mode") == "candidate":
         if payload.get("run_hash") != run_hash:
             _v(out, "SV-044", "promotion.payload.run_hash",
@@ -1549,6 +1644,20 @@ def check_sv060(artifacts, out):
     for i, item in enumerate((cm or {}).get("items") or []):
         _check_citation_id(item.get("citation_id", ""),
                            f"candidate_manifest.items[{i}].citation_id", out)
+    manifest = artifacts.get("annotation_release_manifest")
+    for i, row in enumerate((manifest or {}).get("inventory") or []):
+        _check_citation_id(row.get("citation_id", ""),
+                           f"annotation_release_manifest.inventory[{i}]."
+                           f"citation_id", out)
+    plan = artifacts.get("exposure_plan")
+    for i, row in enumerate((plan or {}).get("exposed") or []):
+        _check_citation_id(row.get("citation_id", ""),
+                           f"exposure_plan.exposed[{i}].citation_id", out)
+    for i, entry in enumerate(artifacts.get("exclusion_ledger") or []):
+        _check_citation_id(entry.get("citation_id", ""),
+                           f"exclusion_ledger[{i}].citation_id", out)
+    for cid in artifacts.get("stimulus_objects") or {}:
+        _check_citation_id(cid, f"stimulus_objects[{cid!r}]", out)
 
 
 def check_sv061(artifacts, out):
@@ -1833,43 +1942,57 @@ def check_sv110(artifacts, out):
 # ---------------------------------------------------------------------------
 
 def validate(artifacts, repo_ctx=None, trusted=None):
-    """Run every §12 rule over the supplied artifact universe."""
+    """Run every §12 rule over the supplied artifact universe.
+
+    Always returns list[Violation]: a canonicalization/strict-load failure
+    inside a rule is that rule's violation (an artifact that cannot be
+    canonicalized violates the canon_v1 contract), never an exception.
+    """
     if trusted is None:
         trusted = TrustedConstants()
     out = []
-    check_sv001(artifacts, out)
-    check_sv002(artifacts, out)
-    check_sv003(artifacts, out)
-    check_sv005(artifacts, out)
-    check_sv010(artifacts, out)
-    check_sv011(artifacts, out)
-    check_sv020(artifacts, out)
-    check_sv021(artifacts, out)
-    check_sv022(artifacts, out)
-    check_sv023(artifacts, out)
-    check_sv024(artifacts, out)
-    check_sv025(artifacts, out)
-    check_sv026(artifacts, out)
-    check_sv030(artifacts, out)
-    check_sv031(artifacts, out)
-    check_sv032(artifacts, out)
-    check_sv033(artifacts, out)
-    check_sv034(artifacts, out)
-    check_sv040(artifacts, out)
-    check_sv041(artifacts, repo_ctx, out)
-    check_sv042(artifacts, repo_ctx, trusted, out)
-    check_sv043(artifacts, repo_ctx, trusted, out)
-    check_sv044(artifacts, repo_ctx, out)
-    check_sv045(artifacts, out)
-    check_sv050(artifacts, trusted, out)
-    check_sv060(artifacts, out)
-    check_sv061(artifacts, out)
-    check_sv070(artifacts, out)
-    check_sv071(artifacts, out)
-    check_sv072(artifacts, out)
-    check_sv090(artifacts, trusted, out)
-    check_sv091(artifacts, trusted, out)
-    check_sv100(artifacts, trusted, out)
-    check_sv101(artifacts, out)
-    check_sv110(artifacts, out)
+    dispatch = [
+        ("SV-001", lambda: check_sv001(artifacts, out)),
+        ("SV-002", lambda: check_sv002(artifacts, out)),
+        ("SV-003", lambda: check_sv003(artifacts, out)),
+        ("SV-005", lambda: check_sv005(artifacts, out)),
+        ("SV-010", lambda: check_sv010(artifacts, out)),
+        ("SV-011", lambda: check_sv011(artifacts, out)),
+        ("SV-020", lambda: check_sv020(artifacts, out)),
+        ("SV-021", lambda: check_sv021(artifacts, out)),
+        ("SV-022", lambda: check_sv022(artifacts, out)),
+        ("SV-023", lambda: check_sv023(artifacts, out)),
+        ("SV-024", lambda: check_sv024(artifacts, out)),
+        ("SV-025", lambda: check_sv025(artifacts, out)),
+        ("SV-026", lambda: check_sv026(artifacts, out)),
+        ("SV-030", lambda: check_sv030(artifacts, out)),
+        ("SV-031", lambda: check_sv031(artifacts, out)),
+        ("SV-032", lambda: check_sv032(artifacts, out)),
+        ("SV-033", lambda: check_sv033(artifacts, out)),
+        ("SV-034", lambda: check_sv034(artifacts, out)),
+        ("SV-040", lambda: check_sv040(artifacts, out)),
+        ("SV-041", lambda: check_sv041(artifacts, repo_ctx, out)),
+        ("SV-042", lambda: check_sv042(artifacts, repo_ctx, trusted, out)),
+        ("SV-043", lambda: check_sv043(artifacts, repo_ctx, trusted, out)),
+        ("SV-044", lambda: check_sv044(artifacts, repo_ctx, out)),
+        ("SV-045", lambda: check_sv045(artifacts, out)),
+        ("SV-050", lambda: check_sv050(artifacts, trusted, out)),
+        ("SV-060", lambda: check_sv060(artifacts, out)),
+        ("SV-061", lambda: check_sv061(artifacts, out)),
+        ("SV-070", lambda: check_sv070(artifacts, out)),
+        ("SV-071", lambda: check_sv071(artifacts, out)),
+        ("SV-072", lambda: check_sv072(artifacts, out)),
+        ("SV-090", lambda: check_sv090(artifacts, trusted, out)),
+        ("SV-091", lambda: check_sv091(artifacts, trusted, out)),
+        ("SV-100", lambda: check_sv100(artifacts, trusted, out)),
+        ("SV-101", lambda: check_sv101(artifacts, out)),
+        ("SV-110", lambda: check_sv110(artifacts, out)),
+    ]
+    for rule_id, run in dispatch:
+        try:
+            run()
+        except (CanonV1Error, StrictLoadError) as e:
+            _v(out, rule_id, "<canonicalization>",
+               f"rule aborted by canonicalization/strict-load failure "
+               f"(fail closed): {e}")
     return out

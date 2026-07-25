@@ -355,9 +355,15 @@ def test_sv020_negative_seq_gap(cand):
 
 def test_sv020_negative_genesis_preimage_drift(cand):
     cand["batch"]["genesis"] = "9" * 64
-    fx.seal_chain(cand) if False else None
-    violations = validate(cand, trusted=TRUSTED)
-    assert_fires(violations, "SV-020")
+    # The batch bytes changed, so rebind the filename digest and the
+    # promotion/exposure references to it — only the genesis drift remains.
+    cand["run_hash"] = canon_sha256(cand["batch"])
+    cand["exposure_plan"]["run_hash"] = cand["run_hash"]
+    payload = cand["promotion"]["payload"]
+    payload["run_hash"] = cand["run_hash"]
+    payload["exposure_plan_sha256"] = canon_sha256(cand["exposure_plan"])
+    fx.seal_envelope(cand["promotion"])
+    assert_only(validate(cand, trusted=TRUSTED), "SV-020")
 
 
 # ---------------------------------------------------------------------------
@@ -1020,3 +1026,228 @@ def test_bootstrap_manifest_rejects_floats_and_dupes(tmp_path):
 def test_pctencode_canonical_uppercase():
     assert pctencode("ref/a b") == "ref%2Fa%20b"
     assert pctencode("ref.~-_") == "ref.~-_"
+
+
+# ---------------------------------------------------------------------------
+# audit-round additions (2026-07-25): fixtures for the adjudicated findings
+# ---------------------------------------------------------------------------
+
+def test_strict_loader_rejects_escaped_lone_surrogate():
+    with pytest.raises(StrictLoadError) as e:
+        load_strict(b'{"s":"\\ud800"}')
+    assert e.value.code == "E_ENCODING"
+
+
+def test_sv011_positive_indeterminate_extract_quarantined():
+    # Crash policy (§6): an indeterminate extraction quarantines the item —
+    # it never lands in the extraction-failure -> held tier.
+    from cre.f1.freeze.semantic_validator_v1 import derive_disposition
+    rec = {"citing_pmcid": "PMC1",
+           "extract": {"call_made": True, "status": "indeterminate"},
+           "coverage": []}
+    assert derive_disposition(rec, set()) == ("quarantined", True)
+
+
+def test_sv022_positive_presend_crash_retry_is_legal():
+    # A dangling 'prepared' never crossed the send boundary: retrying it is
+    # spec-legal ("retry only when NOT sent_boundary_crossed").
+    triplet = fx.build_wal_triplet(lcid="lc-pre")
+    dangling_prepared = copy.deepcopy(triplet[0])
+    retry = [copy.deepcopy(e) for e in triplet]
+    for i, ev in enumerate(retry):
+        ev["attempt_id"] = "a-lc-pre-1"
+        ev["attempt_ordinal"] = 1
+        ev["wal_seq"] = 1 + i
+    chain = fx.seal_wal_events([dangling_prepared] + retry)
+    assert not fired(validate({"wal_events": chain}, trusted=TRUSTED),
+                     "SV-022")
+
+
+def test_sv023_negative_attempt_without_prepared_event():
+    triplet = fx.build_wal_triplet(lcid="lc-nopre")
+    chain = [copy.deepcopy(triplet[1]), copy.deepcopy(triplet[2])]
+    for i, ev in enumerate(chain):
+        ev["wal_seq"] = i
+        ev["attempt_event_seq"] = i
+    fx.seal_wal_events(chain)
+    hits = assert_only(validate({"wal_events": chain}, trusted=TRUSTED),
+                       "SV-023")
+    assert "unrecomputable" in hits[0].message
+
+
+def test_sv025_negative_stimulus_snapshot_not_the_records(cand):
+    # A DIFFERENT (internally valid) snapshot than the record's pinned one
+    # must fail: never trust the stimulus's self-declared snapshot hash.
+    cid = cand["review_records"][0]["item_key"]
+    other = b"A different but perfectly valid abstract snapshot."
+    other_sha = hashlib.sha256(other).hexdigest()
+    cand["evidence_snapshots"][other_sha] = other
+    stim = cand["stimulus_objects"][cid]
+    stim["evidence"]["evidence_snapshot_sha256"] = other_sha
+    stim["evidence"]["text"] = "perfectly valid abstract"
+    cand["review_records"][0]["stimulus_sha256"] = canon_sha256(stim)
+    fx.reseal_candidate_universe(cand)
+    assert_only(validate(cand, trusted=TRUSTED), "SV-025")
+
+
+def test_sv026_negative_model_mismatch_terminal_binding(cand):
+    rec = cand["review_records"][0]
+    ok = rec["extract"]
+    rec["extract"] = {"call_made": True, "status": "model_mismatch",
+                      "logical_call_id": ok["logical_call_id"],
+                      "request_bytes_sha256": ok["request_bytes_sha256"],
+                      "idempotency_key": ok["idempotency_key"],
+                      "retry_wal_event_shas": ok["retry_wal_event_shas"],
+                      "provider_model_id": "some-other-model"}
+    rec["coverage"] = []
+    rec["finder_disposition"] = "held"
+    fx.reseal_candidate_universe(cand)
+    hits = assert_only(validate(cand, trusted=TRUSTED), "SV-026")
+    assert any("provider_model_id" in v.path for v in hits)
+
+
+def test_sv030_negative_fabricated_row_content(rel):
+    # Valid pointer, fabricated content: the row must equal the record.
+    rel["annotation_release_manifest"]["inventory"][0]["stimulus_sha256"] = \
+        "a" * 64
+    att = rel["release_attestation"]
+    att["annotation_release_manifest_sha256"] = \
+        canon_sha256(rel["annotation_release_manifest"])
+    fx.seal_self_hash(att, "attestation_sha256")
+    assert_only(validate(rel, trusted=TRUSTED), "SV-030")
+
+
+def test_sv034_negative_forward_binding_into_record(cand):
+    # Residual #4: candidate rows bind FORWARD into the review record.
+    cand["review_records"][0]["resolved_work_id"] = "pmid:99999"
+    fx.reseal_candidate_universe(cand)
+    assert_only(validate(cand, trusted=TRUSTED), "SV-034")
+
+
+def test_sv041_negative_checkpoint_parent_not_validated_state(git_universe):
+    # Acceptance row: the CHECKPOINT variant of two-phase anchoring.
+    artifacts, repo_ctx, commits = git_universe
+    artifacts = copy.deepcopy(artifacts)
+    artifacts["exclusion_checkpoints"][0]["canonical_ref_commit"] = \
+        "sha1:" + commits["base"]
+    assert_only(validate(artifacts, repo_ctx=repo_ctx, trusted=TRUSTED),
+                "SV-041")
+
+
+def test_sv002_negative_internally_consistent_but_not_frozen(cand):
+    # Residual #1: internal consistency alone is not a freeze — a package
+    # whose embedded text and digest agree but differ from the frozen
+    # acceptance constants must fail.
+    pkg = cand["prompt_packages"][0]
+    pkg["template_utf8"] = "A perfectly self-consistent replacement prompt."
+    pkg["template_utf8_sha256"] = fx.sha256_utf8(pkg["template_utf8"])
+    fx.seal_self_hash(pkg, "package_sha256")
+    cand["config"]["prompt_packages"]["claim_extract"]["package_sha256"] = \
+        pkg["package_sha256"]
+    fx.seal_config(cand)
+    fx.reseal_candidate_universe(cand)
+    hits = assert_only(validate(cand, trusted=TRUSTED), "SV-002")
+    assert any("frozen acceptance constant" in v.message for v in hits)
+
+
+def test_sv044_negative_duplicate_exposure_citation_id(cand):
+    rec1 = cand["review_records"][1]
+    cand["exposure_plan"]["exposed"][1] = {
+        "citation_id": cand["exposure_plan"]["exposed"][0]["citation_id"],
+        "review_record_sha256": rec1["record_sha256"]}
+    cand["promotion"]["payload"]["exposure_plan_sha256"] = \
+        canon_sha256(cand["exposure_plan"])
+    fx.seal_envelope(cand["promotion"])
+    violations = validate(cand, trusted=TRUSTED)
+    hits = assert_fires(violations, "SV-044")
+    assert any("unique" in v.message for v in hits)
+
+
+def test_sv060_negative_exposure_plan_row_id():
+    plan = {"artifact_type": "exposure_plan", "schema_version": "v14",
+            "run_hash": "0" * 64,
+            "exposed": [{"citation_id": "PMC1:ref%2fx",
+                         "review_record_sha256": "0" * 64}],
+            "recorded_by": "ZD", "recorded_at": fx.TS}
+    assert_only(validate({"exposure_plan": plan}, trusted=TRUSTED), "SV-060")
+
+
+def test_sv050_positive_development_mode_never_reportable(rel):
+    from cre.f1.freeze.semantic_validator_v1 import derive_reportability
+    rel["batch"]["execution_mode"] = "development"
+    derived = derive_reportability(rel, TRUSTED)
+    assert derived["finder_result_reportable"] is False
+    assert derived["composite_result_reportable"] is False
+
+
+def test_sv100_positive_leap_second_accepted():
+    proto = fx.build_candidate_protocol()
+    proto["recorded_at"] = "2016-12-31T23:59:60Z"
+    assert not fired(validate({"candidate_protocol": proto},
+                              trusted=TRUSTED), "SV-100")
+
+
+def test_validate_returns_violations_never_raises_on_floats():
+    # A float smuggled into a promotion payload must surface as a violation
+    # (fail closed), not as an unhandled CanonV1Error from validate().
+    promo = {"artifact_type": "promotion", "schema_version": "v14",
+             "payload": {"config_hash": "0" * 64, "run_hash": "0" * 64,
+                         "candidate_protocol_sha256": "0" * 64,
+                         "exposure_plan_sha256": "0" * 64,
+                         "post_exposure_exclusion_checkpoint_sha256": "0" * 64,
+                         "temperature": 1.0,
+                         "recorded_by": "ZD", "recorded_at": fx.TS},
+             "payload_sha256": "0" * 64}
+    claims = {"finder_result_reportable": False,
+              "discriminator_result_reportable": False,
+              "composite_result_reportable": False}
+    violations = validate({"promotion": promo,
+                           "reportability_claims": claims}, trusted=TRUSTED)
+    assert violations, "float payload must produce violations"
+    assert all(isinstance(v.message, str) for v in violations)
+
+
+def test_bootstrap_symlink_module_rejects(tmp_path):
+    root, boot, mpath, manifest = _make_boot_tree(tmp_path)
+    target = root / "mod_runner.py"
+    real_bytes = target.read_bytes()
+    target.unlink()
+    (root / "elsewhere.py").write_bytes(real_bytes)
+    target.symlink_to(root / "elsewhere.py")
+    r = _run_child(boot, mpath, root)
+    assert r.returncode == bootstrap.E_BOOTSTRAP_EXIT
+    assert "symlink" in r.stderr
+
+
+def test_bootstrap_stray_drifted_copy_fails_closed(tmp_path):
+    # A drifted launcher copy invoked directly (bypassing the parent's
+    # byte verification) must refuse itself.
+    root, boot, mpath, _ = _make_boot_tree(tmp_path)
+    stray = tmp_path / "stray" / "bootstrap.py"
+    stray.parent.mkdir()
+    stray.write_bytes(boot.read_bytes() + b"\n# drifted\n")
+    r = subprocess.run([PYTHON, "-I", str(stray), "--manifest", str(mpath),
+                        "--repo-root", str(root)],
+                       capture_output=True, text=True)
+    assert r.returncode == bootstrap.E_BOOTSTRAP_EXIT
+    assert "stray copy" in r.stderr or "stale" in r.stderr
+
+
+def test_bootstrap_stale_basename_other_tree_fails_closed(tmp_path):
+    # SV-110: a same-named trust-boundary module loaded from a DIFFERENT
+    # tree (another checkout, site-packages) is the stale-copy bug itself.
+    import types
+    root, boot, mpath, manifest = _make_boot_tree(tmp_path)
+    other_tree = tmp_path / "other_checkout"
+    other_tree.mkdir()
+    stale_file = other_tree / "mod_validator.py"
+    stale_file.write_text("ROLE = 'validator'  # stale checkout\n")
+    fake = types.ModuleType("mod_validator")
+    fake.__file__ = str(stale_file)
+    sys.modules["mod_validator_stale_test"] = fake
+    try:
+        with pytest.raises(bootstrap.BootstrapError) as e:
+            bootstrap.check_fresh_interpreter(manifest, root)
+        assert "outside the pinned tree" in str(e.value)
+    finally:
+        del sys.modules["mod_validator_stale_test"]

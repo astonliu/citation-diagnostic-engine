@@ -46,6 +46,25 @@ def _pairs_hook(pairs):
     return dict(pairs)
 
 
+def _assert_strict_strings(obj):
+    """Reject escaped lone surrogates (\\ud800...) json.loads lets through —
+    'every stored string declares strict-UTF-8' (Vocabulary rule 2)."""
+    if isinstance(obj, str):
+        try:
+            obj.encode("utf-8", "strict")
+        except UnicodeEncodeError as e:
+            raise StrictLoadError(E_ENCODING,
+                                  f"string is not strict UTF-8 (lone "
+                                  f"surrogate?): {e}")
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            _assert_strict_strings(k)
+            _assert_strict_strings(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            _assert_strict_strings(v)
+
+
 def load_strict(path_or_bytes):
     """Load JSON from a filesystem path (str/Path) or raw bytes, strictly.
 
@@ -64,11 +83,13 @@ def load_strict(path_or_bytes):
     except UnicodeDecodeError as e:
         raise StrictLoadError(E_ENCODING, f"input is not strict UTF-8: {e}")
     try:
-        return json.loads(text,
-                          object_pairs_hook=_pairs_hook,
-                          parse_float=_reject_float,
-                          parse_constant=_reject_constant)
+        parsed = json.loads(text,
+                            object_pairs_hook=_pairs_hook,
+                            parse_float=_reject_float,
+                            parse_constant=_reject_constant)
     except StrictLoadError:
         raise
     except ValueError as e:
         raise StrictLoadError(E_PARSE, f"invalid JSON: {e}")
+    _assert_strict_strings(parsed)
+    return parsed

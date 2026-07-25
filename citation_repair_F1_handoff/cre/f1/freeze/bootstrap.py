@@ -161,6 +161,7 @@ def check_fresh_interpreter(manifest, repo_root):
     """
     repo_root = pathlib.Path(repo_root).resolve()
     self_path = pathlib.Path(__file__).resolve()
+    stdlib_root = pathlib.Path(sys.base_prefix).resolve()
     boundary_files = set()
     boundary_basenames = set()
     for m in manifest["modules"]:
@@ -181,10 +182,13 @@ def check_fresh_interpreter(manifest, repo_root):
             raise BootstrapError(
                 f"trust-boundary module {name!r} ({f}) already in sys.modules "
                 f"before byte verification — not a fresh interpreter")
-        if fp.name in boundary_basenames and repo_root in fp.parents:
+        if fp.name in boundary_basenames and stdlib_root not in fp.parents:
+            # A same-named module from ANY other tree (another checkout,
+            # site-packages) is exactly the stale-copy drift this gate
+            # exists for; only the interpreter's own stdlib is exempt.
             raise BootstrapError(
                 f"module {name!r} ({f}) shadows a trust-boundary basename "
-                f"inside the pinned tree before verification")
+                f"from outside the pinned tree before verification")
 
 
 def verify_manifest(manifest, repo_root):
@@ -222,11 +226,13 @@ def verify_manifest(manifest, repo_root):
         raise BootstrapError(f"module manifest role coverage not exhaustive; "
                              f"missing roles: {missing}")
     for norm, declared in sorted(path_hash.items()):
-        target = (repo_root / norm).resolve()
+        unresolved = repo_root / norm
+        if unresolved.is_symlink():
+            # Checked BEFORE resolve() — a resolved path is never a symlink.
+            raise BootstrapError(f"module {norm!r} is a symlink")
+        target = unresolved.resolve()
         if repo_root not in target.parents and target != repo_root:
             raise BootstrapError(f"module {norm!r} resolves outside the pinned tree")
-        if target.is_symlink():
-            raise BootstrapError(f"module {norm!r} is a symlink")
         if not target.is_file():
             raise BootstrapError(f"module {norm!r} missing on disk")
         actual = hashlib.sha256(target.read_bytes()).hexdigest()
@@ -286,6 +292,19 @@ def child_main(argv=None):
         return E_BOOTSTRAP_EXIT
     try:
         manifest = load_manifest(opts["--manifest"])
+        # Self-check (honest-drift defense in depth): the RUNNING launcher's
+        # bytes must match a manifest bootstrap pin. The sound gate is the
+        # parent's pre-spawn verification (a drifted copy's old code cannot
+        # be trusted to run this check) — this catches a stray stale copy
+        # invoked directly.
+        self_sha = hashlib.sha256(
+            pathlib.Path(__file__).resolve().read_bytes()).hexdigest()
+        boot_pins = {m.get("content_sha256") for m in manifest["modules"]
+                     if m.get("role") == "bootstrap"}
+        if self_sha not in boot_pins:
+            raise BootstrapError(
+                f"running launcher bytes ({self_sha}) match no manifest "
+                f"bootstrap pin — stale or stray copy; aborting before import")
         check_fresh_interpreter(manifest, opts["--repo-root"])
         verify_manifest(manifest, opts["--repo-root"])
     except BootstrapError as e:
