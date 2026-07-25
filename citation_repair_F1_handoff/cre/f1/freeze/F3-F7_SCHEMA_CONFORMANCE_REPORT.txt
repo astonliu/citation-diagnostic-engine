@@ -1,5 +1,5 @@
 CRE F3-F7 finder-freeze — schema conformance report (format v14)
-generated_utc: 2026-07-25T00:24:56.309889+00:00
+generated_utc: 2026-07-25T00:55:52.302184+00:00
 validator: python-jsonschema 4.26.0 (Draft202012Validator)
 interpreter: 3.14.6
 command: python gen_conformance.py (extends seed _conf_v11.py)
@@ -62,6 +62,43 @@ negative / discriminator checks:
   unused $defs present: none                 REJECTED
 all_root_positive_pass: True
 all_negative_reject: True
-SCOPE: this report covers SCHEMA executability + discriminator behavior only. The
-semantic_validator_v1 SV-* cross-artifact rules and their per-rule fixtures are implemented
-WITH the validator during the build; this report does not assert them.
+semantic_validator: semantic_validator_v1 | rules: 35 (v17 §12 table incl. post-v17 SV-005/SV-072)
+fixture suite: cre/f1/test_semantic_validator_v1.py | 131 tests | pytest exit 0
+per-rule fixtures (positive / targeted negative, exact fail code asserted):
+  SV-001 E_SELF_HASH      positive: PASS(2)   negative: PASS(2)
+  SV-002 E_TEMPLATE       positive: PASS(1)   negative: PASS(2)
+  SV-003 E_FILENAME_HASH  positive: PASS(1)   negative: PASS(2)
+  SV-005 E_RUNTIME_MATCH  positive: PASS(1)   negative: PASS(1)
+  SV-010 E_FUNNEL         positive: PASS(1)   negative: PASS(1)
+  SV-011 E_DISPOSITION    positive: PASS(1)   negative: PASS(1)
+  SV-020 E_CHAIN          positive: PASS(1)   negative: PASS(2)
+  SV-021 E_WAL_CHAIN      positive: PASS(1)   negative: PASS(2)
+  SV-022 E_SEND_BOUNDARY  positive: PASS(1)   negative: PASS(1)
+  SV-023 E_IDEMPOTENCY    positive: PASS(1)   negative: PASS(1)
+  SV-024 E_PARSED         positive: PASS(1)   negative: PASS(2)
+  SV-025 E_DERIVATION     positive: PASS(1)   negative: PASS(1)
+  SV-026 E_WAL_MATCH      positive: PASS(1)   negative: PASS(1)
+  SV-030 E_MANIFEST_RUN   positive: PASS(1)   negative: PASS(1)
+  SV-031 E_MANIFEST_UNIQ  positive: PASS(1)   negative: PASS(1)
+  SV-032 E_ELIGIBLE       positive: PASS(1)   negative: PASS(1)
+  SV-033 E_SELECTION      positive: PASS(1)   negative: PASS(3)
+  SV-034 E_CANDIDATE_BIND positive: PASS(1)   negative: PASS(2)
+  SV-040 E_EXCLUSION      positive: PASS(1)   negative: PASS(1)
+  SV-041 E_GIT_ANCHOR     positive: PASS(1)   negative: PASS(3)
+  SV-042 E_TRUST_ROOT     positive: PASS(1)   negative: PASS(2)
+  SV-043 E_PROTOCOL       positive: PASS(1)   negative: PASS(2)
+  SV-044 E_EXPOSURE       positive: PASS(1)   negative: PASS(2)
+  SV-045 E_MODE           positive: PASS(1)   negative: PASS(2)
+  SV-050 E_REPORTABLE     positive: PASS(1)   negative: PASS(2)
+  SV-060 E_CITATION_ID    positive: PASS(2)   negative: PASS(2)
+  SV-061 E_OCCURRENCE     positive: PASS(2)   negative: PASS(1)
+  SV-070 E_LEAKAGE        positive: PASS(1)   negative: PASS(1)
+  SV-071 E_STIMULUS       positive: PASS(1)   negative: PASS(1)
+  SV-072 E_STIMULUS_HASH  positive: PASS(1)   negative: PASS(2)
+  SV-090 E_HEADER         positive: PASS(1)   negative: PASS(2)
+  SV-091 E_HOST           positive: PASS(1)   negative: PASS(1)
+  SV-100 E_FORMAT         positive: PASS(1)   negative: PASS(3)
+  SV-101 E_RETRY_POLICY   positive: PASS(1)   negative: PASS(2)
+  SV-110 E_BOOTSTRAP      positive: PASS(4)   negative: PASS(6)
+all_rules_have_both_fixtures_and_pass: True
+NOTES: SV-024 validates response shape presence only until ZD supplies the per-stage response schemas (residual #5; CONFIG response_schema_sha256 null). SV-033 coverage_targets are enforced through the PROPOSED per-item stratum field (residual #3, pending ZD approval). SV-110 is a runtime gate: its evidence is the bootstrap subprocess fixtures above, plus the artifact-side manifest checks.

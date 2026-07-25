@@ -1,0 +1,1109 @@
+{
+ "batch": {
+  "artifact_type": "batch",
+  "candidate_manifest_sha256": "b8a0b3ea417b73aaf4b2113513984bcf6949f6b8e93289d2eeeb7857138af640",
+  "canonical_ref_commit_observed": "sha1:0000000000000000000000000000000000000000",
+  "chain_hash_version": "canon_v1",
+  "chain_record_count": 2,
+  "chain_tip": "ee2eaeb308908848827adcbb4a7138645b28e08cb31eff328e022f0681ae5417",
+  "completed": "2026-07-24T12:00:00Z",
+  "config_hash": "2494d34065c4bdd54ecb98d8192559b53373c561530a7eed08269d237435469e",
+  "diagnostics": {
+   "indeterminate_items": 0,
+   "refused_attempts": 0,
+   "refused_items": 0,
+   "truncated_attempts": 0,
+   "truncated_items": 0
+  },
+  "exclusion_checkpoint_sha256_at_start": "c8ef13b647625fe1cf12223178bb5e293f4ab8988b191dfc5ec907dc038c388b",
+  "execution_mode": "candidate",
+  "funnel": {
+   "clear": 1,
+   "excluded": 0,
+   "flagged": 1,
+   "held": 0,
+   "input_total": 2,
+   "quarantined": 0,
+   "runner_accepted": 2
+  },
+  "genesis": "5ea589b2bc2f649422f93b4783f159391162201f0f4e9c5a1ad330e211dcc610",
+  "genesis_preimage": {
+   "candidate_manifest_sha256": "b8a0b3ea417b73aaf4b2113513984bcf6949f6b8e93289d2eeeb7857138af640",
+   "config_hash": "2494d34065c4bdd54ecb98d8192559b53373c561530a7eed08269d237435469e",
+   "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "selection_artifact_sha256": "3f10cbf6356bbda82b404a335d35c00179455e167a05b2f025ce828f710c9732"
+  },
+  "observed_runtime": {
+   "argv": [
+    "../.venv_cre/bin/python",
+    "-m",
+    "cre.f1.freeze.run"
+   ],
+   "cwd": "/work",
+   "dependency_lock_sha256": "0c030586945fe504b604ecc2e875c38ede400cd5cd73da9730302162e6b02c6f",
+   "distribution_inventory_sha256": "bcae0416621b3db43d8cba1e4454a792c7af9e4b7287e51056efc5a215d95839",
+   "fresh_interpreter": true,
+   "jcs_library_version": "1.0",
+   "matches_config_runtime_profile": true,
+   "platform": "linux",
+   "python_implementation": "cpython",
+   "python_version": "3.10.12",
+   "transport_library_version": "1.0"
+  },
+  "promotion_payload_sha256_at_start": null,
+  "review_dump_sha256": "814d2c562454b770ff42ad741a27c3954c2dc39ac0bc6f4f1bbb36ed2be630cb",
+  "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sample_purpose": "calibration",
+  "schema_version": "v14",
+  "selection_artifact_sha256": "3f10cbf6356bbda82b404a335d35c00179455e167a05b2f025ce828f710c9732",
+  "started": "2026-07-24T12:00:00Z",
+  "status": "complete",
+  "wal_tip_sha256": "d85f0d7cc2ccd6f8b28a5619590fe66ab506201d00f55509f909f76f51cb7d3b"
+ },
+ "candidate_manifest": {
+  "artifact_type": "candidate_manifest",
+  "config_hash": "2494d34065c4bdd54ecb98d8192559b53373c561530a7eed08269d237435469e",
+  "items": [
+   {
+    "citation_id": "PMC100001:ref-a",
+    "evidence_snapshot_sha256": "ba09c34db6cace97483bf1b02398174a51c274574ef9aba6c96d62188f7d0dc7",
+    "resolution_provenance_sha256": "492a80289e40f5d5e1178fc3b5828f438b6b6b3fb073d38af7fea39fcbef92ea",
+    "resolved_work_id": "pmid:11111",
+    "source_xml_sha256": "ff09a74274113f5bcc7a3ddb12c63145b6c1c5bd786f89ac48c8acf805038776"
+   },
+   {
+    "citation_id": "PMC100002:ref-b",
+    "evidence_snapshot_sha256": "859efc3ff80a6a326d5029d309da00eede2de8bee67af2c7c8dd734983eb6d53",
+    "resolution_provenance_sha256": "29be57384cfbc5a76b5e0a674d29de19a3fb719a2ba7e7dbfdc5343ea83c69dc",
+    "resolved_work_id": "pmid:22222",
+    "source_xml_sha256": "7bdcc4bcfdac916f28a7297fcbbf642933c32eb7b8d9bcb9ad935de0a648ccac"
+   }
+  ],
+  "schema_version": "v14",
+  "selection_artifact_sha256": "3f10cbf6356bbda82b404a335d35c00179455e167a05b2f025ce828f710c9732"
+ },
+ "candidate_protocol": {
+  "artifact_type": "candidate_protocol",
+  "evaluation_policy_version": "v1",
+  "freeze_criterion": "calibration precision stable across the small candidate batch",
+  "prohibited_cases": [
+   {
+    "citing_pmcid": "PMC901"
+   },
+   {
+    "citing_pmcid": "PMC902"
+   }
+  ],
+  "recorded_at": "2026-07-24T12:00:00Z",
+  "recorded_by": "ZD",
+  "schema_sha256": "3241cbcce6189cf19f278b452b01ed41fb46ec079a8f2588fd110e50409b53b1",
+  "schema_version": "v14",
+  "semantic_validator_version": "semantic_validator_v1"
+ },
+ "config": {
+  "artifact_type": "config",
+  "candidate_protocol_sha256": "5d483357f59451dc0ee159f7c596cab8b62513f88fc9657b49393eb3ef43f9d5",
+  "canon": "canon_v1",
+  "codebook_sha256": "9cb72ac0d6cd93f37641f56b958d827b02a469b603c4bfc0730dd1ca085a8f09",
+  "failure_policy": {
+   "continue_after_coverage_terminal_failure": true
+  },
+  "module_manifest_sha256": "263ff51bb97adcb02d384d0154243ff45cb64fb63fbcbb9e7982a97f4b49477a",
+  "prompt_packages": {
+   "claim_extract": {
+    "package_sha256": "ac7b51723e698040f139dbb29470b1004269bc5601bdf8b008d39896ba385c65",
+    "package_version": 4
+   },
+   "coverage": {
+    "package_sha256": "b4d82f7995f69af3e13da23f6135d09be8ba55652797d9674ef38cac9a809928",
+    "package_version": 4
+   }
+  },
+  "runtime_profile": {
+   "dependency_lock_sha256": "0c030586945fe504b604ecc2e875c38ede400cd5cd73da9730302162e6b02c6f",
+   "distribution_inventory_sha256": "bcae0416621b3db43d8cba1e4454a792c7af9e4b7287e51056efc5a215d95839",
+   "jcs_library_version": "1.0",
+   "platform_constraint": "linux",
+   "python_implementation": "cpython",
+   "python_version": "3.10.12",
+   "transport_library_version": "1.0"
+  },
+  "schema_version": "v14",
+  "scope": "finder_frontend_extract_coverage",
+  "source": {
+   "canonical_ref": "refs/heads/main",
+   "repo_identity": "github.com/astonliu/citation-repair-engine",
+   "source_commit_oid": "sha1:0000000000000000000000000000000000000000",
+   "source_tree_oid": "sha1:0000000000000000000000000000000000000000"
+  },
+  "stages": {
+   "claim_extract": {
+    "endpoint": {
+     "api_family": "messages",
+     "api_version": "2023-06-01",
+     "base_url": "https://api.anthropic.com/v1/messages",
+     "behavior_headers": {},
+     "host_allowlisted": true,
+     "jcs_library_version": "1.0",
+     "provider": "anthropic",
+     "region": "us",
+     "sdk_version": "1.0"
+    },
+    "evidence_scope": "citing_sentence_only",
+    "model_snapshot": "claude-opus-5",
+    "params": {
+     "max_tokens": {
+      "state": "supplied",
+      "value": 1024
+     },
+     "seed": {
+      "state": "omitted"
+     },
+     "stop_sequences": {
+      "state": "omitted"
+     },
+     "temperature": {
+      "state": "omitted"
+     },
+     "top_k": {
+      "state": "omitted"
+     },
+     "top_p": {
+      "state": "omitted"
+     }
+    },
+    "response_parser_version": "v1",
+    "response_schema_sha256": null,
+    "retry": {
+     "backoff_base_seconds": "1",
+     "backoff_cap_seconds": "30",
+     "connect_timeout_seconds": "5",
+     "idempotency_preimage_version": "CRE_FINDER_IDEMPOTENCY_V1",
+     "jitter_seconds": "1",
+     "max_attempts": 3,
+     "read_timeout_seconds": "60",
+     "record_attempts": true,
+     "respect_retry_after": true,
+     "retry_after_cap_seconds": "60",
+     "retryable_exceptions": [
+      "connect_timeout"
+     ],
+     "retryable_status": [
+      429
+     ],
+     "total_timeout_seconds": "120"
+    },
+    "system_message": {
+     "state": "omitted"
+    },
+    "tool_schema": null,
+    "tool_schema_sha256": null
+   },
+   "coverage": {
+    "endpoint": {
+     "api_family": "messages",
+     "api_version": "2023-06-01",
+     "base_url": "https://api.anthropic.com/v1/messages",
+     "behavior_headers": {},
+     "host_allowlisted": true,
+     "jcs_library_version": "1.0",
+     "provider": "anthropic",
+     "region": "us",
+     "sdk_version": "1.0"
+    },
+    "evidence_policy": {
+     "missing_evidence_sentinel": "EVIDENCE_UNAVAILABLE",
+     "normalization": "nfc",
+     "pmid_version_policy": "latest_at_snapshot",
+     "retrieval": "efetch"
+    },
+    "evidence_reader": "content_addressed_only",
+    "evidence_scope": "abstract_snapshot",
+    "model_snapshot": "claude-opus-5",
+    "params": {
+     "max_tokens": {
+      "state": "supplied",
+      "value": 1024
+     },
+     "seed": {
+      "state": "omitted"
+     },
+     "stop_sequences": {
+      "state": "omitted"
+     },
+     "temperature": {
+      "state": "omitted"
+     },
+     "top_k": {
+      "state": "omitted"
+     },
+     "top_p": {
+      "state": "omitted"
+     }
+    },
+    "response_parser_version": "v1",
+    "response_schema_sha256": null,
+    "retry": {
+     "backoff_base_seconds": "1",
+     "backoff_cap_seconds": "30",
+     "connect_timeout_seconds": "5",
+     "idempotency_preimage_version": "CRE_FINDER_IDEMPOTENCY_V1",
+     "jitter_seconds": "1",
+     "max_attempts": 3,
+     "read_timeout_seconds": "60",
+     "record_attempts": true,
+     "respect_retry_after": true,
+     "retry_after_cap_seconds": "60",
+     "retryable_exceptions": [
+      "connect_timeout"
+     ],
+     "retryable_status": [
+      429
+     ],
+     "total_timeout_seconds": "120"
+    },
+    "system_message": {
+     "state": "omitted"
+    },
+    "tool_schema": null,
+    "tool_schema_sha256": null
+   }
+  }
+ },
+ "config_hash": "2494d34065c4bdd54ecb98d8192559b53373c561530a7eed08269d237435469e",
+ "evidence_snapshots": {
+  "859efc3ff80a6a326d5029d309da00eede2de8bee67af2c7c8dd734983eb6d53": "Abstract for PMID 22222. The intervention improved outcome 1 in the trial.",
+  "ba09c34db6cace97483bf1b02398174a51c274574ef9aba6c96d62188f7d0dc7": "Abstract for PMID 11111. The intervention improved outcome 0 in the trial."
+ },
+ "exclusion_checkpoints": [
+  {
+   "artifact_type": "exclusion_checkpoint",
+   "canonical_ref_commit": "sha1:0000000000000000000000000000000000000000",
+   "entry_count": 0,
+   "schema_version": "v14",
+   "tip_entry_sha256": null
+  },
+  {
+   "artifact_type": "exclusion_checkpoint",
+   "canonical_ref_commit": "sha1:0000000000000000000000000000000000000000",
+   "entry_count": 2,
+   "schema_version": "v14",
+   "tip_entry_sha256": "cbcb698aec3972a8012320fc8e9aefc840a1b40265597e15863d54cd475224f4"
+  }
+ ],
+ "exclusion_ledger": [
+  {
+   "artifact_type": "exclusion_ledger_entry",
+   "citation_id": "PMC100001:ref-a",
+   "citing_pmcid": "PMC100001",
+   "cluster_id": "cluster-0",
+   "entry_sha256": "352e834b0d2be5da4f809d6fed4b32d507c1206e0439e215ba3ddf9955e43dfc",
+   "occurrence_identity": "d60b53e80b1d1afc24cded54132a939c5fbaf84fb7961715db064d71fd96e496",
+   "prev_entry_sha256": null,
+   "reason": "human_inspected",
+   "recorded_at": "2026-07-24T12:00:00Z",
+   "schema_version": "v14",
+   "scope": "citing_paper",
+   "seq": 0
+  },
+  {
+   "artifact_type": "exclusion_ledger_entry",
+   "citation_id": "PMC100002:ref-b",
+   "citing_pmcid": "PMC100002",
+   "cluster_id": "cluster-1",
+   "entry_sha256": "cbcb698aec3972a8012320fc8e9aefc840a1b40265597e15863d54cd475224f4",
+   "occurrence_identity": "fbf9ec5617563909cbddcb5855a57057b6316d6e4d5d5648bce0a3fd97deb629",
+   "prev_entry_sha256": "352e834b0d2be5da4f809d6fed4b32d507c1206e0439e215ba3ddf9955e43dfc",
+   "reason": "human_inspected",
+   "recorded_at": "2026-07-24T12:00:00Z",
+   "schema_version": "v14",
+   "scope": "citing_paper",
+   "seq": 1
+  }
+ ],
+ "exposure_plan": {
+  "artifact_type": "exposure_plan",
+  "exposed": [
+   {
+    "citation_id": "PMC100001:ref-a",
+    "review_record_sha256": "49f6e8c0790a32392c0888953ba6e94c80ca3fa2b4101f82eb41674b4509b102"
+   },
+   {
+    "citation_id": "PMC100002:ref-b",
+    "review_record_sha256": "ee2eaeb308908848827adcbb4a7138645b28e08cb31eff328e022f0681ae5417"
+   }
+  ],
+  "recorded_at": "2026-07-24T12:00:00Z",
+  "recorded_by": "ZD",
+  "run_hash": "390b7b57a1b753c75294495210bbbc7f0e16c0b80627b0ea72ff6c111d76876e",
+  "schema_version": "v14"
+ },
+ "module_manifest": {
+  "artifact_type": "module_manifest",
+  "modules": [
+   {
+    "blob_oid": "sha1:0000000000000000000000000000000000000000",
+    "content_sha256": "5447709c6fceb4530b75fccd555fa72307eaf90fbcb47f652385d0ce9b44d770",
+    "repo_path": "cre/f1/freeze/mod_bootstrap.py",
+    "role": "bootstrap"
+   },
+   {
+    "blob_oid": "sha1:0000000000000000000000000000000000000000",
+    "content_sha256": "43e5a3d1f896612621f9dc0ff01fd5f7d89b15e5f06ec4c11befb9eb9c1ef4f7",
+    "repo_path": "cre/f1/freeze/mod_validator.py",
+    "role": "validator"
+   },
+   {
+    "blob_oid": "sha1:0000000000000000000000000000000000000000",
+    "content_sha256": "2bb01cf45f9cf404d24b544af390014a4abc59ad9393acf5a3777e6a35c3d0b5",
+    "repo_path": "cre/f1/freeze/mod_canonicalizer.py",
+    "role": "canonicalizer"
+   },
+   {
+    "blob_oid": "sha1:0000000000000000000000000000000000000000",
+    "content_sha256": "6d7b0b1d60fb4b014f9a85c646c8bf8e0634c2c67b1e6e51d68fdf27546b1329",
+    "repo_path": "cre/f1/freeze/mod_renderer.py",
+    "role": "renderer"
+   },
+   {
+    "blob_oid": "sha1:0000000000000000000000000000000000000000",
+    "content_sha256": "328848c337184216ca4edd4aead47d4a79e5993248c019753069a000b425364a",
+    "repo_path": "cre/f1/freeze/mod_parser.py",
+    "role": "parser"
+   },
+   {
+    "blob_oid": "sha1:0000000000000000000000000000000000000000",
+    "content_sha256": "eb53835a97d531a5d9ef8984afeec0d4e961fffa509e0ec5bdf8739a1ab3504a",
+    "repo_path": "cre/f1/freeze/mod_provider_adapter.py",
+    "role": "provider_adapter"
+   },
+   {
+    "blob_oid": "sha1:0000000000000000000000000000000000000000",
+    "content_sha256": "48ee69dc0d22bd8c37e8deb1177242a8b9ad701d14d895b6b0837e20f1e65e57",
+    "repo_path": "cre/f1/freeze/mod_evidence_reader.py",
+    "role": "evidence_reader"
+   },
+   {
+    "blob_oid": "sha1:0000000000000000000000000000000000000000",
+    "content_sha256": "926d6830f8b0a7ed1ff068f0e8203ba3c1e27a965f558ae461c8f27ba6454baa",
+    "repo_path": "cre/f1/freeze/mod_runner.py",
+    "role": "runner"
+   },
+   {
+    "blob_oid": "sha1:0000000000000000000000000000000000000000",
+    "content_sha256": "5a6a7c2d04add72710524de83ca8be78e70ee0a55b47434b78331fe4d84e615b",
+    "repo_path": "cre/f1/freeze/mod_package_init.py",
+    "role": "package_init"
+   },
+   {
+    "blob_oid": "sha1:0000000000000000000000000000000000000000",
+    "content_sha256": "978645e11f93eac1c8990bb07a134979ce032e5ac739c3cfeab85d5a1649dfe8",
+    "repo_path": "cre/f1/freeze/mod_strict_loader.py",
+    "role": "strict_loader"
+   },
+   {
+    "blob_oid": "sha1:0000000000000000000000000000000000000000",
+    "content_sha256": "3877d16dfd2659d35d1c154e5d320d24f4cea9088769fd72d42d562c35759dd9",
+    "repo_path": "cre/f1/freeze/mod_semantic_validator.py",
+    "role": "semantic_validator"
+   }
+  ],
+  "schema_version": "v14"
+ },
+ "promotion": {
+  "artifact_type": "promotion",
+  "payload": {
+   "candidate_protocol_sha256": "5d483357f59451dc0ee159f7c596cab8b62513f88fc9657b49393eb3ef43f9d5",
+   "config_hash": "2494d34065c4bdd54ecb98d8192559b53373c561530a7eed08269d237435469e",
+   "exposure_plan_sha256": "48af57e6322a4d02292c53e732214ac6d674f63980a451963348b361ac0f091c",
+   "post_exposure_exclusion_checkpoint_sha256": "5b2781ddcdb08928fcbc0442419fdc52fb6b6e0eb9a136f230178d6d05aa567d",
+   "recorded_at": "2026-07-24T12:00:00Z",
+   "recorded_by": "ZD",
+   "run_hash": "390b7b57a1b753c75294495210bbbc7f0e16c0b80627b0ea72ff6c111d76876e"
+  },
+  "payload_sha256": "67e3607cfab1938e36dd793c4c09a1924c3f15ef4ae20a17392762ad1e2fcd7d",
+  "schema_version": "v14"
+ },
+ "prompt_packages": [
+  {
+   "artifact_type": "prompt_package",
+   "name": "claim_extract",
+   "package_sha256": "ac7b51723e698040f139dbb29470b1004269bc5601bdf8b008d39896ba385c65",
+   "package_version": 4,
+   "render_contract": {
+    "collision_safe": true,
+    "message_construction": "structured",
+    "slots": [
+     {
+      "encoding": "utf-8",
+      "name": "CITING_SENTENCE",
+      "order": 0,
+      "role": "user"
+     }
+    ]
+   },
+   "render_contract_sha256": "8562b08426ce8c9f695c7bd61532e8906fc55d735c00243da8cdc4f3ad8bdb11",
+   "schema_version": "v14",
+   "source_blob_oid": "sha1:fa01126e2b9482d450065fd70cd0eb1fea816f5c",
+   "template_text_version": 3,
+   "template_utf8": "You decompose a scientific citing sentence into ATOMIC CLAIMS for citation-fault analysis.\n\nAn atomic claim is one self-contained factual assertion attributed to the cited reference under review: ONE subject, ONE predicate, ONE finding.\n\nRULES\n1. Extract only assertions attributed to the cited reference. Inline citation markers may look like \"[28]\", \"[28,29,30,31]\", superscript \"102\", or \"[1]\". A sentence-final marker does not automatically attribute the citing authors' own purpose, method, or action (for example, \"we compared our results\") to the cited source. Drop that framing.\n2. Split every independently judgeable predicate:\n   a. Split coordinated clauses and predicates when each is separately asserted (\"activates A and inhibits B\"). Do not split alternatives joined by \"or\" when the sentence asserts only the disjunction under a shared modality; preserve the complete disjunctive predicate as one claim.\n   b. Split distinct stacked properties (\"first inhibitor developed for X\").\n   c. Never merge \"developed for\", \"approved for\", and \"used for\".\n   d. Split result-bearing source descriptions. A phrase such as \"findings from the trial conducted by Consortium C\" asserts both who conducted the trial and what the trial produced/reported. Nominal forms such as \"findings from\", \"associations from\", and \"results of\" still carry a result predicate.\n   e. Split independent reporting meta-properties and the embedded finding. Priority (\"first\"), a claimed reporting date/year, and the reported scientific proposition are independently judgeable assertions. Preserve the shared finding inside each meta-claim so it remains self-contained; do not deduplicate claims whose predicates differ.\n3. Preserve specificity verbatim: named study/consortium/entity, species, strain or genetic model, cell line, population/indication, dose, direction, magnitude, timeframe, and context.\n4. Preserve asserted strength/modality verbatim (\"causes\" versus \"associated with\").\n5. Preserve priority and temporal wording (\"first\", \"originally\", \"recently\", a year).\n6. Do not add, infer, merge, or interpret. Strip citation markers from claim text.\n7. If there is no checkable factual assertion attributable to the cited source, return an empty list.\n\nEXAMPLES\nCiting sentence: \"Metformin activates AMPK and inhibits hepatic gluconeogenesis in diet-induced obese rats [7].\"\n{\"claims\": [\"Metformin activates AMPK\", \"Metformin inhibits hepatic gluconeogenesis in diet-induced obese rats\"]}\n\nCiting sentence: \"Treatment A may slow or stop disease progression in mice [7].\"\n{\"claims\": [\"Treatment A may slow or stop disease progression in mice\"]}\n\nCiting sentence: \"We compared our estimates with the associations from a trial conducted by Consortium C [1].\"\n{\"claims\": [\"Consortium C conducted the trial\", \"The trial produced the associations\"]}\n\nCiting sentence: \"Study Q was the first to report in 2012 that protein P binds receptor R [1].\"\n{\"claims\": [\"Study Q was the first to report that protein P binds receptor R\", \"Study Q reported in 2012 that protein P binds receptor R\", \"Protein P binds receptor R\"]}\n\nCiting sentence: \"Therapy R was developed for disease X, approved for disease X, and used to treat disease X [1].\"\n{\"claims\": [\"Therapy R was developed for disease X\", \"Therapy R was approved for disease X\", \"Therapy R was used to treat disease X\"]}\n\nCiting sentence: \"Standard protocols were used for RNA extraction [3].\"\n{\"claims\": []}\n\nTASK\nCiting sentence: \"<<CITING_SENTENCE>>\"\n\nReturn ONLY a JSON object with exactly one key, {\"claims\": [...]}, with no prose or markdown fences.\n",
+   "template_utf8_sha256": "25f7de6267de4d638d1a5fc0c778b852d3efba4865c35c40ff1a0f980a6a4507"
+  },
+  {
+   "artifact_type": "prompt_package",
+   "name": "coverage",
+   "package_sha256": "b4d82f7995f69af3e13da23f6135d09be8ba55652797d9674ef38cac9a809928",
+   "package_version": 4,
+   "render_contract": {
+    "collision_safe": true,
+    "message_construction": "structured",
+    "slots": [
+     {
+      "encoding": "utf-8",
+      "name": "ATOMIC_CLAIM",
+      "order": 0,
+      "role": "user"
+     },
+     {
+      "encoding": "utf-8",
+      "name": "EVIDENCE",
+      "order": 1,
+      "role": "user"
+     }
+    ]
+   },
+   "render_contract_sha256": "6b585e6a299e9d18c3924753e5fa8cd548a9df39b54b52fb1ee39a25351192ee",
+   "schema_version": "v14",
+   "source_blob_oid": "sha1:fa01126e2b9482d450065fd70cd0eb1fea816f5c",
+   "template_text_version": 2,
+   "template_utf8": "You analyze whether a cited paper's supplied abstract supports ONE atomic claim for abstract-scoped citation-fault analysis. Report structured findings ONLY. Do NOT output an established verdict; deterministic downstream code decides it.\n\nThe supplied evidence is a present, usable abstract. Judge only against that abstract; never fill gaps with outside knowledge.\n\nOUTPUT FIELDS\n- engages_subject (JSON boolean): true when the abstract addresses the SAME finding/result, including at a more general level or weaker causal strength. Off-topic or silent is false.\n- contradicts (JSON boolean): true only when engaged evidence is incompatible with the claim. If engages_subject is false, this MUST be false.\n- unconfirmed_specifics (JSON list of nonempty strings): every load-bearing part of the claim not established by the abstract. If engages_subject is false, this MUST be empty.\n\nLOCKED RULES\n1. Presence, NOT origin. Rightful/original-source provenance is downstream.\n2. Presence, NOT strength. Weaker causal/modal strength still counts as coverage for the same finding; do not list strength mismatch as an unconfirmed specific.\n3. Semantic paraphrase is allowed. Referential synonyms or ordinary paraphrases of the same entity class and relation are covered. A specificity gap requires genuine narrowing, such as a named strain/taxon/entity/study/consortium, genetic model, cell line, population/indication, dose, numeric magnitude, direction, time point, or experimental context. For example, \"normal gut commensals\" and \"intestinal microbiota\" can name the same resident-gut entity class; wording alone is not a gap. Never use this rule to equate genuinely different or hierarchically narrower entities.\n4. Do not compose an unstated causal pathway. A claim using \"through\", \"via\", \"by\", \"mediates\", or an equivalent mechanism relation requires the abstract to link that mechanism to that outcome. Separately establishing the outcome and a putative mechanism is insufficient.\n5. Predicate identity is exact and directional:\n   - \"approved for X\" requires explicit regulatory approval/authorization for X;\n   - \"used for X\" requires explicit actual administration, prescribing, or clinical use;\n   - \"developed for X\" requires explicit design/development intent directed at X.\n   No implication runs between these predicates unless the abstract states both.\n6. Named identifiers, priority, claimed year, and numeric/comparative magnitude are load-bearing. Purely qualitative, unquantified scale adjectives such as \"large\" are descriptive rather than independently load-bearing.\n7. Return actual JSON booleans true/false, never strings. Do not return null or an \"established\" field.\n\nEXAMPLES\nClaim: \"Drug X reduced infarct size in ApoE-deficient mice.\"\nEvidence: \"Drug X reduced infarct size in mice.\"\n{\"engages_subject\": true, \"contradicts\": false, \"unconfirmed_specifics\": [\"ApoE-deficient model\"], \"rationale\": \"The abstract does not state the claimed genetic model.\", \"evidence_span\": \"Drug X reduced infarct size in mice\"}\n\nClaim: \"Compound A reduces tumors through inhibition of pathway P.\"\nEvidence: \"Compound A reduced tumors. In a separate assay, Compound A inhibited pathway P.\"\n{\"engages_subject\": true, \"contradicts\": false, \"unconfirmed_specifics\": [\"inhibition of pathway P mediates tumor reduction\"], \"rationale\": \"The abstract states the outcome and pathway effect separately but does not link them causally.\", \"evidence_span\": \"Compound A reduced tumors\"}\n\nClaim: \"Compound A reduces tumors through inhibition of pathway P.\"\nEvidence: \"Compound A reduced tumors by inhibiting pathway P.\"\n{\"engages_subject\": true, \"contradicts\": false, \"unconfirmed_specifics\": [], \"rationale\": \"The abstract explicitly links pathway inhibition to tumor reduction.\", \"evidence_span\": \"Compound A reduced tumors by inhibiting pathway P\"}\n\nClaim: \"Elevated CRP causes cardiovascular disease.\"\nEvidence: \"Elevated CRP is associated with increased cardiovascular disease risk.\"\n{\"engages_subject\": true, \"contradicts\": false, \"unconfirmed_specifics\": [], \"rationale\": \"The same finding is present at weaker strength, which is downstream of coverage.\", \"evidence_span\": \"Elevated CRP is associated with increased cardiovascular disease risk\"}\n\nClaim: \"Aspirin irreversibly inhibits platelet cyclooxygenase-1.\"\nEvidence: \"We studied photosystem II assembly in cyanobacteria.\"\n{\"engages_subject\": false, \"contradicts\": false, \"unconfirmed_specifics\": [], \"rationale\": \"The abstract is off-topic.\", \"evidence_span\": \"\"}\n\nATOMIC CLAIM\n<<ATOMIC_CLAIM>>\n\nCITED-PAPER ABSTRACT\n<<EVIDENCE>>\n\nReturn ONLY a JSON object with exactly these keys:\n{\"engages_subject\": true, \"contradicts\": false, \"unconfirmed_specifics\": [], \"rationale\": \"<one sentence>\", \"evidence_span\": \"<verbatim span or empty string>\"}\nNo prose or markdown fences.\n",
+   "template_utf8_sha256": "1a24d13be0e817a757c8fc5ea1ab40f059c11c580990b09bd5c2fe2d1125421a"
+  }
+ ],
+ "review_records": [
+  {
+   "artifact_type": "review_record",
+   "citing_pmcid": "PMC100001",
+   "citing_sentence": "Sentence 0 cites the intervention outcome for 11111.",
+   "claimed_pmid": "11111",
+   "cluster_id": "cluster-0",
+   "config_hash": "2494d34065c4bdd54ecb98d8192559b53373c561530a7eed08269d237435469e",
+   "coverage": [
+    {
+     "call": {
+      "call_made": true,
+      "finish_reason": "end_turn",
+      "http_status": 200,
+      "idempotency_key": "b74c61573ede5c329d299bf76fd61f0f1bef51350f5e23e747074d4dc90e1d6a",
+      "logical_call_id": "lc-c0-0-aaaa",
+      "parsed": {
+       "verdict": "unsupported"
+      },
+      "provider_model_id": "claude-opus-5",
+      "raw_response_body_ref": "cas/0ddd3ff81995e280f5b38153090aad2a8fc774e9b46027ecbccf5623eb071b35",
+      "raw_response_body_sha256": "0ddd3ff81995e280f5b38153090aad2a8fc774e9b46027ecbccf5623eb071b35",
+      "request_bytes_sha256": "0b3a0e1490d6c3f48e3b0b0677a7418ae96a2142977acfd75da61c4b36b94760",
+      "response_headers_allowlisted": {
+       "request-id": "req-aaaa-0"
+      },
+      "response_id": "resp-c0",
+      "retry_wal_event_shas": [
+       "90ce735f1b09ec53136e818665047b962c7a88fd35bb472957b0280e75ef1430",
+       "7768f880803d029901aa8c27a809b3133f60a199149e3e425a18f1de6f6c7b84",
+       "d2305afb2a70bec3b8b6372d25bbfe3346ed7aaccc0ec2b8799b74e505f15430"
+      ],
+      "status": "ok"
+     },
+     "claim_idx": 0
+    }
+   ],
+   "evidence_snapshot_ref": "cas/ba09c34db6cace97483bf1b02398174a51c274574ef9aba6c96d62188f7d0dc7",
+   "evidence_snapshot_sha256": "ba09c34db6cace97483bf1b02398174a51c274574ef9aba6c96d62188f7d0dc7",
+   "extract": {
+    "call_made": true,
+    "finish_reason": "end_turn",
+    "http_status": 200,
+    "idempotency_key": "7d33b46f4c0bbeab02a0171cddafdd7eda5aae1e0a1f0db79dec102935ec6a85",
+    "logical_call_id": "lc-e0-aaaa",
+    "parsed": {
+     "claims": [
+      {
+       "idx": 0,
+       "text": "The intervention improved outcome 0."
+      }
+     ]
+    },
+    "provider_model_id": "claude-opus-5",
+    "raw_response_body_ref": "cas/443d7dcc34465670c07c79d55c6b4c9a1d1f2ad795ada53588aa341fa4a655db",
+    "raw_response_body_sha256": "443d7dcc34465670c07c79d55c6b4c9a1d1f2ad795ada53588aa341fa4a655db",
+    "request_bytes_sha256": "ea3b65bcf449d4f6b102efa457ec95fc37b6f74d31d998ff111f24cf5c824e97",
+    "response_headers_allowlisted": {
+     "request-id": "req-aaaa-0"
+    },
+    "response_id": "resp-e0",
+    "retry_wal_event_shas": [
+     "6c20e47416d114a3b20b085f81e6c82dfdf789ba9f3bedd0afd04573cded8854",
+     "754bc839d33727e2d2c04315e84a29a4005624c820be360b5713070874baa836",
+     "7f5dbd16741c0edf21bc98846c8c08080b5ded8f0dc407654a8648259b555f84"
+    ],
+    "status": "ok"
+   },
+   "finder_disposition": "flagged",
+   "item_key": "PMC100001:ref-a",
+   "prev_record_sha256": "5ea589b2bc2f649422f93b4783f159391162201f0f4e9c5a1ad330e211dcc610",
+   "record_sha256": "49f6e8c0790a32392c0888953ba6e94c80ca3fa2b4101f82eb41674b4509b102",
+   "ref_id": "ref-a",
+   "resolved_work_id": "pmid:11111",
+   "run_facts": {
+    "config_hash_used": "2494d34065c4bdd54ecb98d8192559b53373c561530a7eed08269d237435469e",
+    "finder_configuration_attested": true,
+    "finder_freeze_promoted_at_run": false,
+    "promotion_payload_sha256_at_run": null
+   },
+   "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "sample_purpose": "calibration",
+   "schema_version": "v14",
+   "seq": 0,
+   "shape_flags": [],
+   "stimulus_sha256": "6e0c9e53f176ac53603ec6d602fb3aeb59acffe52dedc567236a9ce434414777"
+  },
+  {
+   "artifact_type": "review_record",
+   "citing_pmcid": "PMC100002",
+   "citing_sentence": "Sentence 1 cites the intervention outcome for 22222.",
+   "claimed_pmid": "22222",
+   "cluster_id": "cluster-1",
+   "config_hash": "2494d34065c4bdd54ecb98d8192559b53373c561530a7eed08269d237435469e",
+   "coverage": [
+    {
+     "call": {
+      "call_made": true,
+      "finish_reason": "end_turn",
+      "http_status": 200,
+      "idempotency_key": "efa30b4a1394328263a07f4f669ffa6029e140a39216119ecca184158b4efa1d",
+      "logical_call_id": "lc-c1-0-aaaa",
+      "parsed": {
+       "verdict": "supported"
+      },
+      "provider_model_id": "claude-opus-5",
+      "raw_response_body_ref": "cas/3f85befe8b89e408e5e165b98397d10fcd734b63af2f937cfb88e26b4ec971b2",
+      "raw_response_body_sha256": "3f85befe8b89e408e5e165b98397d10fcd734b63af2f937cfb88e26b4ec971b2",
+      "request_bytes_sha256": "054e115c0390b87f27c4c756608ca94ba2795b04c83c0b7678b83f4648a98b48",
+      "response_headers_allowlisted": {
+       "request-id": "req-aaaa-1"
+      },
+      "response_id": "resp-c1",
+      "retry_wal_event_shas": [
+       "821d839d538130465b47e2dd46ba2d9adf91706b80f314f6f47001fdfd028e24",
+       "f010c1100d90793c27a1772bb02843fd74ba2b312afaad24dc12aaa10299f89c",
+       "d85f0d7cc2ccd6f8b28a5619590fe66ab506201d00f55509f909f76f51cb7d3b"
+      ],
+      "status": "ok"
+     },
+     "claim_idx": 0
+    }
+   ],
+   "evidence_snapshot_ref": "cas/859efc3ff80a6a326d5029d309da00eede2de8bee67af2c7c8dd734983eb6d53",
+   "evidence_snapshot_sha256": "859efc3ff80a6a326d5029d309da00eede2de8bee67af2c7c8dd734983eb6d53",
+   "extract": {
+    "call_made": true,
+    "finish_reason": "end_turn",
+    "http_status": 200,
+    "idempotency_key": "130ec01df7c180cb2862c7af9f8a41f9ff38719b17672ec844f73163fc8e4506",
+    "logical_call_id": "lc-e1-aaaa",
+    "parsed": {
+     "claims": [
+      {
+       "idx": 0,
+       "text": "The intervention improved outcome 1."
+      }
+     ]
+    },
+    "provider_model_id": "claude-opus-5",
+    "raw_response_body_ref": "cas/8cfbef15fab452982e335735f29005f8ea2bb320bb4edb71c6976d8a9dd14ae4",
+    "raw_response_body_sha256": "8cfbef15fab452982e335735f29005f8ea2bb320bb4edb71c6976d8a9dd14ae4",
+    "request_bytes_sha256": "3830d6228dfebd7c31d5905454a56f9767e6510579a035a3d5067bcfe218048a",
+    "response_headers_allowlisted": {
+     "request-id": "req-aaaa-1"
+    },
+    "response_id": "resp-e1",
+    "retry_wal_event_shas": [
+     "d0ed2583bcebeea509034d2172d82f98e35b472f241b019c53c2b9b42163423b",
+     "80f55f8a8970a22459fcda65486b1968564a7838cbc19cd41f1ce887a73b74f0",
+     "9999a653b3547146d863f87dcb6f0e6835402c8eda9d5ef969c947c77f355744"
+    ],
+    "status": "ok"
+   },
+   "finder_disposition": "clear",
+   "item_key": "PMC100002:ref-b",
+   "prev_record_sha256": "49f6e8c0790a32392c0888953ba6e94c80ca3fa2b4101f82eb41674b4509b102",
+   "record_sha256": "ee2eaeb308908848827adcbb4a7138645b28e08cb31eff328e022f0681ae5417",
+   "ref_id": "ref-b",
+   "resolved_work_id": "pmid:22222",
+   "run_facts": {
+    "config_hash_used": "2494d34065c4bdd54ecb98d8192559b53373c561530a7eed08269d237435469e",
+    "finder_configuration_attested": true,
+    "finder_freeze_promoted_at_run": false,
+    "promotion_payload_sha256_at_run": null
+   },
+   "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "sample_purpose": "calibration",
+   "schema_version": "v14",
+   "seq": 1,
+   "shape_flags": [],
+   "stimulus_sha256": "47ea2fdfc0674454fcd30a4f99a903a69c70af4e88a99e6c6a028f665ff389ae"
+  }
+ ],
+ "run_hash": "390b7b57a1b753c75294495210bbbc7f0e16c0b80627b0ea72ff6c111d76876e",
+ "run_state_manifest": {
+  "artifact_type": "run_state_manifest",
+  "candidate_manifest_sha256": "b8a0b3ea417b73aaf4b2113513984bcf6949f6b8e93289d2eeeb7857138af640",
+  "canonical_ref_commit_observed": "sha1:0000000000000000000000000000000000000000",
+  "chain_record_count": 1,
+  "chain_tip": "49f6e8c0790a32392c0888953ba6e94c80ca3fa2b4101f82eb41674b4509b102",
+  "config_hash": "2494d34065c4bdd54ecb98d8192559b53373c561530a7eed08269d237435469e",
+  "exclusion_checkpoint_sha256_at_start": "c8ef13b647625fe1cf12223178bb5e293f4ab8988b191dfc5ec907dc038c388b",
+  "execution_mode": "candidate",
+  "genesis": "5ea589b2bc2f649422f93b4783f159391162201f0f4e9c5a1ad330e211dcc610",
+  "observed_runtime": {
+   "argv": [
+    "../.venv_cre/bin/python",
+    "-m",
+    "cre.f1.freeze.run"
+   ],
+   "cwd": "/work",
+   "dependency_lock_sha256": "0c030586945fe504b604ecc2e875c38ede400cd5cd73da9730302162e6b02c6f",
+   "distribution_inventory_sha256": "bcae0416621b3db43d8cba1e4454a792c7af9e4b7287e51056efc5a215d95839",
+   "fresh_interpreter": true,
+   "jcs_library_version": "1.0",
+   "matches_config_runtime_profile": true,
+   "platform": "linux",
+   "python_implementation": "cpython",
+   "python_version": "3.10.12",
+   "transport_library_version": "1.0"
+  },
+  "observed_runtime_sha256": "ce9d4ace3fc53bbc773533661cdd46154be327c328c8ad3e833a1944763fccb7",
+  "output_dir": "runs/candidate-a",
+  "promotion_payload_sha256_at_start": null,
+  "review_dump_partial_sha256": "d129347737856b795e4d8e6c465cb35ababec9f877f0a2fe8db2aa373a270885",
+  "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sample_purpose": "calibration",
+  "schema_version": "v14",
+  "selection_artifact_sha256": "3f10cbf6356bbda82b404a335d35c00179455e167a05b2f025ce828f710c9732",
+  "status": "in_progress",
+  "wal_tip_sha256": "d2305afb2a70bec3b8b6372d25bbfe3346ed7aaccc0ec2b8799b74e505f15430"
+ },
+ "selection_artifact": {
+  "artifact_type": "selection_artifact",
+  "coverage_targets": {
+   "F6": 2
+  },
+  "items": [
+   {
+    "citation_id": "PMC100001:ref-a",
+    "citing_pmcid": "PMC100001",
+    "corpus_source_id": "pmc_oa",
+    "extraction_contract_version": "v1",
+    "normalization_contract_sha256": "56e277bc8ec4f0f773546ec73aaa58e902492610c15b3003cb15d455e1fcc801",
+    "normalized_ref_key": "11111",
+    "normalized_ref_key_type": "resolved_pmid",
+    "not_detector_sourced_attestation": true,
+    "occurrence_identity": "d60b53e80b1d1afc24cded54132a939c5fbaf84fb7961715db064d71fd96e496",
+    "occurrence_identity_version": "occ_id_v1",
+    "ref_content_utf8": "Reference ref-a content",
+    "ref_id": "ref-a",
+    "retrieval_record_sha256": "41b9fafce50626a522cf2ad806f2e61a7fbf744ddc0c413571f397f6ca872346",
+    "source_occurrence_fingerprint": "ac370c28218037576acd18d9f4b67843ef01ee578631da0bf23fa0c2398a27ba",
+    "source_xml_sha256": "ff09a74274113f5bcc7a3ddb12c63145b6c1c5bd786f89ac48c8acf805038776",
+    "stratum": "F6"
+   },
+   {
+    "citation_id": "PMC100002:ref-b",
+    "citing_pmcid": "PMC100002",
+    "corpus_source_id": "pmc_oa",
+    "extraction_contract_version": "v1",
+    "normalization_contract_sha256": "56e277bc8ec4f0f773546ec73aaa58e902492610c15b3003cb15d455e1fcc801",
+    "normalized_ref_key": "22222",
+    "normalized_ref_key_type": "resolved_pmid",
+    "not_detector_sourced_attestation": true,
+    "occurrence_identity": "fbf9ec5617563909cbddcb5855a57057b6316d6e4d5d5648bce0a3fd97deb629",
+    "occurrence_identity_version": "occ_id_v1",
+    "ref_content_utf8": "Reference ref-b content",
+    "ref_id": "ref-b",
+    "retrieval_record_sha256": "b27a36ef0ac2afb7a3959d20979f77a188a5c0811f0a29ac8d1539c7b640879c",
+    "source_occurrence_fingerprint": "ebe00ffd1c1aba4d93fb6cb91dd0e43756206c38e8ebe428e3d1d255f7eac23f",
+    "source_xml_sha256": "7bdcc4bcfdac916f28a7297fcbbf642933c32eb7b8d9bcb9ad935de0a648ccac",
+    "stratum": "F6"
+   }
+  ],
+  "min_size": 2,
+  "recorded_by": "ZD",
+  "sample_purpose": "calibration",
+  "schema_version": "v14",
+  "selection_rule": "first-citance reference-level natural sample"
+ },
+ "source_xml": {
+  "PMC100001": "<article><body><p>Sentence 0 cites the intervention outcome for 11111.</p></body><ref id=\"ref-a\"/></article>",
+  "PMC100002": "<article><body><p>Sentence 1 cites the intervention outcome for 22222.</p></body><ref id=\"ref-b\"/></article>"
+ },
+ "stimulus_objects": {
+  "PMC100001:ref-a": {
+   "artifact_type": "stimulus_object",
+   "atomic_claims": [
+    {
+     "idx": 0,
+     "text": "The intervention improved outcome 0."
+    }
+   ],
+   "citing_sentence": "Sentence 0 cites the intervention outcome for 11111.",
+   "codebook_content": "CRE F3-F7 codebook v1: judge coverage of each atomic claim.",
+   "codebook_sha256": "9cb72ac0d6cd93f37641f56b958d827b02a469b603c4bfc0730dd1ca085a8f09",
+   "display_instructions": "Judge each claim against the evidence only.",
+   "evidence": {
+    "evidence_snapshot_sha256": "ba09c34db6cace97483bf1b02398174a51c274574ef9aba6c96d62188f7d0dc7",
+    "text": "The intervention improved outcome 0 in the trial."
+   },
+   "label_space": [
+    "supported",
+    "unsupported"
+   ],
+   "rendering_settings": {
+    "ordering": "document",
+    "redaction": "none",
+    "truncation": "none"
+   },
+   "schema_version": "v14",
+   "worksheet_schema": {
+    "questions": [
+     {
+      "answer_type": "single_choice",
+      "choices": [
+       "yes",
+       "no"
+      ],
+      "id": "q1",
+      "prompt": "Is the claim supported by the evidence?"
+     }
+    ]
+   }
+  },
+  "PMC100002:ref-b": {
+   "artifact_type": "stimulus_object",
+   "atomic_claims": [
+    {
+     "idx": 0,
+     "text": "The intervention improved outcome 1."
+    }
+   ],
+   "citing_sentence": "Sentence 1 cites the intervention outcome for 22222.",
+   "codebook_content": "CRE F3-F7 codebook v1: judge coverage of each atomic claim.",
+   "codebook_sha256": "9cb72ac0d6cd93f37641f56b958d827b02a469b603c4bfc0730dd1ca085a8f09",
+   "display_instructions": "Judge each claim against the evidence only.",
+   "evidence": {
+    "evidence_snapshot_sha256": "859efc3ff80a6a326d5029d309da00eede2de8bee67af2c7c8dd734983eb6d53",
+    "text": "The intervention improved outcome 1 in the trial."
+   },
+   "label_space": [
+    "supported",
+    "unsupported"
+   ],
+   "rendering_settings": {
+    "ordering": "document",
+    "redaction": "none",
+    "truncation": "none"
+   },
+   "schema_version": "v14",
+   "worksheet_schema": {
+    "questions": [
+     {
+      "answer_type": "single_choice",
+      "choices": [
+       "yes",
+       "no"
+      ],
+      "id": "q1",
+      "prompt": "Is the claim supported by the evidence?"
+     }
+    ]
+   }
+  }
+ },
+ "wal_events": [
+  {
+   "artifact_type": "wal_event",
+   "attempt_event_seq": 0,
+   "attempt_id": "a-lc-e0-aaaa-0",
+   "attempt_ordinal": 0,
+   "event_sha256": "6c20e47416d114a3b20b085f81e6c82dfdf789ba9f3bedd0afd04573cded8854",
+   "event_type": "prepared",
+   "idempotency_key": "7d33b46f4c0bbeab02a0171cddafdd7eda5aae1e0a1f0db79dec102935ec6a85",
+   "idempotency_preimage": {
+    "citation_id": "PMC100001:ref-a",
+    "claim_idx": null,
+    "config_hash": "2494d34065c4bdd54ecb98d8192559b53373c561530a7eed08269d237435469e",
+    "domain": "CRE_FINDER_IDEMPOTENCY_V1",
+    "request_bytes_sha256": "ea3b65bcf449d4f6b102efa457ec95fc37b6f74d31d998ff111f24cf5c824e97",
+    "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "stage": "claim_extract"
+   },
+   "logical_call_id": "lc-e0-aaaa",
+   "prev_attempt_event_sha256": null,
+   "prev_wal_event_sha256": null,
+   "recorded_at": "2026-07-24T12:00:00Z",
+   "request_bytes_sha256": "ea3b65bcf449d4f6b102efa457ec95fc37b6f74d31d998ff111f24cf5c824e97",
+   "schema_version": "v14",
+   "sent_boundary_crossed": false,
+   "wal_seq": 0
+  },
+  {
+   "artifact_type": "wal_event",
+   "attempt_event_seq": 1,
+   "attempt_id": "a-lc-e0-aaaa-0",
+   "attempt_ordinal": 0,
+   "event_sha256": "754bc839d33727e2d2c04315e84a29a4005624c820be360b5713070874baa836",
+   "event_type": "sent",
+   "idempotency_key": "7d33b46f4c0bbeab02a0171cddafdd7eda5aae1e0a1f0db79dec102935ec6a85",
+   "logical_call_id": "lc-e0-aaaa",
+   "prev_attempt_event_sha256": "6c20e47416d114a3b20b085f81e6c82dfdf789ba9f3bedd0afd04573cded8854",
+   "prev_wal_event_sha256": "6c20e47416d114a3b20b085f81e6c82dfdf789ba9f3bedd0afd04573cded8854",
+   "recorded_at": "2026-07-24T12:00:00Z",
+   "request_bytes_sha256": "ea3b65bcf449d4f6b102efa457ec95fc37b6f74d31d998ff111f24cf5c824e97",
+   "schema_version": "v14",
+   "sent_boundary_crossed": true,
+   "wal_seq": 1
+  },
+  {
+   "artifact_type": "wal_event",
+   "attempt_event_seq": 2,
+   "attempt_id": "a-lc-e0-aaaa-0",
+   "attempt_ordinal": 0,
+   "event_sha256": "7f5dbd16741c0edf21bc98846c8c08080b5ded8f0dc407654a8648259b555f84",
+   "event_type": "response_persisted",
+   "finish_reason": "end_turn",
+   "http_status": 200,
+   "idempotency_key": "7d33b46f4c0bbeab02a0171cddafdd7eda5aae1e0a1f0db79dec102935ec6a85",
+   "logical_call_id": "lc-e0-aaaa",
+   "prev_attempt_event_sha256": "754bc839d33727e2d2c04315e84a29a4005624c820be360b5713070874baa836",
+   "prev_wal_event_sha256": "754bc839d33727e2d2c04315e84a29a4005624c820be360b5713070874baa836",
+   "provider_model_id": "claude-opus-5",
+   "recorded_at": "2026-07-24T12:00:00Z",
+   "request_bytes_sha256": "ea3b65bcf449d4f6b102efa457ec95fc37b6f74d31d998ff111f24cf5c824e97",
+   "response_body_ref": "cas/443d7dcc34465670c07c79d55c6b4c9a1d1f2ad795ada53588aa341fa4a655db",
+   "response_body_sha256": "443d7dcc34465670c07c79d55c6b4c9a1d1f2ad795ada53588aa341fa4a655db",
+   "response_headers_allowlisted": {
+    "request-id": "req-aaaa-0"
+   },
+   "response_id": "resp-e0",
+   "schema_version": "v14",
+   "sent_boundary_crossed": true,
+   "wal_seq": 2
+  },
+  {
+   "artifact_type": "wal_event",
+   "attempt_event_seq": 0,
+   "attempt_id": "a-lc-c0-0-aaaa-0",
+   "attempt_ordinal": 0,
+   "event_sha256": "90ce735f1b09ec53136e818665047b962c7a88fd35bb472957b0280e75ef1430",
+   "event_type": "prepared",
+   "idempotency_key": "b74c61573ede5c329d299bf76fd61f0f1bef51350f5e23e747074d4dc90e1d6a",
+   "idempotency_preimage": {
+    "citation_id": "PMC100001:ref-a",
+    "claim_idx": 0,
+    "config_hash": "2494d34065c4bdd54ecb98d8192559b53373c561530a7eed08269d237435469e",
+    "domain": "CRE_FINDER_IDEMPOTENCY_V1",
+    "request_bytes_sha256": "0b3a0e1490d6c3f48e3b0b0677a7418ae96a2142977acfd75da61c4b36b94760",
+    "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "stage": "coverage"
+   },
+   "logical_call_id": "lc-c0-0-aaaa",
+   "prev_attempt_event_sha256": null,
+   "prev_wal_event_sha256": "7f5dbd16741c0edf21bc98846c8c08080b5ded8f0dc407654a8648259b555f84",
+   "recorded_at": "2026-07-24T12:00:00Z",
+   "request_bytes_sha256": "0b3a0e1490d6c3f48e3b0b0677a7418ae96a2142977acfd75da61c4b36b94760",
+   "schema_version": "v14",
+   "sent_boundary_crossed": false,
+   "wal_seq": 3
+  },
+  {
+   "artifact_type": "wal_event",
+   "attempt_event_seq": 1,
+   "attempt_id": "a-lc-c0-0-aaaa-0",
+   "attempt_ordinal": 0,
+   "event_sha256": "7768f880803d029901aa8c27a809b3133f60a199149e3e425a18f1de6f6c7b84",
+   "event_type": "sent",
+   "idempotency_key": "b74c61573ede5c329d299bf76fd61f0f1bef51350f5e23e747074d4dc90e1d6a",
+   "logical_call_id": "lc-c0-0-aaaa",
+   "prev_attempt_event_sha256": "90ce735f1b09ec53136e818665047b962c7a88fd35bb472957b0280e75ef1430",
+   "prev_wal_event_sha256": "90ce735f1b09ec53136e818665047b962c7a88fd35bb472957b0280e75ef1430",
+   "recorded_at": "2026-07-24T12:00:00Z",
+   "request_bytes_sha256": "0b3a0e1490d6c3f48e3b0b0677a7418ae96a2142977acfd75da61c4b36b94760",
+   "schema_version": "v14",
+   "sent_boundary_crossed": true,
+   "wal_seq": 4
+  },
+  {
+   "artifact_type": "wal_event",
+   "attempt_event_seq": 2,
+   "attempt_id": "a-lc-c0-0-aaaa-0",
+   "attempt_ordinal": 0,
+   "event_sha256": "d2305afb2a70bec3b8b6372d25bbfe3346ed7aaccc0ec2b8799b74e505f15430",
+   "event_type": "response_persisted",
+   "finish_reason": "end_turn",
+   "http_status": 200,
+   "idempotency_key": "b74c61573ede5c329d299bf76fd61f0f1bef51350f5e23e747074d4dc90e1d6a",
+   "logical_call_id": "lc-c0-0-aaaa",
+   "prev_attempt_event_sha256": "7768f880803d029901aa8c27a809b3133f60a199149e3e425a18f1de6f6c7b84",
+   "prev_wal_event_sha256": "7768f880803d029901aa8c27a809b3133f60a199149e3e425a18f1de6f6c7b84",
+   "provider_model_id": "claude-opus-5",
+   "recorded_at": "2026-07-24T12:00:00Z",
+   "request_bytes_sha256": "0b3a0e1490d6c3f48e3b0b0677a7418ae96a2142977acfd75da61c4b36b94760",
+   "response_body_ref": "cas/0ddd3ff81995e280f5b38153090aad2a8fc774e9b46027ecbccf5623eb071b35",
+   "response_body_sha256": "0ddd3ff81995e280f5b38153090aad2a8fc774e9b46027ecbccf5623eb071b35",
+   "response_headers_allowlisted": {
+    "request-id": "req-aaaa-0"
+   },
+   "response_id": "resp-c0",
+   "schema_version": "v14",
+   "sent_boundary_crossed": true,
+   "wal_seq": 5
+  },
+  {
+   "artifact_type": "wal_event",
+   "attempt_event_seq": 0,
+   "attempt_id": "a-lc-e1-aaaa-0",
+   "attempt_ordinal": 0,
+   "event_sha256": "d0ed2583bcebeea509034d2172d82f98e35b472f241b019c53c2b9b42163423b",
+   "event_type": "prepared",
+   "idempotency_key": "130ec01df7c180cb2862c7af9f8a41f9ff38719b17672ec844f73163fc8e4506",
+   "idempotency_preimage": {
+    "citation_id": "PMC100002:ref-b",
+    "claim_idx": null,
+    "config_hash": "2494d34065c4bdd54ecb98d8192559b53373c561530a7eed08269d237435469e",
+    "domain": "CRE_FINDER_IDEMPOTENCY_V1",
+    "request_bytes_sha256": "3830d6228dfebd7c31d5905454a56f9767e6510579a035a3d5067bcfe218048a",
+    "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "stage": "claim_extract"
+   },
+   "logical_call_id": "lc-e1-aaaa",
+   "prev_attempt_event_sha256": null,
+   "prev_wal_event_sha256": "d2305afb2a70bec3b8b6372d25bbfe3346ed7aaccc0ec2b8799b74e505f15430",
+   "recorded_at": "2026-07-24T12:00:00Z",
+   "request_bytes_sha256": "3830d6228dfebd7c31d5905454a56f9767e6510579a035a3d5067bcfe218048a",
+   "schema_version": "v14",
+   "sent_boundary_crossed": false,
+   "wal_seq": 6
+  },
+  {
+   "artifact_type": "wal_event",
+   "attempt_event_seq": 1,
+   "attempt_id": "a-lc-e1-aaaa-0",
+   "attempt_ordinal": 0,
+   "event_sha256": "80f55f8a8970a22459fcda65486b1968564a7838cbc19cd41f1ce887a73b74f0",
+   "event_type": "sent",
+   "idempotency_key": "130ec01df7c180cb2862c7af9f8a41f9ff38719b17672ec844f73163fc8e4506",
+   "logical_call_id": "lc-e1-aaaa",
+   "prev_attempt_event_sha256": "d0ed2583bcebeea509034d2172d82f98e35b472f241b019c53c2b9b42163423b",
+   "prev_wal_event_sha256": "d0ed2583bcebeea509034d2172d82f98e35b472f241b019c53c2b9b42163423b",
+   "recorded_at": "2026-07-24T12:00:00Z",
+   "request_bytes_sha256": "3830d6228dfebd7c31d5905454a56f9767e6510579a035a3d5067bcfe218048a",
+   "schema_version": "v14",
+   "sent_boundary_crossed": true,
+   "wal_seq": 7
+  },
+  {
+   "artifact_type": "wal_event",
+   "attempt_event_seq": 2,
+   "attempt_id": "a-lc-e1-aaaa-0",
+   "attempt_ordinal": 0,
+   "event_sha256": "9999a653b3547146d863f87dcb6f0e6835402c8eda9d5ef969c947c77f355744",
+   "event_type": "response_persisted",
+   "finish_reason": "end_turn",
+   "http_status": 200,
+   "idempotency_key": "130ec01df7c180cb2862c7af9f8a41f9ff38719b17672ec844f73163fc8e4506",
+   "logical_call_id": "lc-e1-aaaa",
+   "prev_attempt_event_sha256": "80f55f8a8970a22459fcda65486b1968564a7838cbc19cd41f1ce887a73b74f0",
+   "prev_wal_event_sha256": "80f55f8a8970a22459fcda65486b1968564a7838cbc19cd41f1ce887a73b74f0",
+   "provider_model_id": "claude-opus-5",
+   "recorded_at": "2026-07-24T12:00:00Z",
+   "request_bytes_sha256": "3830d6228dfebd7c31d5905454a56f9767e6510579a035a3d5067bcfe218048a",
+   "response_body_ref": "cas/8cfbef15fab452982e335735f29005f8ea2bb320bb4edb71c6976d8a9dd14ae4",
+   "response_body_sha256": "8cfbef15fab452982e335735f29005f8ea2bb320bb4edb71c6976d8a9dd14ae4",
+   "response_headers_allowlisted": {
+    "request-id": "req-aaaa-1"
+   },
+   "response_id": "resp-e1",
+   "schema_version": "v14",
+   "sent_boundary_crossed": true,
+   "wal_seq": 8
+  },
+  {
+   "artifact_type": "wal_event",
+   "attempt_event_seq": 0,
+   "attempt_id": "a-lc-c1-0-aaaa-0",
+   "attempt_ordinal": 0,
+   "event_sha256": "821d839d538130465b47e2dd46ba2d9adf91706b80f314f6f47001fdfd028e24",
+   "event_type": "prepared",
+   "idempotency_key": "efa30b4a1394328263a07f4f669ffa6029e140a39216119ecca184158b4efa1d",
+   "idempotency_preimage": {
+    "citation_id": "PMC100002:ref-b",
+    "claim_idx": 0,
+    "config_hash": "2494d34065c4bdd54ecb98d8192559b53373c561530a7eed08269d237435469e",
+    "domain": "CRE_FINDER_IDEMPOTENCY_V1",
+    "request_bytes_sha256": "054e115c0390b87f27c4c756608ca94ba2795b04c83c0b7678b83f4648a98b48",
+    "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "stage": "coverage"
+   },
+   "logical_call_id": "lc-c1-0-aaaa",
+   "prev_attempt_event_sha256": null,
+   "prev_wal_event_sha256": "9999a653b3547146d863f87dcb6f0e6835402c8eda9d5ef969c947c77f355744",
+   "recorded_at": "2026-07-24T12:00:00Z",
+   "request_bytes_sha256": "054e115c0390b87f27c4c756608ca94ba2795b04c83c0b7678b83f4648a98b48",
+   "schema_version": "v14",
+   "sent_boundary_crossed": false,
+   "wal_seq": 9
+  },
+  {
+   "artifact_type": "wal_event",
+   "attempt_event_seq": 1,
+   "attempt_id": "a-lc-c1-0-aaaa-0",
+   "attempt_ordinal": 0,
+   "event_sha256": "f010c1100d90793c27a1772bb02843fd74ba2b312afaad24dc12aaa10299f89c",
+   "event_type": "sent",
+   "idempotency_key": "efa30b4a1394328263a07f4f669ffa6029e140a39216119ecca184158b4efa1d",
+   "logical_call_id": "lc-c1-0-aaaa",
+   "prev_attempt_event_sha256": "821d839d538130465b47e2dd46ba2d9adf91706b80f314f6f47001fdfd028e24",
+   "prev_wal_event_sha256": "821d839d538130465b47e2dd46ba2d9adf91706b80f314f6f47001fdfd028e24",
+   "recorded_at": "2026-07-24T12:00:00Z",
+   "request_bytes_sha256": "054e115c0390b87f27c4c756608ca94ba2795b04c83c0b7678b83f4648a98b48",
+   "schema_version": "v14",
+   "sent_boundary_crossed": true,
+   "wal_seq": 10
+  },
+  {
+   "artifact_type": "wal_event",
+   "attempt_event_seq": 2,
+   "attempt_id": "a-lc-c1-0-aaaa-0",
+   "attempt_ordinal": 0,
+   "event_sha256": "d85f0d7cc2ccd6f8b28a5619590fe66ab506201d00f55509f909f76f51cb7d3b",
+   "event_type": "response_persisted",
+   "finish_reason": "end_turn",
+   "http_status": 200,
+   "idempotency_key": "efa30b4a1394328263a07f4f669ffa6029e140a39216119ecca184158b4efa1d",
+   "logical_call_id": "lc-c1-0-aaaa",
+   "prev_attempt_event_sha256": "f010c1100d90793c27a1772bb02843fd74ba2b312afaad24dc12aaa10299f89c",
+   "prev_wal_event_sha256": "f010c1100d90793c27a1772bb02843fd74ba2b312afaad24dc12aaa10299f89c",
+   "provider_model_id": "claude-opus-5",
+   "recorded_at": "2026-07-24T12:00:00Z",
+   "request_bytes_sha256": "054e115c0390b87f27c4c756608ca94ba2795b04c83c0b7678b83f4648a98b48",
+   "response_body_ref": "cas/3f85befe8b89e408e5e165b98397d10fcd734b63af2f937cfb88e26b4ec971b2",
+   "response_body_sha256": "3f85befe8b89e408e5e165b98397d10fcd734b63af2f937cfb88e26b4ec971b2",
+   "response_headers_allowlisted": {
+    "request-id": "req-aaaa-1"
+   },
+   "response_id": "resp-c1",
+   "schema_version": "v14",
+   "sent_boundary_crossed": true,
+   "wal_seq": 11
+  }
+ ]
+}
