@@ -687,6 +687,32 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
         m.same_work_reason = "preprint_published_version"
         m.identity_signals = ("preprint_source", "first_author")
         return VERDICT_SAME_WORK_VARIANT, m
+    # PHYSICAL-LOCATION same-work quarantine (F2-C; depends on F2-A). Two distinct
+    # articles cannot occupy the same page range of the same volume of the same
+    # journal. When the CANONICALIZED pages agree AND volume agrees AND journal
+    # agrees, the claimed identifier points at the correct physical article, so a
+    # TITLE divergence is a description defect, not a wrong paper.
+    #
+    # The CONJUNCTION is load-bearing: bare page agreement is weak (ranges like
+    # 1-12 are ubiquitous), and it correctly does NOT fire on PMC8015328:ref011 (a
+    # TRUE_F2 where the DOI agrees but volume and pages do not). first_author_match
+    # is deliberately NOT part of the conjunction -- written_authors is corrupted by
+    # the same defect F2-E fixes.
+    #
+    # Two AFFIRMATIVE distinct-work signals defer to WRONG_PAPER, because a shared
+    # page range then reads as a mis-assembled / coincident citation, not one work:
+    #   * doi_match is False -- both DOIs present and DISAGREE (seed-29 37192094:
+    #     two real BMJ Leader papers, different DOIs, coincident vol 7 pp 266-272);
+    #   * a confident field disagreement (author/year) -- the run-on-DOI adversarial
+    #     rows (shared DOI, unrelated title, different author) stay HIGH.
+    # A physical-location match with neither signal is a description defect on the
+    # same work -> quarantine (audited), never silently cleared.
+    if (f.pages_match is True and f.volume_match is True
+            and f.journal_match is True
+            and f.doi_match is not False and not disagree):
+        m.same_work_reason = "physical_location_same_work"
+        m.identity_signals = ("pages", "volume", "journal")
+        return VERDICT_SAME_WORK_VARIANT, m
     # A confident disagreement on a NON-identical title is wrong-paper evidence
     # and MUST stay in the HIGH band even when confirmatory field boosts lifted
     # the composite over ``accept`` -- the Defect-A author fix can do exactly that

@@ -132,3 +132,90 @@ def test_f2b_cshl_journal_resolved_not_elevated():
     v, m = flag_verdict(c, r)
     assert m.resolved_preprint is False
     assert v == VERDICT_MATCH
+
+
+# ======================================================================
+# F2-C -- physical-location same-work rule (pages + volume + journal)
+# ======================================================================
+def test_f2c_same_pages_volume_journal_quarantines_title_divergence():
+    # Same physical location (canonicalized pages, volume, journal all agree), the
+    # title diverges, and NO field confidently disagrees (author unparsed) ->
+    # description defect on the same work -> SAME_WORK_VARIANT (not wrong paper).
+    c = ClaimedRef(title="Regulation of the cell cycle in fission yeast",
+                   authors=[], year=2003, journal="Nature",
+                   volume="425", pages="859-864")
+    r = RetrievedRecord(resolved=True,
+                        title="Cyclin-dependent kinases and the fission yeast cycle",
+                        authors=["Nurse"], year=2003, journal="Nature",
+                        volume="425", pages="859-64")   # elided end page (F2-A)
+    v, m = flag_verdict(c, r)
+    assert m.fields.pages_match is True and m.fields.volume_match is True
+    assert m.fields.journal_match is True
+    assert m.same_work_reason == "physical_location_same_work"
+    assert v == VERDICT_SAME_WORK_VARIANT
+
+
+def test_f2c_author_disagreement_defers_to_wrong_paper():
+    # A confident author disagreement is affirmative distinct-work evidence: the
+    # shared page range then reads as a mis-assembled/coincident citation (the
+    # run-on-DOI adversarial signature), so F2-C defers to WRONG_PAPER.
+    c = ClaimedRef(title="A study of X", authors=["Alpha"], year=2010,
+                   journal="Cell", volume="140", pages="123-130")
+    r = RetrievedRecord(resolved=True, title="A different study of Y",
+                        authors=["Bravo"], year=2010, journal="Cell",
+                        volume="140", pages="123-30")
+    v, m = flag_verdict(c, r)
+    assert m.fields.author_match is False
+    assert m.same_work_reason != "physical_location_same_work"
+    assert v == VERDICT_WRONG_PAPER
+
+
+def test_f2c_disagreeing_dois_defer_to_wrong_paper():
+    # 37192094-shape: two real papers, different DOIs, coincident vol/pages/journal.
+    # Disagreeing DOIs are affirmative distinct-work evidence -> stays WRONG_PAPER.
+    c = ClaimedRef(title="Experiences of organisational practices in leadership",
+                   authors=["Mousa"], year=2023, journal="BMJ Leader",
+                   claimed_doi="10.1136/leader-2022-000653",
+                   volume="7", pages="266-272")
+    r = RetrievedRecord(resolved=True,
+                        title="Clinical academics' experiences during COVID-19",
+                        authors=["Trusson"], year=2023, journal="BMJ Lead",
+                        doi="10.1136/leader-2020-000414", volume="7",
+                        pages="266-272")
+    v, m = flag_verdict(c, r)
+    assert m.fields.doi_match is False
+    assert m.same_work_reason != "physical_location_same_work"
+    assert v == VERDICT_WRONG_PAPER
+
+
+def test_f2c_pmc8015328_ref011_survives_as_wrong_paper():
+    # Confirmed TRUE_F2 (ZD): claimed PMID 31169370, Paurodontella persica vs
+    # compostiocola. doi_match=True and journal_match=True, but volume and pages
+    # do NOT agree -> physical-location rule must NOT fire; stays HIGH.
+    c = ClaimedRef(title="Description of Paurodontella persica sp. n. from Iran",
+                   authors=["Panahandeh"], year=2019, journal="Zootaxa",
+                   claimed_doi="10.11646/zootaxa.4658.1.1",
+                   volume="4658", pages="150-160")
+    r = RetrievedRecord(resolved=True,
+                        title="Description of Paurodontella compostiocola sp. n.",
+                        authors=["Panahandeh"], year=2019, journal="Zootaxa",
+                        doi="10.11646/zootaxa.4658.1.1",
+                        volume="4632", pages="45-52")
+    v, m = flag_verdict(c, r)
+    assert m.fields.doi_match is True and m.fields.journal_match is True
+    assert m.fields.volume_match is False and m.fields.pages_match is False
+    assert m.same_work_reason != "physical_location_same_work"
+    assert v == VERDICT_WRONG_PAPER
+
+
+def test_f2c_does_not_fire_on_pages_alone():
+    # Pages agree but volume disagrees -> the conjunction must not fire.
+    c = ClaimedRef(title="A study of X", authors=["Alpha"], year=2010,
+                   journal="Cell", volume="140", pages="123-130")
+    r = RetrievedRecord(resolved=True, title="A different study of Y",
+                        authors=["Bravo"], year=2011, journal="Cell",
+                        volume="150", pages="123-30")
+    v, m = flag_verdict(c, r)
+    assert m.fields.pages_match is True and m.fields.volume_match is False
+    assert m.same_work_reason != "physical_location_same_work"
+    assert v == VERDICT_WRONG_PAPER
