@@ -74,6 +74,10 @@ class MatchResult:
     override_fired: bool = False       # strong-corroboration override floored the score
     same_work_reason: str = ""          # auditable identity rule used by flag_verdict
     identity_signals: tuple[str, ...] = ()
+    # F2-B (second defect): the claimed PMID resolved to a PREPRINT record while
+    # the citation itself reads as an ordinary article. Evidence TOWARD a fault,
+    # surfaced under its own reason (never folded into the same-work quarantine).
+    resolved_preprint: bool = False
 
 
 @dataclass
@@ -513,19 +517,60 @@ _PREPRINT_VENUE_TOKENS = ("arxiv", "biorxiv", "biorvix", "medrxiv", "chemrxiv",
                           "ssrn", "research square", "researchsquare",
                           "preprints.org", "preprint", "osf",
                           "psyarxiv", "techrxiv", "authorea")
-_PREPRINT_DOI_PREFIXES = ("10.1101/", "10.48550/", "10.21203/",
+# Preprint-ONLY registrants: a bare prefix is decisive.
+#   10.48550 arXiv, 10.21203 Research Square, 10.26434 ChemRxiv,
+#   10.31234 PsyArXiv, 10.31219 OSF.
+_PREPRINT_DOI_PREFIXES = ("10.48550/", "10.21203/",
                           "10.26434/", "10.31234/", "10.31219/")
+# F2-B: 10.1101 is Cold Spring Harbor Laboratory Press, which registers
+# bioRxiv/medRxiv AND real CSHL journals (Genome Res, Genes Dev, Learn Mem, CSH
+# Perspect Biol/Med, CSH Protoc, CSH Symp). Only the date-stamped DOI form
+# (10.1101/2020.02.08.939660) is a preprint; 10.1101/gr.209601.116 and
+# 10.1101/gad.1255404 are journal articles. A pattern, not a bare prefix, so the
+# 79 seed-37 CSHL-journal rows stop reading as a preprint signal.
+_PREPRINT_DOI_DATESTAMP_RE = re.compile(r"^10\.1101/\d{4}\.\d{2}\.\d{2}\.")
+
+
+def _is_preprint_doi(doi: str) -> bool:
+    """True iff ``doi`` is a preprint DOI: a preprint-only registrant prefix, or
+    the date-stamped 10.1101 form (a bare 10.1101 prefix is NOT enough -- it is
+    shared with CSHL journals)."""
+    doi = (doi or "").lower()
+    if not doi:
+        return False
+    if any(doi.startswith(p) for p in _PREPRINT_DOI_PREFIXES):
+        return True
+    return bool(_PREPRINT_DOI_DATESTAMP_RE.match(doi))
 
 
 def is_preprint_source(claimed) -> bool:
     """True iff the CLAIMED citation names a preprint venue (journal string)
-    or carries a preprint-registrant DOI prefix. Signal is on the claimed
-    (citing-side) metadata only -- the resolved record is the published work."""
+    or carries a preprint-registrant DOI. Signal is on the claimed (citing-side)
+    metadata only -- the resolved record is the published work."""
     j = (claimed.journal or "").lower()
     if any(tok in j for tok in _PREPRINT_VENUE_TOKENS):
         return True
-    doi = (claimed.claimed_doi or "").lower()
-    return any(doi.startswith(p) for p in _PREPRINT_DOI_PREFIXES)
+    return _is_preprint_doi(claimed.claimed_doi)
+
+
+def is_preprint_resolved(resolved) -> bool:
+    """True iff the RESOLVED record is itself a preprint -- a preprint-server
+    journal, a date-stamped/preprint-registrant DOI, or a MEDLINE 'Preprint'
+    publication type (F2-B, second defect).
+
+    This is the INVERSE of :func:`is_preprint_source`. A citation that reads as
+    an ordinary journal article whose claimed PMID resolves to a preprint is a
+    genuine F2 subtype and was previously undetectable (the detector only ever
+    inspected the claimed side). A preprint on the RESOLVED side is evidence
+    TOWARD a fault -- the opposite direction from a preprint on the claimed side
+    -- so the caller surfaces it under its own reason, never folding it into the
+    same-work quarantine."""
+    j = (resolved.journal or "").lower()
+    if any(tok in j for tok in _PREPRINT_VENUE_TOKENS):
+        return True
+    if _is_preprint_doi(resolved.doi):
+        return True
+    return "preprint" in {p.lower() for p in (resolved.publication_types or [])}
 
 
 def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
@@ -587,6 +632,21 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # decide.
     if identity.blocked_by in ("corporate_author_conflict",
                                "series_ordinal_conflict"):
+        return VERDICT_WRONG_PAPER, m
+    # F2-B (second defect): the citation reads as an ordinary journal article but
+    # its claimed PMID resolved to a PREPRINT record. Evidence TOWARD a fault --
+    # surfaced under its own reason (``resolved_preprint_target``), NOT folded
+    # into the same-work quarantine. A same-work PROOF pre-empts it (a preprint
+    # that is provably the same work -- shared DOI / overwhelming anchor -- is a
+    # version, not a wrong paper); otherwise the row is routed to the HIGH review
+    # band so this previously-undetectable subtype is seen (audited, never
+    # auto-labelled F2). Checked BEFORE the clean-MATCH early return so a
+    # confirmatory boost cannot silently clear a preprint-resolved row.
+    m.resolved_preprint = (is_preprint_resolved(cand)
+                           and not is_preprint_source(claimed))
+    if m.resolved_preprint and not identity.same_work:
+        m.same_work_reason = "resolved_preprint_target"
+        m.identity_signals = ("resolved_preprint",)
         return VERDICT_WRONG_PAPER, m
     # Clean accepted pairs are ordinary matches, not review variants.  For a
     # pair that would otherwise be reviewed, prefer a specific identity proof

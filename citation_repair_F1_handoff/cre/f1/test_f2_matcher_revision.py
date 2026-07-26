@@ -11,7 +11,9 @@ from __future__ import annotations
 import pytest
 
 from cre.f1.biblio_match import (_canonical_pages, field_agreement,
-                                 is_preprint_source)
+                                 flag_verdict, is_preprint_source,
+                                 is_preprint_resolved, VERDICT_MATCH,
+                                 VERDICT_SAME_WORK_VARIANT, VERDICT_WRONG_PAPER)
 from cre.f1.schema import ClaimedRef, RetrievedRecord
 
 
@@ -73,3 +75,60 @@ def test_f2a_pages_match_stays_tristate_when_absent():
 def test_f2b_claimed_preprint_prefix_discrimination(doi, expected):
     claimed = ClaimedRef(claimed_doi=doi)
     assert is_preprint_source(claimed) is expected
+
+
+# The 79 CSHL-journal rows must stop reading as a preprint on the RESOLVED side
+# too (the date-stamp fix protects both directions).
+@pytest.mark.parametrize("doi,journal,ptypes,expected", [
+    ("10.1101/2020.02.08.939660", "bioRxiv", [], True),
+    ("10.1101/gr.209601.116", "Genome Res", [], False),   # CSHL journal
+    ("10.1101/gad.1255404", "Genes Dev", [], False),      # CSHL journal
+    ("10.1038/s41586-020-2649-2", "Nature", ["Journal Article"], False),
+    ("", "medRxiv preprint", [], True),                   # preprint-server journal
+    ("", "N Engl J Med", ["Preprint"], True),             # MEDLINE Preprint pubtype
+])
+def test_f2b_resolved_preprint_discrimination(doi, journal, ptypes, expected):
+    rec = RetrievedRecord(resolved=True, doi=doi, journal=journal,
+                          publication_types=ptypes)
+    assert is_preprint_resolved(rec) is expected
+
+
+def test_f2b_resolved_preprint_elevates_ordinary_citation_to_high():
+    # Citation reads as an ordinary article (no preprint markers); claimed PMID
+    # resolves to a date-stamped bioRxiv record -> evidence toward a fault, HIGH.
+    c = ClaimedRef(title="A convolutional network approach to variant detection",
+                   authors=["Aguilar"], year=2022, journal="Bioinformatics")
+    r = RetrievedRecord(resolved=True,
+                        title="Deep learning for genomic variant calling in cancer",
+                        authors=["Aguilar"], year=2020, journal="bioRxiv",
+                        doi="10.1101/2020.07.15.204305")
+    v, m = flag_verdict(c, r)
+    assert m.resolved_preprint is True
+    assert m.same_work_reason == "resolved_preprint_target"
+    assert v == VERDICT_WRONG_PAPER
+
+
+def test_f2b_claimed_preprint_not_elevated_by_resolved_side():
+    # Claimed side IS a preprint cite -> the resolved-preprint elevation must not
+    # fire (a preprint->preprint cite is not this subtype).
+    c = ClaimedRef(title="Deep learning for genomic variant calling in cancer",
+                   authors=["Aguilar"], year=2020, journal="bioRxiv")
+    r = RetrievedRecord(resolved=True,
+                        title="Deep learning for genomic variant calling in cancer",
+                        authors=["Aguilar"], year=2020, journal="bioRxiv")
+    v, m = flag_verdict(c, r)
+    assert m.resolved_preprint is False
+
+
+def test_f2b_cshl_journal_resolved_not_elevated():
+    # Resolved to a CSHL journal (non-date-stamped 10.1101) -> NOT a preprint,
+    # must not be elevated by the resolved-side signal.
+    c = ClaimedRef(title="Chromatin architecture in development",
+                   authors=["Lee"], year=2017, journal="Genome Res")
+    r = RetrievedRecord(resolved=True,
+                        title="Chromatin architecture in development",
+                        authors=["Lee"], year=2017, journal="Genome Res",
+                        doi="10.1101/gr.209601.116")
+    v, m = flag_verdict(c, r)
+    assert m.resolved_preprint is False
+    assert v == VERDICT_MATCH
