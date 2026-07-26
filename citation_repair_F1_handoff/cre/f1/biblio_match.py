@@ -373,11 +373,11 @@ def field_agreement(claimed: Claimed, cand: RetrievedRecord) -> FieldAgreement:
         else:
             fa.year_match = False
 
-    # volume / pages (digits only)
+    # volume (digits only) / pages (F2-A: canonicalize elided end pages + dashes)
     cv, rv = _digits(claimed.volume), _digits(cand.volume)
     if cv and rv:
         fa.volume_match = cv == rv
-    cp, rp = _digits(claimed.pages), _digits(cand.pages)
+    cp, rp = _canonical_pages(claimed.pages), _canonical_pages(cand.pages)
     if cp and rp:
         fa.pages_match = cp == rp
 
@@ -389,6 +389,44 @@ def field_agreement(claimed: Claimed, cand: RetrievedRecord) -> FieldAgreement:
 
 def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
+
+
+# F2-A: dash characters PubMed / citing sources use in a page range. Folded to a
+# plain hyphen before the elided-end-page expansion so '117–32' and '117-32'
+# canonicalize identically.
+_PAGE_DASHES = "‐‑‒–—―−"   # ‐ ‑ ‒ – — ― −
+_PAGE_RANGE_RE = re.compile(r"^([a-z]*)(\d+)-(\d+)(.*)$")
+
+
+def _canonical_pages(s: str) -> str:
+    """Canonicalize a page range so an elided end page compares equal to its
+    written-out form (F2-A). PubMed elides the shared leading digits of the end
+    page (``141-4``, ``1083-91``, ``3143-421``) and uses hyphens where citations
+    use en/em dashes (``117–32``, ``925–8.e4``).
+
+    1. Fold every dash in ``_PAGE_DASHES`` to ``-``; strip internal whitespace;
+       lowercase.
+    2. When the value is ``<prefix><start>-<end><suffix>`` and the end-page digit
+       string is SHORTER than the start-page digit string, left-pad the end from
+       the start (``925-8`` -> ``925-928``, ``3143-421`` -> ``3143-3421``).
+    3. A non-range value (``S100``, ``e0224455``, ``CD010442``) matches no range
+       and is returned folded but otherwise unchanged.
+
+    Returns ``""`` for a missing value so the caller keeps ``pages_match``
+    tri-state (``None`` when either side is absent)."""
+    if not s:
+        return ""
+    t = s.strip().lower()
+    for d in _PAGE_DASHES:
+        t = t.replace(d, "-")
+    t = re.sub(r"\s+", "", t)
+    m = _PAGE_RANGE_RE.match(t)
+    if not m:
+        return t
+    prefix, start, end, suffix = m.groups()
+    if len(end) < len(start):
+        end = start[:len(start) - len(end)] + end
+    return f"{prefix}{start}-{end}{suffix}"
 
 
 # =====================================================================
