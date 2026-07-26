@@ -6,7 +6,6 @@ Fine-grained biomedical citation diagnosis and evidence-backed repair.
 
 The Citation Repair Engine is a dual-mode NLP system that (a) diagnoses why a citation fails using an 8-category failure-mode taxonomy (F1–F8), (b) proposes evidence-backed replacement citations grounded in PubMed/Crossref retrieval, and (c) generates citations from scratch when a claim is provided without one.
 
-**Primary venue target:** *Bioinformatics* (Oxford) or *JAMIA Open*  
 **Dataset:** CitationRepair-1000 (releasing on HuggingFace)  
 **Preregistration:** See `PREREGISTRATION.md` — committed before annotation began.
 
