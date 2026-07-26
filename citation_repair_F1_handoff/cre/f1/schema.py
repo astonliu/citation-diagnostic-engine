@@ -251,6 +251,10 @@ class ClaimedRef:
     # Empty remains the safe "can't judge" value for malformed citations.
     volume: str = ""
     pages: str = ""
+    # F2-E: leading bibliographic furniture (author run / chapter label / article-
+    # type label) excised from ``title`` at parse time, kept verbatim so every edit
+    # to the scored title is reviewable. Empty when no furniture was removed.
+    written_title_excised: str = ""
 
 
 @dataclass

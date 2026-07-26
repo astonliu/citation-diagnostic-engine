@@ -20,6 +20,7 @@ except ImportError:                               # pragma: no cover
     _PARSER = lambda p: etree.parse(p)            # noqa: E731
 
 from .schema import Reference, ClaimedRef
+from .titlefurniture import excise_leading_furniture
 
 
 def _localname(tag) -> str:
@@ -277,8 +278,10 @@ def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:
         cit = _citation_node(ref)
         if cit is None:
             continue
+        raw_title = _text(_first(cit, "article-title", "part-title", "chapter-title"))
+        clean_title, excised = excise_leading_furniture(raw_title)
         claimed = ClaimedRef(
-            title=_text(_first(cit, "article-title","part-title", "chapter-title")),
+            title=clean_title,
             authors=_authors_from(cit),
             year=_year_from(cit),
             journal=_text(_first(cit, "source")),
@@ -287,6 +290,7 @@ def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:
             raw=_text(cit),
             volume=_direct_text(cit, "volume"),
             pages=_pages_from(cit),
+            written_title_excised=excised,
         )
         ref_id = ref.get("id") or f"ref{i}"
         reference = Reference(

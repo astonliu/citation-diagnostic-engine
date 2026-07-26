@@ -215,6 +215,25 @@ def classify_unscoreable(claimed: ClaimedRef,
                 "claimed title contains only a journal masthead plus an author "
                 "surname, not an article title.")
 
+    # A bare single-word title (F2-E): a lone container / field / genre word in the
+    # title slot ("Anaesthesiology", "Commentary") carries no searchable handle, so
+    # a wrong-paper fault is not decidable offline -- route to unscoreable
+    # (not-yet-judgeable), never non-F2. RECALL-SAFE by shape: exactly one token,
+    # >= 8 letters, and NO digit. That keeps every real multi-word title scoreable
+    # (even the short 3-word 31665581 guard "Disseminated varicella infection") AND
+    # keeps the distinctive short/alphanumeric tokens the numeric gate protects
+    # ("IL-6" -> "il6", "p53", "tp53", "egfr"). The spec's broader "<4 content
+    # words" criterion is applied ONLY as an excision guard in titlefurniture, never
+    # as a standalone gate, because a blanket <4-word gate would drop that 3-word
+    # guard title.
+    if (nct and " " not in nct and len(nct) >= 8
+            and not any(ch.isdigit() for ch in nct)
+            and _DISTINCTIVE_ALPHA_RE.search(nct)):
+        return ("single_word_title",
+                "claimed title is a single long word (a bare container / field / "
+                "genre name), not a searchable article title; not judgeable "
+                "offline.")
+
     # a bare number (year / volume / issue / locator) parked in the title slot
     if _numeric_or_year_only_title(ct, nct):
         return ("numeric_or_year_only_title",

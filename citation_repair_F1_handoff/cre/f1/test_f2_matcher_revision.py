@@ -306,3 +306,83 @@ def test_f2d_disagreeing_dois_defer():
     v, m = flag_verdict(c, r)
     assert m.fields.doi_match is False
     assert m.same_work_reason != "strict_prefix_title"
+
+
+# ======================================================================
+# F2-E -- leading title furniture excision
+# ======================================================================
+from cre.f1.titlefurniture import excise_leading_furniture  # noqa: E402
+from cre.f1.parser import parse_pmc_xml  # noqa: E402
+from cre.f1.biblio_match import title_sim  # noqa: E402
+from cre.f1.eval_report import build_f2_record  # noqa: E402
+
+# (written_title, resolved_title, expected title_sim after excision) -- the spec's
+# acceptance table, literal strings.
+_F2E_ROWS = [
+    ("Chapter Nine - Sculpting the Transcriptome During the Oocyte-to-Embryo "
+     "Transition in Mouse",
+     "Sculpting the Transcriptome During the Oocyte-to-Embryo Transition in Mouse.",
+     1.0),
+    ("Chapter Five - In Situ Metabolomics in Cancer by Mass Spectrometry Imaging",
+     "In Situ Metabolomics in Cancer by Mass Spectrometry Imaging.", 1.0),
+    ("Gopichand; Singh, R.D.; Ahuja, P.S. Biology and chemistry of Ginkgo biloba.",
+     "Biology and chemistry of Ginkgo biloba.", 1.0),
+]
+
+
+@pytest.mark.parametrize("wt,rt,expected", _F2E_ROWS)
+def test_f2e_excision_recovers_title_sim(wt, rt, expected):
+    clean, excised = excise_leading_furniture(wt)
+    assert excised != ""                       # furniture was found
+    assert round(title_sim(clean, rt), 4) == expected
+
+
+def test_f2e_no_trailing_excision():
+    # A title ending in a capitalized proper noun must NOT be excised (front only).
+    wt = "Effect of the antimicrobial agent in Response to Allicin"
+    clean, excised = excise_leading_furniture(wt)
+    assert excised == ""
+    assert clean == wt
+
+
+def test_f2e_stub_guard_leaves_title_untouched():
+    # Excising would leave fewer than 4 content words -> leave untouched.
+    wt = "Chapter Nine - Cancer"
+    clean, excised = excise_leading_furniture(wt)
+    assert excised == "" and clean == wt
+
+
+def test_f2e_single_word_title_is_unscoreable():
+    from cre.f1.biblio_match import VERDICT_UNSCOREABLE
+    c = ClaimedRef(title="Anaesthesiology", authors=["X"], year=2010)
+    r = RetrievedRecord(resolved=True, title="Regional anaesthesia techniques",
+                        authors=["Y"], year=2010)
+    rec = build_f2_record("111", "PMCx", c, r)
+    assert rec["verdict"] == VERDICT_UNSCOREABLE
+    assert rec["unscoreable_reason"] == "single_word_title"
+
+
+def test_f2e_three_word_real_title_stays_scoreable():
+    # The 31665581 guard shape: a real 3-word title must NOT be gated unscoreable.
+    from cre.f1.biblio_match import VERDICT_UNSCOREABLE
+    c = ClaimedRef(title="Disseminated varicella infection", authors=["Pannu"],
+                   year=2019, journal="J Foo")
+    r = RetrievedRecord(resolved=True, title="Purple Urine after Catheterization",
+                        authors=["Sabanis"], year=2019, journal="J Foo")
+    rec = build_f2_record("31665581", "PMCx", c, r)
+    assert rec["verdict"] != VERDICT_UNSCOREABLE
+
+
+def test_f2e_parser_populates_written_title_excised(tmp_path):
+    doc = (b'<article><body/><back><ref-list><ref id="r1"><mixed-citation>'
+           b'<article-title>Gopichand; Singh, R.D.; Ahuja, P.S. Biology and '
+           b'chemistry of Ginkgo biloba.</article-title>'
+           b'<source>Nat Prod</source><year>2011</year>'
+           b'<pub-id pub-id-type="pmid">10214977</pub-id>'
+           b'</mixed-citation></ref></ref-list></back></article>')
+    p = tmp_path / "doc.xml"
+    p.write_bytes(doc)
+    refs = parse_pmc_xml(str(p))
+    assert refs
+    assert refs[0].claimed.title == "Biology and chemistry of Ginkgo biloba."
+    assert refs[0].claimed.written_title_excised == "Gopichand; Singh, R.D.; Ahuja, P.S."
