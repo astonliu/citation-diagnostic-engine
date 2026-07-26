@@ -406,16 +406,26 @@ kinds and are never equated.
 
 ## Inputs ZD supplies before candidate-configuration creation (infra is built now)
 
-1. Model snapshot string(s). 2. Selection rule + min size + coverage targets + frozen
-selection artifact. 3. Codebook content (content-hashed). 4. Coverage evidence
-retrieval/snapshot policy + snapshot storage/access/release policy. 5. Freeze criterion.
-6. **The two prohibited F3 cases' `citing_pmcid`** (Seeman/DNA-nanotech, idelalisib — known by
-PMID in memory; the citing PMCIDs must be supplied, not guessed; `citation_id`/
-`occurrence_identity` are optional provenance, per the v13 schema fix). 7. **A dependency lockfile with per-package hashes** — none exists in
-the target branch (Codex v5 #5); create one (e.g. `uv.lock` / hash-pinned `requirements`) at
-repo root and record its SHA-256 in `runtime_profile.dependency_lock_sha256`. 8. Local
-interpreter command `../.venv_cre/bin/python` (Codex-verified; recorded in BATCH, **not**
-pinned in CONFIG). Colab records its own environment identity + lock hash.
+The canonical SIX inputs — this list is the numbering authority for every
+"ZD input #N" reference in code, proposals, and reports (renumbered
+2026-07-25; an earlier revision interleaved two extra items and shifted the
+numbers):
+
+1. Model snapshot string(s).
+2. Codebook content (content-hashed).
+3. Coverage evidence retrieval/snapshot policy + snapshot storage/access/release policy.
+4. Freeze criterion.
+5. **The two prohibited F3 cases' `citing_pmcid`** (Seeman/DNA-nanotech, idelalisib — known by
+   PMID in memory; the citing PMCIDs must be supplied, not guessed; `citation_id`/
+   `occurrence_identity` are optional provenance, per the v13 schema fix).
+6. **A dependency lockfile with per-package hashes** — none exists in the target branch
+   (Codex v5 #5); create one (e.g. `uv.lock` / hash-pinned `requirements`) at repo root and
+   record its SHA-256 in `runtime_profile.dependency_lock_sha256`.
+
+Supplied alongside, not numbered inputs: the **selection rule + min size + coverage targets +
+frozen selection artifact** (the selection-rule input — ZD decides residual #3 with it), and
+the local interpreter command `../.venv_cre/bin/python` (Codex-verified; recorded in BATCH,
+**not** pinned in CONFIG). Colab records its own environment identity + lock hash.
 
 ---
 
@@ -704,6 +714,53 @@ The rule contract:
 | SV-110 | RUNTIME GATE, not a post-hoc artifact predicate (no artifact carries a pre-import transcript to audit retroactively): the bootstrap itself enforces fail-closed — fresh interpreter; no trust-boundary module in `sys.modules` before byte verification; module manifest role coverage exhaustive; module `repo_path` normalized repo-relative and inside the pinned tree. Evidence = the bootstrap's subprocess test fixtures (violations must abort before import) + `observed_runtime.fresh_interpreter` recorded in BATCH | E_BOOTSTRAP |
 
 (SV-080 label/adjudication rules **removed** — the annotation subsystem is out of scope, §Out of scope.)
+
+### 12b. Review-round residuals — canonical numbered list (numbering authority)
+
+The 2026-07-24 unrestricted round's items, as resolved by the validator build.
+The round's prose said "ten valid defects"; this list of ELEVEN is canonical
+(#8 is a build-scope join and #11 a prose correction, not schema/validator
+defects). Every "residual #N" reference in code, fixtures, proposals, and the
+conformance report resolves against THIS list. Status as built:
+
+1. SV-002 additionally asserts the frozen acceptance constants (claim
+   `25f7de62…`, coverage `1a24d13b…`, `source_blob_oid` `sha1:fa01126e…`) —
+   internal consistency alone is not a freeze. **DONE** (validator constants +
+   dedicated negative fixture).
+2. New rule SV-005: every `observed_runtime` field with a CONFIG
+   `runtime_profile` counterpart equals it; `matches_config_runtime_profile`
+   recomputed, never trusted. **DONE.**
+3. SV-033 `coverage_targets` need per-item strata to be evaluable — schema
+   delta applied as a **PROPOSAL** (optional `stratum`, enum-of-target-keys
+   enforced semantically); fail-closed when unevaluable; ZD decides with the
+   selection-rule input (alternative: demote `coverage_targets` to
+   informational). **PENDING ZD.**
+4. SV-034 binds FULL rows (per-`citation_id` `source_xml_sha256` equality,
+   fail-closed on conflicting snapshots) and binds
+   `resolved_work_id`/`resolution_provenance_sha256`/`evidence_snapshot_sha256`
+   forward into the review record. **DONE.**
+5. Stage configs carry required-nullable `response_schema_sha256` (schema
+   delta); SV-024 validates shape presence only while null and says so; ZD
+   supplies/approves the response schemas with input #1. **DELTA APPLIED,
+   interim; PENDING ZD.**
+6. `TRUSTED_RESPONSE_HEADERS`, `CAS_ROOT`, `CAS_REF_GRAMMAR` become bootstrap
+   trusted constants alongside repo identity / canonical ref / endpoint
+   hosts. **DONE.**
+7. New rule SV-072: `stimulus_sha256` recomputed from the stimulus object;
+   `stimulus_object.codebook_sha256 == CONFIG.codebook_sha256`. **DONE.**
+8. `cre/f1/freeze/bootstrap.py` (stdlib-only launcher, parent
+   byte-verification, fresh child) joins this build; SV-110's evidence = its
+   subprocess fixtures. **DONE.**
+9. SV-042 rescoped to ancestry continuity between successive observed
+   canonical-ref states; force-push/deletion protection is hosting policy —
+   an operational setup step, documented (PROPOSALS_PENDING_ZD.md), not a
+   validator predicate. **DONE.**
+10. Schema delta: `config.source.source_commit_oid` → `git_commit_oid` type;
+    semantic check (SV-041) that `source_tree_oid` IS `source_commit_oid`'s
+    tree. **DONE.**
+11. Vocabulary prose (one line): evidence snapshots and the codebook are
+    hash-governed opaque byte artifacts — their schemas are deliberately NOT
+    in the schema file. **APPLIED.**
 
 ---
 

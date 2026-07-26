@@ -1,30 +1,13 @@
 #!/usr/bin/env python3
-"""Conformance report generator for F3-F7_FINDER_FREEZE_SCHEMAS.json (format v14).
-
-Extends the seed script _conf_v11.py (supplied with the normative inputs).
+"""Conformance check for F3-F7_FINDER_FREEZE_SCHEMAS.json (format v14).
 Machine-verifies: duplicate keys (byte level), meta-schema, dangling $refs,
 one positive instance per root artifact type, negative/discriminator cases.
-
-Updated for the review-round residual schema deltas applied in the first build
-commit (from that commit the repo copy is the pin authority):
-  #3  selection items: optional `stratum` (PROPOSED, pending ZD approval)
-  #5  stage configs: required-nullable `response_schema_sha256`
-  #10 config.source.source_commit_oid -> git_commit_oid type
-
-Extended with the semantic_validator_v1 build: a per-rule section executing
-the fixture suite (cre/f1/test_semantic_validator_v1.py) and reporting, for
-every §12 SV rule, the positive and targeted-negative fixture outcomes.
-
-Output: F3-F7_SCHEMA_CONFORMANCE_REPORT.txt (no trailing newline), committed.
-Run: cd citation_repair_F1_handoff &&
-     PYTHONPATH=. ../.venv_cre/bin/python cre/f1/freeze/gen_conformance.py
 """
-import json, re, sys, hashlib, datetime, pathlib
+import json, re, sys, hashlib, datetime
 from jsonschema import Draft202012Validator
 
-BASE = pathlib.Path(__file__).resolve().parent
 SCHEMA_FILE = "F3-F7_FINDER_FREEZE_SCHEMAS.json"
-raw = (BASE / SCHEMA_FILE).read_bytes()
+raw = open(SCHEMA_FILE, "rb").read()
 text = raw.decode("utf-8")
 
 # --- duplicate-key check (byte level, before normal parse) ---
@@ -92,8 +75,7 @@ def params():
 def stage(extract=True):
     s = {"model_snapshot": "claude-opus-5", "response_parser_version": "v1",
          "tool_schema": None, "tool_schema_sha256": None, "params": params(),
-         "system_message": {"state": "omitted"}, "endpoint": ep(), "retry": rp(),
-         "response_schema_sha256": None}
+         "system_message": {"state": "omitted"}, "endpoint": ep(), "retry": rp()}
     if extract:
         s["evidence_scope"] = "citing_sentence_only"
     else:
@@ -188,7 +170,7 @@ positives = {
                "occurrence_identity": H, "source_xml_sha256": H, "ref_content_utf8": "ref",
                "extraction_contract_version": "v1", "source_occurrence_fingerprint": H,
                "corpus_source_id": "pmc_oa", "retrieval_record_sha256": H,
-               "not_detector_sourced_attestation": True, "stratum": "F6"}],
+               "not_detector_sourced_attestation": True}],
     "recorded_by": "ZD"},
   "candidate_manifest": {"artifact_type": "candidate_manifest", "schema_version": "v14",
     "config_hash": H, "selection_artifact_sha256": H,
@@ -353,14 +335,6 @@ negatives["slot encoding utf-16"] = not valid(enc)
 pv = copy.deepcopy(positives["config"])
 pv["prompt_packages"]["claim_extract"]["package_version"] = -1
 negatives["config package_version -1"] = not valid(pv)
-# Residual #5 delta: response_schema_sha256 is required (nullable) per stage
-nrs = copy.deepcopy(positives["config"])
-del nrs["stages"]["claim_extract"]["response_schema_sha256"]
-negatives["config stage missing response_schema_sha256"] = not valid(nrs)
-# Residual #3 delta: stratum, when present, must be a nonempty string
-st = copy.deepcopy(positives["selection_artifact"])
-st["items"][0]["stratum"] = ""
-negatives["selection item empty stratum"] = not valid(st)
 # dead-def audit: every $defs member must be referenced (root oneOf, whole-def $ref, or sub-pointer $ref)
 root_refs = {r["$ref"].split("/")[-1] for r in schema["oneOf"]}
 unused = [d for d in schema["$defs"]
@@ -377,25 +351,8 @@ lines.append(f"generated_utc: {now}")
 import importlib.metadata
 lines.append(f"validator: python-jsonschema {importlib.metadata.version('jsonschema')} (Draft202012Validator)")
 lines.append(f"interpreter: {sys.version.split()[0]}")
-lines.append("command: python gen_conformance.py (extends seed _conf_v11.py)")
+lines.append("command: python3 _conf_v11.py")
 lines.append(f"schema_file: {SCHEMA_FILE} | bytes: {len(raw)} | sha256: {sha}")
-# Governing-file pins (regenerable independently; ZD integrity round 2026-07-25).
-from cre.f1.freeze import schema_gate as _gate
-assert sha == _gate.PINNED_SCHEMA_SHA256, (
-    f"report generated against schema {sha}, but schema_gate pins "
-    f"{_gate.PINNED_SCHEMA_SHA256} — refusing to write a misleading report")
-lines.append("schema_gate_pin_match: True (schema_gate.PINNED_SCHEMA_SHA256 =="
-             " the bytes above; the supplied pre-delta pin b42fae74... /"
-             " 67,897 B died at the residuals commit, verified at copy time)")
-_spec_raw = (BASE / "F3-F7_FINDER_PROMPT_FREEZE_SPEC.md").read_bytes()
-lines.append(f"spec_file: F3-F7_FINDER_PROMPT_FREEZE_SPEC.md | bytes: "
-             f"{len(_spec_raw)} | sha256: {hashlib.sha256(_spec_raw).hexdigest()}")
-_seed_raw = (BASE / "_conf_v11.py").read_bytes()
-lines.append(f"seed_script: _conf_v11.py (committed as supplied) | bytes: "
-             f"{len(_seed_raw)} | sha256: {hashlib.sha256(_seed_raw).hexdigest()}")
-_gen_raw = pathlib.Path(__file__).resolve().read_bytes()
-lines.append(f"generator: gen_conformance.py | bytes: {len(_gen_raw)} | "
-             f"sha256: {hashlib.sha256(_gen_raw).hexdigest()}")
 lines.append(f"duplicate_keys: {'NONE' if not dups else dups}")
 lines.append(f"meta_schema_draft202012: {'PASS' if meta_ok else 'FAIL ' + meta_err}")
 lines.append(f"internal_refs: {len(refs)} occurrences, {len(set(refs))} unique targets, dangling: {'NONE' if not dangling else dangling}")
@@ -410,76 +367,9 @@ for k, v in negatives.items():
     lines.append(f"  {k:<42} {'REJECTED' if v else '!! ACCEPTED (DEFECT)'}")
 lines.append(f"all_root_positive_pass: {all(pos_results.values()) and rel_ok}")
 lines.append(f"all_negative_reject: {all(negatives.values())}")
-
-# --- semantic-validator section (build spec change item 6) ------------------
-# Executes the per-rule fixture suite and reports positive / targeted-negative
-# outcomes per §12 SV rule (each negative asserts its exact fail code).
-import pytest
-from cre.f1.freeze.semantic_validator_v1 import RULES
-
-
-class _Collector:
-    def __init__(self):
-        self.results = {}
-
-    def pytest_runtest_logreport(self, report):
-        if report.when == "call":
-            self.results[report.nodeid] = report.outcome
-
-
-_collector = _Collector()
-_test_file = BASE.parent / "test_semantic_validator_v1.py"
-_pytest_rc = pytest.main(["-q", "--tb=no", "-p", "no:cacheprovider",
-                          str(_test_file)], plugins=[_collector])
-
-rule_results = {rid: {"pos": [], "neg": []} for rid in RULES}
-for nodeid, outcome in _collector.results.items():
-    m = re.search(r"test_rule_positive_fixture_passes\[(SV-\d{3})\]", nodeid)
-    if m:
-        rule_results[m.group(1)]["pos"].append(outcome)
-        continue
-    m = re.search(r"test_sv(\d{3})_(positive|negative)", nodeid)
-    if m:
-        rid = f"SV-{m.group(1)}"
-        if rid in rule_results:
-            kind = "pos" if m.group(2) == "positive" else "neg"
-            rule_results[rid][kind].append(outcome)
-        continue
-    if "test_bootstrap_" in nodeid:  # SV-110 runtime-gate subprocess evidence
-        neg = any(t in nodeid for t in ("aborts", "fails_closed", "rejects"))
-        rule_results["SV-110"]["neg" if neg else "pos"].append(outcome)
-
-lines.append(f"semantic_validator: semantic_validator_v1 | rules: {len(RULES)} "
-             f"(v17 §12 table incl. post-v17 SV-005/SV-072)")
-lines.append(f"fixture suite: cre/f1/test_semantic_validator_v1.py | "
-             f"{len(_collector.results)} tests | pytest exit {_pytest_rc}")
-lines.append("per-rule fixtures (positive / targeted negative, exact fail "
-             "code asserted):")
-
-
-def _fmt(outcomes):
-    if not outcomes:
-        return "MISSING"
-    ok = all(o == "passed" for o in outcomes)
-    return f"{'PASS' if ok else 'FAIL'}({len(outcomes)})"
-
-
-sv_ok = True
-for rid in sorted(RULES):
-    pos, neg = rule_results[rid]["pos"], rule_results[rid]["neg"]
-    ok = (bool(pos) and bool(neg)
-          and all(o == "passed" for o in pos + neg))
-    sv_ok = sv_ok and ok
-    lines.append(f"  {rid} {RULES[rid]:<16} positive: {_fmt(pos):<9} "
-                 f"negative: {_fmt(neg)}")
-lines.append(f"all_rules_have_both_fixtures_and_pass: {sv_ok}")
-lines.append("NOTES: SV-024 validates response shape presence only until ZD "
-             "supplies the per-stage response schemas (residual #5; CONFIG "
-             "response_schema_sha256 null). SV-033 coverage_targets are "
-             "enforced through the PROPOSED per-item stratum field (residual "
-             "#3, pending ZD approval). SV-110 is a runtime gate: its "
-             "evidence is the bootstrap subprocess fixtures above, plus the "
-             "artifact-side manifest checks.")
+lines.append("SCOPE: this report covers SCHEMA executability + discriminator behavior only. The")
+lines.append("semantic_validator_v1 SV-* cross-artifact rules and their per-rule fixtures are implemented")
+lines.append("WITH the validator during the build; this report does not assert them.")
 report = "\n".join(lines)
-(BASE / "F3-F7_SCHEMA_CONFORMANCE_REPORT.txt").write_text(report)  # no trailing newline
+open("F3-F7_SCHEMA_CONFORMANCE_REPORT.txt", "w").write(report)  # no trailing newline
 print(report)

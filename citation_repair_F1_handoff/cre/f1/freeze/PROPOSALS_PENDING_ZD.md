@@ -1,5 +1,13 @@
 # Proposals pending ZD approval — semantic_validator_v1 build (2026-07-24)
 
+> **Queued, awaiting ZD's exact text (2026-07-25 — do not draft):** an
+> amendment to F3-F7_EVALUATION_DECISIONS_2026-07-03.md correcting (a) the
+> kappa computation basis (independent pre-adjudication labels, not the
+> adjudications) and (b) the "sensitivity on known positives" framing (a
+> diagnostic on the confirmed set, not a lower bound on population recall).
+> ZD supplies the wording; the edit changes the 263c6e2e... pin and requires
+> re-pinning in the spec's Normative references in the same commit.
+
 Per the build spec's residuals #3 and #5: the implementer PROPOSES, ZD
 approves. Nothing below is decided; the current implementation makes the
 pending state explicit (fail-closed or interim, named in every violation
@@ -24,7 +32,8 @@ schema gave no way to know which target an item counts toward, so SV-033's
   informational. If chosen, SV-033 drops the coverage clause (sort,
   uniqueness, min_size stay) and `stratum` stays optional provenance.
 
-**Decision needed with:** the selection-rule input (ZD input #2).
+**Decision needed with:** the selection-rule input (supplied alongside the
+canonical six inputs — see the spec's Inputs section).
 
 ## 2. Residual #5 — SV-024 pinned response schemas
 
@@ -56,11 +65,12 @@ branch protection with **force pushes disallowed** and **deletion disallowed**
 with "Block force pushes" + "Restrict deletions"). This is the fast-forward-
 only / non-deletable requirement of the freeze spec's Threat model.
 
-## 3. Note — SV-043 known-prohibited set is vacuous until ZD input #6
+## 3. Note — SV-043 known-prohibited set is vacuous until ZD input #5
 
 `bootstrap.KNOWN_PROHIBITED_CITING_PMCIDS` is empty: the two prohibited F3
 cases (Seeman/DNA-nanotech, idelalisib) are known by PMID; their citing
-PMCIDs must be SUPPLIED, not guessed (freeze spec, Inputs #6). While empty,
+PMCIDs must be SUPPLIED, not guessed (freeze spec, Inputs #5 of the
+canonical six; the lockfile is #6). While empty,
 SV-043's superset check is vacuous; uniqueness-by-`citing_pmcid` and the
 selection/candidate exclusion checks bind regardless. Supplying the two
 PMCIDs is a one-line bootstrap change on the canonical ref.

@@ -317,7 +317,7 @@ def _walk(obj, path, fn):
 
 def _extract_claims(record):
     """Readable extracted-claims list, or None if the parsed shape is opaque
-    (response schemas are ZD input #1, pending — residual #5)."""
+    (response schemas arrive with ZD input #1, pending — residual #5)."""
     extract = record.get("extract") or {}
     if extract.get("status") != "ok":
         return None
@@ -1455,7 +1455,7 @@ def check_sv043(artifacts, repo_ctx, trusted, out):
             _v(out, "SV-043", "candidate_protocol.prohibited_cases",
                f"prohibited_cases missing known citing papers: "
                f"{sorted(missing)}")
-    # (While ZD input #6 is unsupplied the superset check is vacuous; the
+    # (While ZD input #5 is unsupplied the superset check is vacuous; the
     # uniqueness and exclusion checks below still bind.)
     prohibited = set(pmcids)
     sel = artifacts.get("selection_artifact")

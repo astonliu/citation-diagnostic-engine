@@ -72,9 +72,9 @@ CAS_ROOT = "cas/"
 CAS_REF_GRAMMAR = r"^cas/[0-9a-f]{64}$"
 
 # SV-043: the two known prohibited F3 citing papers (Seeman/DNA-nanotech,
-# idelalisib). The citing PMCIDs are ZD input #6 — supplied, never guessed
-# (freeze spec, Inputs). Empty until ZD supplies them; while empty the
-# superset check is vacuous and SV-043 says so in its violation message.
+# idelalisib). The citing PMCIDs are ZD input #5 — supplied, never guessed
+# (freeze spec, Inputs — the canonical six). Empty until ZD supplies them;
+# while empty the superset check is vacuous and SV-043 says so.
 KNOWN_PROHIBITED_CITING_PMCIDS = ()
 
 # ---------------------------------------------------------------------------
