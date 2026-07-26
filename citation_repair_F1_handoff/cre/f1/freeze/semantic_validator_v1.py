@@ -565,6 +565,11 @@ def check_sv003(artifacts, out):
         if actual is not None and actual != declared_rh:
             _v(out, "SV-003", "run_hash",
                f"filename run_hash {declared_rh} != canon_sha256(BATCH) {actual}")
+    if batch is not None and declared_ch is not None and \
+            batch.get("config_hash") != declared_ch:
+        _v(out, "SV-003", "batch.config_hash",
+           f"batch.config_hash {batch.get('config_hash')} != the filename "
+           f"config_hash {declared_ch} the run claims to be under")
 
 
 _RUNTIME_MATCH_FIELDS = (
@@ -668,8 +673,31 @@ def check_sv020(artifacts, out):
                f"{batch.get(fld)}")
     if records is None:
         return
+    if batch.get("review_dump_sha256") is not None:
+        # Canonical-store convention: the committed dump is the canonical
+        # bytes of the record sequence; the chain must be recomputable from
+        # exactly the dump the BATCH names.
+        actual_dump = _safe_canon_sha256(records, out, "SV-020",
+                                         "batch.review_dump_sha256")
+        if actual_dump is not None and \
+                actual_dump != batch.get("review_dump_sha256"):
+            _v(out, "SV-020", "batch.review_dump_sha256",
+               f"review_dump_sha256 {batch.get('review_dump_sha256')} != "
+               f"canonical hash of the record sequence {actual_dump}")
     prev = batch.get("genesis")
     for i, rec in enumerate(records):
+        if rec.get("config_hash") != batch.get("config_hash"):
+            _v(out, "SV-020", f"review_records[{i}].config_hash",
+               f"record config_hash {rec.get('config_hash')} != the run's "
+               f"{batch.get('config_hash')}")
+        if rec.get("run_id") != batch.get("run_id"):
+            _v(out, "SV-020", f"review_records[{i}].run_id",
+               f"record run_id {rec.get('run_id')} != the run's "
+               f"{batch.get('run_id')}")
+        rf = rec.get("run_facts") or {}
+        if rf.get("config_hash_used") != rec.get("config_hash"):
+            _v(out, "SV-020", f"review_records[{i}].run_facts.config_hash_used",
+               "run_facts.config_hash_used != the record's config_hash")
         if rec.get("seq") != i:
             _v(out, "SV-020", f"review_records[{i}].seq",
                f"chain seq not contiguous from 0: expected {i}, got "
@@ -1072,6 +1100,51 @@ def check_sv030(artifacts, out):
         if manifest.get("source_selection_hash") != batch.get("selection_artifact_sha256"):
             _v(out, "SV-030", "annotation_release_manifest.source_selection_hash",
                "source_selection_hash != BATCH selection_artifact_sha256")
+    # The manifest's own references are recomputed, never trusted (same
+    # class as the row bindings below — audit round 3).
+    promo = artifacts.get("promotion")
+    payload_sha = None
+    if promo is not None:
+        payload_sha = _safe_canon_sha256(promo.get("payload") or {}, out,
+                                         "SV-030", "promotion.payload")
+        if payload_sha is not None and \
+                manifest.get("promotion_payload_sha256") != payload_sha:
+            _v(out, "SV-030", "annotation_release_manifest.promotion_payload_sha256",
+               f"manifest promotion_payload_sha256 "
+               f"{manifest.get('promotion_payload_sha256')} != committed "
+               f"promotion payload hash {payload_sha}")
+    if batch and manifest.get("config_hash") != batch.get("config_hash"):
+        _v(out, "SV-030", "annotation_release_manifest.config_hash",
+           "manifest and source BATCH are not under the same CONFIG")
+    if artifacts.get("exclusion_checkpoints") is not None and \
+            _resolve_checkpoint(artifacts,
+                                manifest.get("exclusion_checkpoint_sha256")) is None:
+        _v(out, "SV-030", "annotation_release_manifest.exclusion_checkpoint_sha256",
+           "manifest exclusion_checkpoint_sha256 resolves to no committed "
+           "checkpoint artifact")
+    att = artifacts.get("release_attestation")
+    if att is not None:
+        actual_m = _safe_canon_sha256(manifest, out, "SV-030",
+                                      "annotation_release_manifest")
+        if actual_m is not None and \
+                att.get("annotation_release_manifest_sha256") != actual_m:
+            _v(out, "SV-030", "release_attestation.annotation_release_manifest_sha256",
+               f"attestation binds manifest {att.get('annotation_release_manifest_sha256')} "
+               f"but the committed manifest recomputes to {actual_m}")
+        if payload_sha is not None and \
+                att.get("promotion_payload_sha256") != payload_sha:
+            _v(out, "SV-030", "release_attestation.promotion_payload_sha256",
+               "attestation promotion_payload_sha256 != committed promotion "
+               "payload hash")
+        if batch and att.get("config_hash") != batch.get("config_hash"):
+            _v(out, "SV-030", "release_attestation.config_hash",
+               "attestation and source BATCH are not under the same CONFIG")
+        if artifacts.get("exclusion_checkpoints") is not None and \
+                _resolve_checkpoint(artifacts,
+                                    att.get("exclusion_checkpoint_sha256")) is None:
+            _v(out, "SV-030", "release_attestation.exclusion_checkpoint_sha256",
+               "attestation exclusion_checkpoint_sha256 resolves to no "
+               "committed checkpoint artifact")
     sel_items = {i.get("citation_id"): i for i in
                  (artifacts.get("selection_artifact") or {}).get("items") or []}
     for i, row in enumerate(manifest.get("inventory") or []):
@@ -1240,6 +1313,17 @@ def check_sv034(artifacts, out):
            f"set (selection {len(sel_ids)} ids, candidate {len(cand_ids)}; "
            f"same ids, same order, same count required)")
         return
+    if batch:
+        actual_cm = _safe_canon_sha256(cm, out, "SV-034", "candidate_manifest")
+        if actual_cm is not None and \
+                batch.get("candidate_manifest_sha256") != actual_cm:
+            _v(out, "SV-034", "batch.candidate_manifest_sha256",
+               f"batch candidate_manifest_sha256 "
+               f"{batch.get('candidate_manifest_sha256')} != committed "
+               f"candidate manifest hash {actual_cm}")
+        if cm.get("config_hash") != batch.get("config_hash"):
+            _v(out, "SV-034", "candidate_manifest.config_hash",
+               "candidate manifest and BATCH are not under the same CONFIG")
     sel_by_id = {i.get("citation_id"): i for i in sel_items}
     records = {r.get("item_key"): r for r in artifacts.get("review_records") or []}
     manifest_rows = {row.get("citation_id"): row
@@ -1457,6 +1541,12 @@ def check_sv043(artifacts, repo_ctx, trusted, out):
                f"{sorted(missing)}")
     # (While ZD input #5 is unsupplied the superset check is vacuous; the
     # uniqueness and exclusion checks below still bind.)
+    promo = artifacts.get("promotion")
+    if promo and config and promo.get("payload", {}).get(
+            "candidate_protocol_sha256") != config.get("candidate_protocol_sha256"):
+        _v(out, "SV-043", "promotion.payload.candidate_protocol_sha256",
+           "PROMOTION's candidate_protocol_sha256 != CONFIG's (§12 promotion "
+           "walk: the freeze criterion is the protocol's)")
     prohibited = set(pmcids)
     sel = artifacts.get("selection_artifact")
     if sel:
@@ -1585,6 +1675,20 @@ def check_sv045(artifacts, out):
                 _v(out, "SV-045", "batch",
                    "a development run never produces a BATCH artifact "
                    "(unattested, nonreportable)")
+    batch = artifacts.get("batch")
+    rsm = artifacts.get("run_state_manifest")
+    if batch and rsm:
+        # Resume cannot switch the dataset, mode, or checkpoint: the
+        # run-state manifest binds every immutable input the BATCH binds.
+        for fld in ("run_id", "execution_mode", "sample_purpose",
+                    "config_hash", "selection_artifact_sha256",
+                    "candidate_manifest_sha256", "genesis",
+                    "exclusion_checkpoint_sha256_at_start",
+                    "promotion_payload_sha256_at_start"):
+            if rsm.get(fld) != batch.get(fld):
+                _v(out, "SV-045", f"run_state_manifest.{fld}",
+                   f"run-state {fld} {rsm.get(fld)!r} != BATCH's "
+                   f"{batch.get(fld)!r} — resume cannot switch the dataset")
 
 
 def check_sv050(artifacts, trusted, out):
@@ -1929,6 +2033,19 @@ def check_sv110(artifacts, out):
             _v(out, "SV-110", "module_manifest.modules",
                f"module manifest role coverage not exhaustive; missing "
                f"{missing}")
+        config = artifacts.get("config")
+        if config is not None:
+            # CONFIG pins module_manifest_sha256 (§11) — recompute, never
+            # trust: this is the artifact the bootstrap verifies real module
+            # bytes against, so a silent mismatch here means the artifact
+            # record and the runtime gate disagree.
+            actual = _safe_canon_sha256(mm, out, "SV-110", "module_manifest")
+            if actual is not None and \
+                    config.get("module_manifest_sha256") != actual:
+                _v(out, "SV-110", "config.module_manifest_sha256",
+                   f"CONFIG pins module_manifest_sha256 "
+                   f"{config.get('module_manifest_sha256')} but the committed "
+                   f"module manifest recomputes to {actual}")
     batch = artifacts.get("batch")
     if batch:
         observed = batch.get("observed_runtime") or {}

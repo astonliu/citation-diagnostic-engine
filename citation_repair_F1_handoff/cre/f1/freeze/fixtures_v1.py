@@ -93,6 +93,9 @@ def seal_chain(universe):
     batch["genesis"] = canon_sha256(gp)
     prev = batch["genesis"]
     for rec in records:
+        rec["config_hash"] = universe["config_hash"]
+        rec["run_id"] = batch["run_id"]
+        rec["run_facts"]["config_hash_used"] = universe["config_hash"]
         rec["prev_record_sha256"] = prev
         seal_self_hash(rec, "record_sha256")
         prev = rec["record_sha256"]
@@ -115,6 +118,7 @@ def reseal_candidate_universe(u):
     exposure plan, promotion envelope, and run-state manifest bindings."""
     if "selection_artifact" in u and "candidate_manifest" in u:
         sel_sha = canon_sha256(u["selection_artifact"])
+        u["candidate_manifest"]["config_hash"] = u["config_hash"]
         u["candidate_manifest"]["selection_artifact_sha256"] = sel_sha
         u["batch"]["selection_artifact_sha256"] = sel_sha
         u["batch"]["candidate_manifest_sha256"] = \

@@ -1,6 +1,6 @@
-generated_utc: 2026-07-26T03:21:15.486696+00:00 (volatile — outside the hashed region)
+generated_utc: 2026-07-26T03:41:57.725482+00:00 (volatile — outside the hashed region)
 interpreter: 3.14.6 (volatile — outside the hashed region)
-canonical_body_sha256: 7ca66de577decb31995c4ab886eac0c06dc22c09df1b64defb5e574bd266d152
+canonical_body_sha256: 17f643ae03682b24bc71d3ab3621368eabe9038e2dc3a8942dc7da5878149c02
 canonical_body: the bytes AFTER the marker line, UTF-8, no trailing newline. Same repo bytes -> same digest, independent of wall clock. Verify: python gen_conformance.py --verify
 --- canonical body ---
 CRE F3-F7 finder-freeze — schema conformance report (format v14)
@@ -70,8 +70,8 @@ negative / discriminator checks:
 all_root_positive_pass: True
 all_negative_reject: True
 semantic_validator: semantic_validator_v1 | rules: 35 (v17 §12 table incl. post-v17 SV-005/SV-072)
-fixture suite: cre/f1/test_semantic_validator_v1.py | 171 tests | pytest exit 0
-test breakdown: 119 rule-mapped fixture tests + 52 substrate/unit tests (strict_loader, canon_v1, schema_gate, universes, helpers) = 171 (report meta-tests skip inside the generator)
+fixture suite: cre/f1/test_semantic_validator_v1.py | 177 tests | pytest exit 0
+test breakdown: 123 rule-mapped fixture tests + 54 substrate/unit tests (strict_loader, canon_v1, schema_gate, universes, helpers) = 177 (report meta-tests skip inside the generator)
 per-rule fixtures (positive / targeted negative, exact fail code asserted):
   SV-001 E_SELF_HASH      positive: PASS(2)   negative: PASS(2)
   SV-002 E_TEMPLATE       positive: PASS(1)   negative: PASS(3)
@@ -100,13 +100,13 @@ per-rule fixtures (positive / targeted negative, exact fail code asserted):
   SV-050 E_REPORTABLE     positive: PASS(2)   negative: PASS(2)
   SV-060 E_CITATION_ID    positive: PASS(2)   negative: PASS(3)
   SV-061 E_OCCURRENCE     positive: PASS(2)   negative: PASS(1)
-  SV-070 E_LEAKAGE        positive: PASS(1)   negative: PASS(1)
+  SV-070 E_LEAKAGE        positive: PASS(1)   negative: PASS(2)
   SV-071 E_STIMULUS       positive: PASS(1)   negative: PASS(1)
   SV-072 E_STIMULUS_HASH  positive: PASS(1)   negative: PASS(2)
-  SV-090 E_HEADER         positive: PASS(1)   negative: PASS(2)
+  SV-090 E_HEADER         positive: PASS(1)   negative: PASS(4)
   SV-091 E_HOST           positive: PASS(1)   negative: PASS(1)
   SV-100 E_FORMAT         positive: PASS(2)   negative: PASS(3)
   SV-101 E_RETRY_POLICY   positive: PASS(1)   negative: PASS(2)
-  SV-110 E_BOOTSTRAP      positive: PASS(4)   negative: PASS(9)
+  SV-110 E_BOOTSTRAP      positive: PASS(4)   negative: PASS(10)
 all_rules_have_both_fixtures_and_pass: True
 NOTES: SV-024 validates response shape presence only until ZD supplies the per-stage response schemas (residual #5; CONFIG response_schema_sha256 null). SV-033 coverage_targets are enforced through the PROPOSED per-item stratum field (residual #3, pending ZD approval). SV-043's known-prohibited superset clause is vacuous until ZD supplies input #5 (uniqueness and the selection/candidate exclusion checks bind regardless). SV-101's retry_after_cap participation clause is runner behavior with no artifact-level predicate. SV-110 is a runtime gate: its evidence is the bootstrap subprocess fixtures above, plus the artifact-side manifest checks.

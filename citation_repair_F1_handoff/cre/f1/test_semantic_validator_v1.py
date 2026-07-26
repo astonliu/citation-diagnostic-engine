@@ -358,7 +358,9 @@ def test_sv020_negative_seq_gap(cand):
 def test_sv020_negative_genesis_preimage_drift(cand):
     cand["batch"]["genesis"] = "9" * 64
     # The batch bytes changed, so rebind the filename digest and the
-    # promotion/exposure references to it — only the genesis drift remains.
+    # promotion/exposure/run-state references to it — only the genesis
+    # drift remains.
+    cand["run_state_manifest"]["genesis"] = "9" * 64
     cand["run_hash"] = canon_sha256(cand["batch"])
     cand["exposure_plan"]["run_hash"] = cand["run_hash"]
     payload = cand["promotion"]["payload"]
@@ -653,7 +655,9 @@ def test_sv044_negative_exposure_commit_not_before_promotion(git_universe):
                               "schema_version": "v14",
                               "payload": {"config_hash": "0" * 64,
                                           "run_hash": "0" * 64,
-                                          "candidate_protocol_sha256": "0" * 64,
+                                          "candidate_protocol_sha256":
+                                              artifacts["config"]
+                                              ["candidate_protocol_sha256"],
                                           "exposure_plan_sha256": "0" * 64,
                                           "post_exposure_exclusion_checkpoint_sha256": "0" * 64,
                                           "recorded_by": "ZD",
@@ -1262,6 +1266,258 @@ def test_validate_returns_list_for_malformed_artifact_values(universe):
     for v in out:
         assert v.rule_id in _rules or v.rule_id == "SV-000"
         assert isinstance(v.message, str)
+
+
+# ---------------------------------------------------------------------------
+# ZD integrity round 3 (mutation sweep): the CONFIG -> module_manifest hash
+# binding, the reference-verification meta-test that closes the class, and
+# semantic mutations for SV-070 / SV-090
+# ---------------------------------------------------------------------------
+
+def _flip_hex(s):
+    return ("0" if s[0] != "0" else "1") + s[1:]
+
+
+def test_sv110_negative_config_module_manifest_binding(cand):
+    # ZD's mutation-sweep repro: one character of modules[0].content_sha256.
+    mm = cand["module_manifest"]
+    mm["modules"][0]["content_sha256"] = \
+        _flip_hex(mm["modules"][0]["content_sha256"])
+    hits = assert_only(validate(cand, trusted=TRUSTED), "SV-110")
+    assert any("module_manifest_sha256" in v.path for v in hits)
+
+
+def test_sv070_negative_forbidden_key_deep_in_atomic_claims(cand):
+    # Semantic mutation: mechanical sweeps cannot INVENT a nested forbidden
+    # key; SV-070's recursive scan must catch one anywhere in the stimulus.
+    cid = cand["review_records"][0]["item_key"]
+    stim = copy.deepcopy(cand["stimulus_objects"][cid])
+    stim["atomic_claims"][0]["confidence"] = "0.97"
+    hits = assert_only(validate({"stimulus_objects": {cid: stim}},
+                                trusted=TRUSTED), "SV-070")
+    assert hits[0].fail_code == "E_LEAKAGE"
+
+
+def test_sv090_negative_denylisted_x_api_key_header():
+    events = fx.build_wal_triplet(lcid="lc-key",
+                                  headers={"x-api-key": "sk-ant-secret"})
+    hits = assert_only(validate({"wal_events": events}, trusted=TRUSTED),
+                       "SV-090")
+    assert hits[0].fail_code == "E_HEADER"
+    assert "credential" in hits[0].message
+
+
+def test_sv090_negative_cookie_in_request_behavior_headers(cand):
+    cfg = copy.deepcopy(cand["config"])
+    cfg["stages"]["claim_extract"]["endpoint"]["behavior_headers"] = \
+        {"cookie": "session=abc"}
+    hits = assert_only(validate({"config": cfg}, trusted=TRUSTED), "SV-090")
+    assert hits[0].fail_code == "E_HEADER"
+
+
+# --- the meta-test: every artifact-reference hash must be verified ---------
+
+_REF_FIELD_EXTRAS = frozenset({"config_hash", "config_hash_used",
+                               "source_run_hash", "source_selection_hash",
+                               "genesis", "run_hash"})
+
+# Every discovered reference edge (holder artifact kind, field name) must be
+# verified by the named rule. An UNREGISTERED discovered edge fails the
+# meta-test — a fourth unverified binding cannot appear silently.
+REFERENCE_EDGE_RULES = {
+    ("config", "candidate_protocol_sha256"): "SV-043",
+    ("config", "module_manifest_sha256"): "SV-110",
+    ("batch", "config_hash"): "SV-003",
+    ("batch", "selection_artifact_sha256"): "SV-034",
+    ("batch", "candidate_manifest_sha256"): "SV-034",
+    ("batch", "exclusion_checkpoint_sha256_at_start"): "SV-040",
+    ("batch", "genesis"): "SV-020",
+    ("batch", "review_dump_sha256"): "SV-020",
+    ("batch", "promotion_payload_sha256_at_start"): "SV-045",
+    ("run_state_manifest", "config_hash"): "SV-045",
+    ("run_state_manifest", "selection_artifact_sha256"): "SV-045",
+    ("run_state_manifest", "candidate_manifest_sha256"): "SV-045",
+    ("run_state_manifest", "genesis"): "SV-045",
+    ("run_state_manifest", "exclusion_checkpoint_sha256_at_start"): "SV-045",
+    ("candidate_manifest", "config_hash"): "SV-034",
+    ("candidate_manifest", "selection_artifact_sha256"): "SV-034",
+    ("candidate_manifest", "evidence_snapshot_sha256"): "SV-034",
+    ("promotion", "payload_sha256"): "SV-001",
+    ("promotion", "config_hash"): "SV-044",
+    ("promotion", "run_hash"): "SV-044",
+    ("promotion", "candidate_protocol_sha256"): "SV-043",
+    ("promotion", "exposure_plan_sha256"): "SV-044",
+    ("promotion", "post_exposure_exclusion_checkpoint_sha256"): "SV-040",
+    ("exposure_plan", "run_hash"): "SV-044",
+    ("annotation_release_manifest", "config_hash"): "SV-030",
+    ("annotation_release_manifest", "promotion_payload_sha256"): "SV-030",
+    ("annotation_release_manifest", "source_run_hash"): "SV-030",
+    ("annotation_release_manifest", "source_review_dump_sha256"): "SV-030",
+    ("annotation_release_manifest", "source_selection_hash"): "SV-030",
+    ("annotation_release_manifest", "exclusion_checkpoint_sha256"): "SV-030",
+    ("annotation_release_manifest", "stimulus_sha256"): "SV-030",
+    ("annotation_release_manifest", "evidence_snapshot_sha256"): "SV-030",
+    ("release_attestation", "annotation_release_manifest_sha256"): "SV-030",
+    ("release_attestation", "promotion_payload_sha256"): "SV-030",
+    ("release_attestation", "config_hash"): "SV-030",
+    ("release_attestation", "exclusion_checkpoint_sha256"): "SV-030",
+    ("review_records", "config_hash"): "SV-020",
+    ("review_records", "config_hash_used"): "SV-020",
+    ("review_records", "prev_record_sha256"): "SV-020",  # seq 0 -> genesis
+    ("review_records", "stimulus_sha256"): "SV-072",
+    ("review_records", "evidence_snapshot_sha256"): "SV-025",
+    ("stimulus_objects", "evidence_snapshot_sha256"): "SV-025",
+    ("wal_events", "config_hash"): "SV-023",  # covered via the preimage key
+}
+
+
+def _discover_reference_edges(u):
+    """Map canon hashes of every enumerable artifact (and byte store), then
+    find every hash-valued field anywhere that points at one of them."""
+    targets = {}
+
+    def reg(name, obj):
+        try:
+            targets.setdefault(canon_sha256(obj), name)
+        except Exception:
+            pass
+
+    for key in ("config", "selection_artifact", "candidate_manifest",
+                "candidate_protocol", "exposure_plan", "module_manifest",
+                "annotation_release_manifest", "release_attestation",
+                "run_state_manifest", "batch", "promotion"):
+        if u.get(key) is not None:
+            reg(key, u[key])
+    if u.get("promotion"):
+        reg("promotion.payload", u["promotion"].get("payload"))
+    if u.get("batch"):
+        reg("batch.genesis_preimage", u["batch"].get("genesis_preimage"))
+    if u.get("review_records") is not None:
+        reg("review_dump", u["review_records"])
+    for cp in u.get("exclusion_checkpoints") or []:
+        reg("exclusion_checkpoint", cp)
+    for stim in (u.get("stimulus_objects") or {}).values():
+        reg("stimulus_object", stim)
+    for sha in u.get("evidence_snapshots") or {}:
+        targets.setdefault(sha, "evidence_bytes")
+
+    edges = set()
+
+    def walk(obj, top):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if isinstance(v, str) and v in targets and \
+                        ("_sha256" in k or k in _REF_FIELD_EXTRAS):
+                    edges.add((top, k))
+                walk(v, top)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v, top)
+
+    for key in ("prompt_packages", "config", "batch", "run_state_manifest",
+                "promotion", "revocations", "selection_artifact",
+                "candidate_manifest", "candidate_protocol", "exposure_plan",
+                "exclusion_ledger", "exclusion_checkpoints", "review_records",
+                "wal_events", "annotation_release_manifest",
+                "release_attestation", "module_manifest"):
+        if u.get(key) is not None:
+            walk(u[key], key)
+    for stim in (u.get("stimulus_objects") or {}).values():
+        walk(stim, "stimulus_objects")
+    return edges
+
+
+def test_every_artifact_reference_hash_is_verified(candidate_universe,
+                                                   release_universe):
+    edges = (_discover_reference_edges(candidate_universe)
+             | _discover_reference_edges(release_universe))
+    assert edges, "discovery found no reference edges — discovery is broken"
+    unregistered = edges - set(REFERENCE_EDGE_RULES)
+    assert not unregistered, (
+        f"UNVERIFIED artifact references discovered: {sorted(unregistered)} "
+        f"— add a verifying rule clause, then register the edge here")
+    stale = set(REFERENCE_EDGE_RULES) - edges
+    assert not stale, (f"registry entries no longer discovered in the "
+                       f"universes (stale): {sorted(stale)}")
+    for edge, rule in REFERENCE_EDGE_RULES.items():
+        assert rule in RULES or rule == "SV-001", (edge, rule)
+
+
+def test_reference_binding_rules_fire_per_target():
+    """Liveness: corrupt each referenced TARGET artifact (self-seal repaired
+    where it has one) and assert its registered binding rule actually fires —
+    'declared but never verified' cannot recur silently."""
+    def mut_module_manifest(u):
+        u["module_manifest"]["modules"][0]["content_sha256"] = \
+            _flip_hex(u["module_manifest"]["modules"][0]["content_sha256"])
+
+    def mut_selection(u):
+        u["selection_artifact"]["items"][0]["retrieval_record_sha256"] = \
+            _flip_hex(u["selection_artifact"]["items"][0]
+                      ["retrieval_record_sha256"])
+
+    def mut_candidate_manifest(u):
+        u["candidate_manifest"]["items"][0]["resolution_provenance_sha256"] = \
+            _flip_hex(u["candidate_manifest"]["items"][0]
+                      ["resolution_provenance_sha256"])
+
+    def mut_protocol(u):
+        u["candidate_protocol"]["evaluation_policy_version"] = "v1-mutated"
+
+    def mut_exposure_plan(u):
+        u["exposure_plan"]["recorded_at"] = "2026-07-24T12:00:01Z"
+
+    def mut_config(u):
+        u["config"]["runtime_profile"]["container_image_digest"] = "sha256:ab"
+
+    def mut_stimulus(u):
+        cid = u["review_records"][0]["item_key"]
+        u["stimulus_objects"][cid]["display_instructions"] = "mutated"
+
+    def mut_records(u):
+        rec = u["review_records"][1]
+        rec["shape_flags"] = ["empty_extraction"]
+        fx.seal_self_hash(rec, "record_sha256")
+
+    def mut_checkpoint(u):
+        u["exclusion_checkpoints"][0]["canonical_ref_commit"] = \
+            "sha1:" + "2" * 40
+
+    def mut_promotion_payload(u):
+        u["promotion"]["payload"]["recorded_at"] = "2026-07-24T12:00:01Z"
+        fx.seal_envelope(u["promotion"])
+
+    def mut_release_manifest(u):
+        u["annotation_release_manifest"]["codebook_sha256"] = \
+            _flip_hex(u["annotation_release_manifest"]["codebook_sha256"])
+
+    cases = [
+        ("candidate", "module_manifest", mut_module_manifest, {"SV-110"}),
+        ("candidate", "selection_artifact", mut_selection, {"SV-034"}),
+        ("candidate", "candidate_manifest", mut_candidate_manifest,
+         {"SV-034"}),
+        ("candidate", "candidate_protocol", mut_protocol, {"SV-043"}),
+        ("candidate", "exposure_plan", mut_exposure_plan, {"SV-044"}),
+        ("candidate", "config", mut_config, {"SV-003"}),
+        ("candidate", "stimulus_object", mut_stimulus, {"SV-072"}),
+        ("candidate", "review_dump", mut_records, {"SV-020"}),
+        ("candidate", "exclusion_checkpoint", mut_checkpoint, {"SV-040"}),
+        ("release", "promotion.payload", mut_promotion_payload,
+         {"SV-045", "SV-030"}),
+        ("release", "annotation_release_manifest", mut_release_manifest,
+         {"SV-030"}),
+    ]
+    failures = []
+    for which, target, mutate, expected in cases:
+        u = (fx.build_candidate_universe() if which == "candidate"
+             else fx.build_release_universe())
+        mutate(u)
+        fired_rules = {v.rule_id for v in validate(u, trusted=TRUSTED)}
+        if not expected & fired_rules:
+            failures.append((which, target, sorted(expected),
+                             sorted(fired_rules)))
+    assert not failures, (
+        f"corrupted targets whose binding rule did NOT fire: {failures}")
 
 
 GEN = REPO_HANDOFF / "cre" / "f1" / "freeze" / "gen_conformance.py"
