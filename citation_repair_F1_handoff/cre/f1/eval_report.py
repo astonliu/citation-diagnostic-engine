@@ -254,6 +254,9 @@ _F2_RECORD_KEYS = (
     # F2_V3_1 Bug 1: the UNSCOREABLE bucket name, "" for scoreable rows. Present on
     # every record so the schema stays uniform (re-bandable + JSON round-trips).
     "unscoreable_reason",
+    # F2-E: the leading furniture removed from the written title at parse time
+    # ("" when none), so every edit to the scored title is reviewable in the frame.
+    "written_title_excised",
 )
 
 
@@ -268,6 +271,7 @@ def _raw_fields(pmid: str, src_pmcid: str, claimed: ClaimedRef,
         "resolved_pmid": resolved.pmid or "",
         "src_pmcid": src_pmcid,
         "written_title": claimed.title,
+        "written_title_excised": getattr(claimed, "written_title_excised", "") or "",
         "resolved_title": resolved.title,
         "written_year": claimed.year,
         "resolved_year": resolved.year,
@@ -493,3 +497,40 @@ def assert_f2_fixes_loaded() -> None:
         raise RuntimeError("STALE MODULE: parser does not extract "
                            f"<string-name><surname> -- Defect A fix not loaded; "
                            f"got {authors!r}.")
+
+
+# =====================================================================
+# Standing consistency check (F2_MATCHER_REVISION_SPEC)
+# =====================================================================
+def find_verdict_consistency_conflicts(records: list) -> list:
+    """Group flagged rows on (normalized written title, claimed PMID) and return
+    the groups whose verdicts DISAGREE. The same work cited under the same PMID in
+    two places must band the same way; a split within a group is a labeling/banding
+    inconsistency to surface for review, never to auto-resolve.
+
+    On the seed-37 HIGH band this catches PMID 9984901 (ref55/ref66 vs ref68) for
+    free -- the same finding the spec's pending-adjudication list reached by hand.
+
+    Returns a list of conflict dicts: ``{"claimed_pmid", "normalized_title",
+    "verdicts", "citation_ids"}``. Rows with no claimed PMID or no title are
+    skipped (nothing to key on). Uses the module's ``normalize_title`` so the key
+    matches the scorer's own title normalization."""
+    from .biblio_match import normalize_title
+    groups: dict = {}
+    for r in records:
+        pmid = str(r.get("claimed_pmid") or r.get("pmid") or "").strip()
+        nt = normalize_title(r.get("written_title") or "")
+        if not pmid or not nt:
+            continue
+        groups.setdefault((nt, pmid), []).append(r)
+    conflicts = []
+    for (nt, pmid), members in groups.items():
+        verdicts = {m.get("verdict") for m in members}
+        if len(members) > 1 and len(verdicts) > 1:
+            conflicts.append({
+                "claimed_pmid": pmid,
+                "normalized_title": nt,
+                "verdicts": sorted(v for v in verdicts if v),
+                "citation_ids": sorted(m.get("citation_id", "") for m in members),
+            })
+    return sorted(conflicts, key=lambda c: (c["claimed_pmid"], c["normalized_title"]))

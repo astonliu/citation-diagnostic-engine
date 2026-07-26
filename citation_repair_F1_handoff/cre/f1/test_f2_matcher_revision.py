@@ -386,3 +386,42 @@ def test_f2e_parser_populates_written_title_excised(tmp_path):
     assert refs
     assert refs[0].claimed.title == "Biology and chemistry of Ginkgo biloba."
     assert refs[0].claimed.written_title_excised == "Gopichand; Singh, R.D.; Ahuja, P.S."
+
+
+# ======================================================================
+# Standing consistency check (group on normalized title + claimed PMID)
+# ======================================================================
+def test_consistency_check_flags_split_verdicts_in_a_group():
+    from cre.f1.eval_report import find_verdict_consistency_conflicts
+    # ref68-shape: same claimed PMID + same title, but two different verdicts.
+    recs = [
+        {"citation_id": "a:ref55", "claimed_pmid": "9984901",
+         "written_title": "Regulation of the immune response", "verdict": VERDICT_WRONG_PAPER},
+        {"citation_id": "a:ref66", "claimed_pmid": "9984901",
+         "written_title": "Regulation of the immune response", "verdict": VERDICT_WRONG_PAPER},
+        {"citation_id": "a:ref68", "claimed_pmid": "9984901",
+         "written_title": "Regulation of the immune response",
+         "verdict": VERDICT_SAME_WORK_VARIANT},
+        # an unrelated, internally-consistent group (must NOT be reported)
+        {"citation_id": "b:r1", "claimed_pmid": "111",
+         "written_title": "Another paper", "verdict": VERDICT_MATCH},
+        {"citation_id": "b:r2", "claimed_pmid": "111",
+         "written_title": "Another paper", "verdict": VERDICT_MATCH},
+    ]
+    conflicts = find_verdict_consistency_conflicts(recs)
+    assert len(conflicts) == 1
+    c = conflicts[0]
+    assert c["claimed_pmid"] == "9984901"
+    assert c["citation_ids"] == ["a:ref55", "a:ref66", "a:ref68"]
+    assert set(c["verdicts"]) == {VERDICT_WRONG_PAPER, VERDICT_SAME_WORK_VARIANT}
+
+
+def test_consistency_check_ignores_singletons_and_agreeing_groups():
+    from cre.f1.eval_report import find_verdict_consistency_conflicts
+    recs = [
+        {"citation_id": "x", "claimed_pmid": "1", "written_title": "T",
+         "verdict": VERDICT_WRONG_PAPER},
+        {"citation_id": "y", "claimed_pmid": "2", "written_title": "U",
+         "verdict": VERDICT_MATCH},
+    ]
+    assert find_verdict_consistency_conflicts(recs) == []
