@@ -231,6 +231,12 @@ def is_scoreable_title(title: str, journal: str = "") -> bool:
     return True
 
 
+# F2-D is DEFERRED and disabled in spec revision 5 (§11). This flag keeps the
+# strict-prefix branch inert; do NOT enable it without the full review-only
+# conjunction §11 requires and a frozen frame-wide firing count.
+_F2D_STRICT_PREFIX_ENABLED = False
+
+
 def _strict_title_prefix(a: str, b: str) -> bool:
     """True iff one NORMALIZED title is a strict prefix of the other at a word
     boundary (the shorter is a truncation of the longer). NOT general
@@ -418,38 +424,67 @@ def _digits(s: str) -> str:
 # plain hyphen before the elided-end-page expansion so '117–32' and '117-32'
 # canonicalize identically.
 _PAGE_DASHES = "‐‑‒–—―−"   # ‐ ‑ ‒ – — ― −
-_PAGE_RANGE_RE = re.compile(r"^([a-z]*)(\d+)-(\d+)(.*)$")
+# A single range segment: optional alpha prefix + start digits, '-', optional alpha
+# prefix + end digits, then a suffix (e.g. '.e4').
+_PAGE_SEGMENT_RE = re.compile(r"^([a-z]*)(\d+)-([a-z]*)(\d+)(.*)$")
+
+
+def _expand_end(start: str, end: str) -> str:
+    """Expand an elided end page against the start (F2-A / spec §7.1 step 6).
+
+    ``width = 10 ** len(end)``; carry the start's high digits onto the end and step
+    up by ``width`` until the end is not below the start. Format the result with at
+    least the start's original digit width so leading zeroes survive
+    (``001-9 -> 001-009``), allowing a longer result when a boundary is crossed
+    (``1199-8 -> 1199-1208``)."""
+    start_i = int(start)
+    width = 10 ** len(end)
+    candidate = start_i - (start_i % width) + int(end)
+    while candidate < start_i:
+        candidate += width
+    return str(candidate).zfill(len(start))
+
+
+def _canonical_segment(seg: str) -> str:
+    """Canonicalize one already-folded range segment (spec §7.1 steps 4-8)."""
+    m = _PAGE_SEGMENT_RE.match(seg)
+    if not m:
+        return seg                       # non-range (S100, e0224455, xii-xv): as-is
+    p_start, start, p_end, end, suffix = m.groups()
+    # Step 5: two DIFFERENT alpha prefixes are two different locators -> unexpanded.
+    if p_start and p_end and p_start != p_end:
+        return seg
+    prefix = p_start or p_end            # step 7: preserve a shared prefix once
+    # Step 6: expand only when the end has fewer digits than the start.
+    end_out = _expand_end(start, end) if len(end) < len(start) else end
+    return f"{prefix}{start}-{end_out}{suffix}"
 
 
 def _canonical_pages(s: str) -> str:
     """Canonicalize a page range so an elided end page compares equal to its
-    written-out form (F2-A). PubMed elides the shared leading digits of the end
-    page (``141-4``, ``1083-91``, ``3143-421``) and uses hyphens where citations
-    use en/em dashes (``117–32``, ``925–8.e4``).
+    written-out form (F2-A, spec §7.1). PubMed elides the shared leading digits of
+    the end page (``141-4``, ``1083-91``, ``3143-421``, and with a boundary carry
+    ``1199-8``) and uses hyphens where citations use en/em dashes (``117–32``,
+    ``925–8.e4``); shared page-side prefixes (``S141-S144`` vs ``S141-4``) and
+    comma-separated multi-segment ranges (``123-5,130-2``) also canonicalize here.
 
-    1. Fold every dash in ``_PAGE_DASHES`` to ``-``; strip internal whitespace;
+    1. ``None``/empty/whitespace -> ``""`` so the caller keeps ``pages_match``
+       tri-state (``None`` when either side is absent).
+    2. Fold every dash in ``_PAGE_DASHES`` to ``-``, remove internal whitespace,
        lowercase.
-    2. When the value is ``<prefix><start>-<end><suffix>`` and the end-page digit
-       string is SHORTER than the start-page digit string, left-pad the end from
-       the start (``925-8`` -> ``925-928``, ``3143-421`` -> ``3143-3421``).
-    3. A non-range value (``S100``, ``e0224455``, ``CD010442``) matches no range
-       and is returned folded but otherwise unchanged.
+    3. Canonicalize each comma-separated segment independently, preserving order.
 
-    Returns ``""`` for a missing value so the caller keeps ``pages_match``
-    tri-state (``None`` when either side is absent)."""
+    A bare start page is NOT expanded to a range (step 9) -- it simply has no ``-``
+    and is returned folded."""
     if not s:
         return ""
     t = s.strip().lower()
     for d in _PAGE_DASHES:
         t = t.replace(d, "-")
     t = re.sub(r"\s+", "", t)
-    m = _PAGE_RANGE_RE.match(t)
-    if not m:
-        return t
-    prefix, start, end, suffix = m.groups()
-    if len(end) < len(start):
-        end = start[:len(start) - len(end)] + end
-    return f"{prefix}{start}-{end}{suffix}"
+    if not t:
+        return ""
+    return ",".join(_canonical_segment(seg) for seg in t.split(","))
 
 
 # =====================================================================
@@ -732,22 +767,17 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
         m.same_work_reason = "physical_location_same_work"
         m.identity_signals = ("pages", "volume", "journal")
         return VERDICT_SAME_WORK_VARIANT, m
-    # STRICT-PREFIX same-work quarantine (F2-D). When one normalized title is a
-    # strict prefix of the other at a word boundary, the shorter is a truncation
-    # of the longer -- the same work under a dropped subtitle. Strict prefix
-    # appears in 11/34 HIGH false positives and 0/17 true positives -- the cleanest
-    # single discriminator in the AUDITED set.
-    #
-    # But strict prefix alone is NOT sufficient in general: the extra tail can be a
-    # DISCRIMINATING qualifier that names a different work in a family --
-    # "Empagliflozin in heart failure" (EMPEROR-Reduced) is a strict prefix of
-    # "...with a preserved ejection fraction" (EMPEROR-Preserved); a same-author
-    # sequel appends "...a multicenter randomized trial...". In every such case a
-    # field CONFIDENTLY disagrees (first-author position or year), so the same
-    # ``not disagree`` deferral F2-C uses -- plus the DOI-disagreement deferral --
-    # keeps those genuine wrong papers HIGH while still quarantining a clean
-    # dropped-subtitle truncation.
-    if (f.doi_match is not False and not disagree
+    # STRICT-PREFIX same-work rule (F2-D) -- DEFERRED and DISABLED in spec revision
+    # 5 (§11). Prefix shape alone cannot distinguish a dropped-subtitle truncation
+    # from a sequel / part / update / subgroup / related publication, it has zero
+    # independent development gain after the safer rules, and its seed-37 rows carry
+    # unresolved or contradictory human labels. The branch is gated OFF here (not
+    # deleted): ``_strict_title_prefix`` and its tests stay in place for the
+    # review-only revival §11 describes, which additionally requires
+    # volume_match/first_author_match/year_match all not-False and no serial/part/
+    # update/edition-marker conflict, with frame-wide firings frozen first. Flip
+    # ``_F2D_STRICT_PREFIX_ENABLED`` only under that full conjunction.
+    if (_F2D_STRICT_PREFIX_ENABLED and f.doi_match is not False and not disagree
             and _strict_title_prefix(claimed.title, cand.title)):
         m.same_work_reason = "strict_prefix_title"
         m.identity_signals = ("strict_prefix",)

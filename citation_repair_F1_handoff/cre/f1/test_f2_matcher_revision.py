@@ -27,21 +27,26 @@ def _pages_match(written: str, resolved: str):
     return fa.pages_match
 
 
-# Acceptance matrix rows (written_pages, resolved_pages, expected pages_match).
+# §7.2 required equality/inequality cases (written_pages, resolved_pages, expected).
 # `is`-comparison against the tri-state literal, never a falsy check.
 @pytest.mark.parametrize("written,resolved,expected", [
     ("141-144", "141-4", True),
-    ("925–8.e4", "925-928.e4", True),   # 925–8.e4 vs 925-928.e4
+    ("1083-1091", "1083-91", True),
     ("3143-3421", "3143-421", True),
+    ("117-132", "117–32", True),        # en dash
+    ("925-928.e4", "925–8.e4", True),
+    ("S141-S144", "S141-4", True),      # shared page-side prefix
+    ("1199-1208", "1199-8", True),      # boundary carry
     ("1-12", "1-12", True),
     ("9-11", "9-12", False),
-    ("", "141-4", None),
+    ("", "141-4", None),                # empty vs any -> None
+    ("123-5,130-2", "123-125,130-132", True),   # comma segments, independent
 ])
 def test_f2a_pages_match_acceptance(written, resolved, expected):
     assert _pages_match(written, resolved) is expected
 
 
-# Direct canonicalizer checks on the spec's verified inputs.
+# Direct canonicalizer checks (spec §7.1 verified inputs + §7.2 required cases).
 @pytest.mark.parametrize("raw,canon", [
     ("141-4", "141-144"),
     ("1083-91", "1083-1091"),
@@ -51,9 +56,18 @@ def test_f2a_pages_match_acceptance(written, resolved, expected):
     ("1-12", "1-12"),
     ("9-11", "9-11"),
     ("925–8.e4", "925-928.e4"),
+    ("S141-S144", "s141-144"),      # shared prefix preserved once
+    ("S141-4", "s141-144"),         # end-side prefix supplied by start's
+    ("e123-e130", "e123-130"),
+    ("e123-30", "e123-130"),
+    ("1199-8", "1199-1208"),        # end below start -> boundary carry
+    ("001-9", "001-009"),           # leading zeroes preserved
+    ("A12-B15", "a12-b15"),         # differing prefixes -> unexpanded
+    ("123-5,130-2", "123-125,130-132"),   # comma segments canonicalized independently
     ("S100", "s100"),               # non-range: folded, otherwise unchanged
     ("e0224455", "e0224455"),
     ("CD010442", "cd010442"),
+    ("xii-xv", "xii-xv"),           # roman-numeral non-digit range: unexpanded
 ])
 def test_f2a_canonical_pages(raw, canon):
     assert _canonical_pages(raw) == canon
@@ -243,23 +257,23 @@ def test_f2d_strict_prefix_helper_word_boundary():
                                 "Identical distinctive title here") is False
 
 
-def test_f2d_strict_prefix_quarantines():
-    # Below accept (author unparsed -> no override) and no confident disagreement:
-    # a dropped-subtitle truncation -> SAME_WORK_VARIANT. A long tail is needed to
-    # push title_sim under accept -- JaroWinkler keeps a strict prefix high, which
-    # is precisely why most truncations already clear to MATCH (F2-D is the tail).
-    c = ClaimedRef(title="Tumor microenvironment signalling", authors=[], journal="")
-    r = RetrievedRecord(resolved=True,
-                        title="Tumor microenvironment signalling in metastatic "
-                              "colorectal adenocarcinoma progression and immune "
-                              "checkpoint evasion mechanisms across an international "
-                              "multicenter prospective validation cohort with "
-                              "extended survival followup and molecular subtyping",
-                        authors=["Kim"], journal="")
+def test_f2d_branch_is_disabled_in_revision_5():
+    # §11: F2-D is DEFERRED and disabled. A strict-prefix pair that WOULD have
+    # quarantined (below accept, no disagreement) must NOT band strict_prefix_title
+    # while the branch is off -- the helper still detects the prefix, but the
+    # verdict path never uses it.
+    from cre.f1.biblio_match import _F2D_STRICT_PREFIX_ENABLED, _strict_title_prefix
+    assert _F2D_STRICT_PREFIX_ENABLED is False
+    short = "Tumor microenvironment signalling"
+    long = (short + " in metastatic colorectal adenocarcinoma progression and "
+            "immune checkpoint evasion mechanisms across an international "
+            "multicenter prospective validation cohort with extended survival "
+            "followup and molecular subtyping")
+    assert _strict_title_prefix(short, long) is True       # helper retained
+    c = ClaimedRef(title=short, authors=[], journal="")
+    r = RetrievedRecord(resolved=True, title=long, authors=["Kim"], journal="")
     v, m = flag_verdict(c, r)
-    assert m.title_sim < 0.85          # long tail keeps it below the clean-match path
-    assert m.same_work_reason == "strict_prefix_title"
-    assert v == VERDICT_SAME_WORK_VARIANT
+    assert m.same_work_reason != "strict_prefix_title"     # branch inert
 
 
 def test_f2d_drug_trial_family_prefix_stays_wrong_paper():
