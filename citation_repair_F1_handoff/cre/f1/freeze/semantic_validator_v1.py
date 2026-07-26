@@ -1944,10 +1944,20 @@ def check_sv110(artifacts, out):
 def validate(artifacts, repo_ctx=None, trusted=None):
     """Run every §12 rule over the supplied artifact universe.
 
-    Always returns list[Violation]: a canonicalization/strict-load failure
-    inside a rule is that rule's violation (an artifact that cannot be
-    canonicalized violates the canon_v1 contract), never an exception.
+    Always returns list[Violation], never an exception: a non-dict input
+    yields a single SV-000/E_INPUT violation (the instrument's own input
+    guard, not a §12 rule); a canonicalization/strict-load failure inside a
+    rule is that rule's violation (an artifact that cannot be canonicalized
+    violates the canon_v1 contract); any other error a malformed artifact
+    provokes inside a rule aborts THAT rule fail-closed as its violation —
+    the zero-violation positive fixtures keep this from masking real
+    implementation bugs.
     """
+    if not isinstance(artifacts, dict):
+        return [Violation("SV-000", "E_INPUT", "<artifacts>",
+                          f"artifacts must be a dict keyed by ARTIFACT_KEYS; "
+                          f"got {type(artifacts).__name__} — fail closed, "
+                          f"nothing validated")]
     if trusted is None:
         trusted = TrustedConstants()
     out = []
@@ -1995,4 +2005,7 @@ def validate(artifacts, repo_ctx=None, trusted=None):
             _v(out, rule_id, "<canonicalization>",
                f"rule aborted by canonicalization/strict-load failure "
                f"(fail closed): {e}")
+        except Exception as e:
+            _v(out, rule_id, "<malformed-input>",
+               f"rule aborted by malformed input (fail closed): {e!r}")
     return out

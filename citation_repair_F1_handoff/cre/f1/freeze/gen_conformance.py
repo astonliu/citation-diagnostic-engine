@@ -19,11 +19,35 @@ Output: F3-F7_SCHEMA_CONFORMANCE_REPORT.txt (no trailing newline), committed.
 Run: cd citation_repair_F1_handoff &&
      PYTHONPATH=. ../.venv_cre/bin/python cre/f1/freeze/gen_conformance.py
 """
-import json, re, sys, hashlib, datetime, pathlib
+import json, os, re, sys, hashlib, datetime, pathlib
 from jsonschema import Draft202012Validator
 
 BASE = pathlib.Path(__file__).resolve().parent
 SCHEMA_FILE = "F3-F7_FINDER_FREEZE_SCHEMAS.json"
+
+# Report layout (ZD integrity round 2, 2026-07-25): volatile lines
+# (generated_utc, interpreter) live OUTSIDE the hashed region; the pin is
+# canonical_body_sha256 over the bytes after the marker line — identical
+# across runs on identical repo bytes, so the digest is regenerable
+# independently of wall clock and interpreter patch level.
+OUT_PATH = BASE / "F3-F7_SCHEMA_CONFORMANCE_REPORT.txt"
+if "--out" in sys.argv:
+    OUT_PATH = pathlib.Path(sys.argv[sys.argv.index("--out") + 1])
+BODY_MARKER = "--- canonical body ---"
+
+if "--verify" in sys.argv:
+    _text = OUT_PATH.read_text()
+    _head, _sep, _body = _text.partition("\n" + BODY_MARKER + "\n")
+    _m = re.search(r"canonical_body_sha256: ([0-9a-f]{64})", _head)
+    if not _sep or not _m:
+        print("VERIFY FAIL: no canonical-body marker/digest in the report")
+        raise SystemExit(1)
+    _actual = hashlib.sha256(_body.encode("utf-8")).hexdigest()
+    print(f"recorded:   {_m.group(1)}")
+    print(f"recomputed: {_actual}")
+    print("VERIFY OK" if _actual == _m.group(1) else "VERIFY FAIL")
+    raise SystemExit(0 if _actual == _m.group(1) else 1)
+
 raw = (BASE / SCHEMA_FILE).read_bytes()
 text = raw.decode("utf-8")
 
@@ -373,10 +397,8 @@ sha = hashlib.sha256(raw).hexdigest()
 now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 lines = []
 lines.append("CRE F3-F7 finder-freeze — schema conformance report (format v14)")
-lines.append(f"generated_utc: {now}")
 import importlib.metadata
 lines.append(f"validator: python-jsonschema {importlib.metadata.version('jsonschema')} (Draft202012Validator)")
-lines.append(f"interpreter: {sys.version.split()[0]}")
 lines.append("command: python gen_conformance.py (extends seed _conf_v11.py)")
 lines.append(f"schema_file: {SCHEMA_FILE} | bytes: {len(raw)} | sha256: {sha}")
 # Governing-file pins (regenerable independently; ZD integrity round 2026-07-25).
@@ -429,14 +451,19 @@ class _Collector:
 
 _collector = _Collector()
 _test_file = BASE.parent / "test_semantic_validator_v1.py"
+# Guard against recursion: the suite's report meta-tests (which invoke this
+# generator as a subprocess) skip themselves when this variable is set.
+os.environ["CRE_GEN_CONFORMANCE_RUNNING"] = "1"
 _pytest_rc = pytest.main(["-q", "--tb=no", "-p", "no:cacheprovider",
                           str(_test_file)], plugins=[_collector])
 
 rule_results = {rid: {"pos": [], "neg": []} for rid in RULES}
+_mapped_ids = set()
 for nodeid, outcome in _collector.results.items():
     m = re.search(r"test_rule_positive_fixture_passes\[(SV-\d{3})\]", nodeid)
     if m:
         rule_results[m.group(1)]["pos"].append(outcome)
+        _mapped_ids.add(nodeid)
         continue
     m = re.search(r"test_sv(\d{3})_(positive|negative)", nodeid)
     if m:
@@ -444,15 +471,22 @@ for nodeid, outcome in _collector.results.items():
         if rid in rule_results:
             kind = "pos" if m.group(2) == "positive" else "neg"
             rule_results[rid][kind].append(outcome)
+            _mapped_ids.add(nodeid)
         continue
     if "test_bootstrap_" in nodeid:  # SV-110 runtime-gate subprocess evidence
         neg = any(t in nodeid for t in ("aborts", "fails_closed", "rejects"))
         rule_results["SV-110"]["neg" if neg else "pos"].append(outcome)
+        _mapped_ids.add(nodeid)
 
 lines.append(f"semantic_validator: semantic_validator_v1 | rules: {len(RULES)} "
              f"(v17 §12 table incl. post-v17 SV-005/SV-072)")
 lines.append(f"fixture suite: cre/f1/test_semantic_validator_v1.py | "
              f"{len(_collector.results)} tests | pytest exit {_pytest_rc}")
+lines.append(f"test breakdown: {len(_mapped_ids)} rule-mapped fixture tests + "
+             f"{len(_collector.results) - len(_mapped_ids)} substrate/unit "
+             f"tests (strict_loader, canon_v1, schema_gate, universes, "
+             f"helpers) = {len(_collector.results)} (report meta-tests skip "
+             f"inside the generator)")
 lines.append("per-rule fixtures (positive / targeted negative, exact fail "
              "code asserted):")
 
@@ -477,9 +511,25 @@ lines.append("NOTES: SV-024 validates response shape presence only until ZD "
              "supplies the per-stage response schemas (residual #5; CONFIG "
              "response_schema_sha256 null). SV-033 coverage_targets are "
              "enforced through the PROPOSED per-item stratum field (residual "
-             "#3, pending ZD approval). SV-110 is a runtime gate: its "
-             "evidence is the bootstrap subprocess fixtures above, plus the "
-             "artifact-side manifest checks.")
-report = "\n".join(lines)
-(BASE / "F3-F7_SCHEMA_CONFORMANCE_REPORT.txt").write_text(report)  # no trailing newline
+             "#3, pending ZD approval). SV-043's known-prohibited superset "
+             "clause is vacuous until ZD supplies input #5 (uniqueness and "
+             "the selection/candidate exclusion checks bind regardless). "
+             "SV-101's retry_after_cap participation clause is runner "
+             "behavior with no artifact-level predicate. SV-110 is a runtime "
+             "gate: its evidence is the bootstrap subprocess fixtures above, "
+             "plus the artifact-side manifest checks.")
+
+report_body = "\n".join(lines)
+body_sha = hashlib.sha256(report_body.encode("utf-8")).hexdigest()
+volatile = [
+    f"generated_utc: {now} (volatile — outside the hashed region)",
+    f"interpreter: {sys.version.split()[0]} (volatile — outside the hashed region)",
+    f"canonical_body_sha256: {body_sha}",
+    "canonical_body: the bytes AFTER the marker line, UTF-8, no trailing "
+    "newline. Same repo bytes -> same digest, independent of wall clock. "
+    "Verify: python gen_conformance.py --verify",
+    BODY_MARKER,
+]
+report = "\n".join(volatile) + "\n" + report_body
+OUT_PATH.write_text(report)  # no trailing newline
 print(report)

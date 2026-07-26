@@ -12,7 +12,9 @@ Verification command:
 import copy
 import hashlib
 import json
+import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -1231,6 +1233,72 @@ def test_bootstrap_stray_drifted_copy_fails_closed(tmp_path):
                        capture_output=True, text=True)
     assert r.returncode == bootstrap.E_BOOTSTRAP_EXIT
     assert "stray copy" in r.stderr or "stale" in r.stderr
+
+
+# ---------------------------------------------------------------------------
+# ZD integrity round 2 (2026-07-25): validate() input hardening + report
+# canonical-digest reproducibility
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("hostile", [None, 7, "", b"", [], float("inf"),
+                                     [{"artifact_type": "config"}], "batch",
+                                     True, 3.14, (), 0])
+def test_validate_returns_violation_not_raise_for_hostile_top_level(hostile):
+    out = validate(hostile, trusted=TRUSTED)
+    assert isinstance(out, list) and out
+    assert out[0].rule_id == "SV-000" and out[0].fail_code == "E_INPUT"
+
+
+@pytest.mark.parametrize("universe", [
+    {"batch": 7}, {"config": []}, {"review_records": 3},
+    {"review_records": [None]}, {"wal_events": [None]},
+    {"stimulus_objects": ["x"]}, {"promotion": "promo"},
+    {"selection_artifact": 0}, {"exclusion_ledger": [7]},
+    {"module_manifest": {"modules": [None]}}])
+def test_validate_returns_list_for_malformed_artifact_values(universe):
+    out = validate(universe, trusted=TRUSTED)
+    assert isinstance(out, list)
+    from cre.f1.freeze.semantic_validator_v1 import RULES as _rules
+    for v in out:
+        assert v.rule_id in _rules or v.rule_id == "SV-000"
+        assert isinstance(v.message, str)
+
+
+GEN = REPO_HANDOFF / "cre" / "f1" / "freeze" / "gen_conformance.py"
+_IN_GENERATOR = os.environ.get("CRE_GEN_CONFORMANCE_RUNNING") == "1"
+
+
+def _run_generator(out_path):
+    env = {**os.environ, "PYTHONPATH": str(REPO_HANDOFF)}
+    r = subprocess.run([PYTHON, str(GEN), "--out", str(out_path)],
+                       capture_output=True, text=True,
+                       cwd=str(REPO_HANDOFF), env=env)
+    assert r.returncode == 0, r.stderr[-2000:]
+    text = out_path.read_text()
+    head, sep, body = text.partition("\n--- canonical body ---\n")
+    m = re.search(r"canonical_body_sha256: ([0-9a-f]{64})", head)
+    assert sep and m, "report lacks the canonical-body marker/digest"
+    assert hashlib.sha256(body.encode("utf-8")).hexdigest() == m.group(1)
+    return m.group(1), body
+
+
+@pytest.mark.skipif(_IN_GENERATOR, reason="generator must not recurse")
+def test_report_canonical_digest_reproducible_across_runs(tmp_path):
+    # Two consecutive generator runs on identical repo bytes must record the
+    # identical canonical digest (wall clock excluded from the hashed region).
+    d1, b1 = _run_generator(tmp_path / "run1.txt")
+    d2, b2 = _run_generator(tmp_path / "run2.txt")
+    assert d1 == d2
+    assert b1 == b2
+
+
+@pytest.mark.skipif(_IN_GENERATOR, reason="generator must not recurse")
+def test_report_verify_mode_passes_on_committed_report():
+    env = {**os.environ, "PYTHONPATH": str(REPO_HANDOFF)}
+    r = subprocess.run([PYTHON, str(GEN), "--verify"], capture_output=True,
+                       text=True, cwd=str(REPO_HANDOFF), env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "VERIFY OK" in r.stdout
 
 
 def test_bootstrap_stale_basename_other_tree_fails_closed(tmp_path):
