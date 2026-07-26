@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import pytest
 
-from cre.f1.biblio_match import (_canonical_pages, field_agreement,
-                                 flag_verdict, is_preprint_source,
-                                 is_preprint_resolved, VERDICT_MATCH,
-                                 VERDICT_SAME_WORK_VARIANT, VERDICT_WRONG_PAPER)
+from cre.f1.biblio_match import (_canonical_pages, _strict_title_prefix,
+                                 field_agreement, flag_verdict,
+                                 is_preprint_source, is_preprint_resolved,
+                                 VERDICT_MATCH, VERDICT_SAME_WORK_VARIANT,
+                                 VERDICT_WRONG_PAPER)
 from cre.f1.schema import ClaimedRef, RetrievedRecord
 
 
@@ -219,3 +220,89 @@ def test_f2c_does_not_fire_on_pages_alone():
     assert m.fields.pages_match is True and m.fields.volume_match is False
     assert m.same_work_reason != "physical_location_same_work"
     assert v == VERDICT_WRONG_PAPER
+
+
+# ======================================================================
+# F2-D -- strict-prefix title same-work rule
+# ======================================================================
+def test_f2d_strict_prefix_helper_word_boundary():
+    # Strict prefix at a word boundary.
+    assert _strict_title_prefix(
+        "Metals toxicity and oxidative stress in cells",
+        "Metals toxicity and oxidative stress in cells and disease models") is True
+    # Not a word boundary -> not a prefix.
+    assert _strict_title_prefix("metallica studies of the genome pathway",
+                                "metallicaseous studies of the genome pathway") is False
+    # General containment (embedded mid-string) is NOT a strict prefix.
+    assert _strict_title_prefix(
+        "The Multidimensional Scale of Perceived Social Support",
+        "Psychometric characteristics of the Multidimensional Scale of "
+        "Perceived Social Support") is False
+    # Equal titles are not a strict prefix.
+    assert _strict_title_prefix("Identical distinctive title here",
+                                "Identical distinctive title here") is False
+
+
+def test_f2d_strict_prefix_quarantines():
+    # Below accept (author unparsed -> no override) and no confident disagreement:
+    # a dropped-subtitle truncation -> SAME_WORK_VARIANT. A long tail is needed to
+    # push title_sim under accept -- JaroWinkler keeps a strict prefix high, which
+    # is precisely why most truncations already clear to MATCH (F2-D is the tail).
+    c = ClaimedRef(title="Tumor microenvironment signalling", authors=[], journal="")
+    r = RetrievedRecord(resolved=True,
+                        title="Tumor microenvironment signalling in metastatic "
+                              "colorectal adenocarcinoma progression and immune "
+                              "checkpoint evasion mechanisms across an international "
+                              "multicenter prospective validation cohort with "
+                              "extended survival followup and molecular subtyping",
+                        authors=["Kim"], journal="")
+    v, m = flag_verdict(c, r)
+    assert m.title_sim < 0.85          # long tail keeps it below the clean-match path
+    assert m.same_work_reason == "strict_prefix_title"
+    assert v == VERDICT_SAME_WORK_VARIANT
+
+
+def test_f2d_drug_trial_family_prefix_stays_wrong_paper():
+    # EMPEROR-Reduced abstract is a strict prefix of EMPEROR-Preserved, but they
+    # are DIFFERENT trials; first-author position disagrees -> WRONG_PAPER.
+    c = ClaimedRef(title="Empagliflozin in heart failure",
+                   authors=["Packer", "Anker", "Butler"], year=2020,
+                   journal="European Heart Journal", volume="41", pages="S917")
+    r = RetrievedRecord(resolved=True,
+                        title="Empagliflozin in heart failure with a preserved "
+                              "ejection fraction",
+                        authors=["Anker", "Butler", "Packer"], year=2021,
+                        journal="N Engl J Med", volume="385", pages="1451-1461")
+    v, m = flag_verdict(c, r)
+    assert m.same_work_reason != "strict_prefix_title"
+    assert v == VERDICT_WRONG_PAPER
+
+
+def test_f2d_containment_class_stays_wrong_paper():
+    # 2280326-shape: claimed title embedded mid-string (not a prefix) -> the
+    # deliberately-untouched containment class must stay WRONG_PAPER.
+    ct = "The Multidimensional Scale of Perceived Social Support"
+    rt = ("Psychometric characteristics of the Multidimensional Scale of "
+          "Perceived Social Support")
+    c = ClaimedRef(title=ct, authors=["Zimet"], year=1988, journal="J Pers Assess")
+    r = RetrievedRecord(resolved=True, title=rt, authors=["Zimet"], year=1990,
+                        journal="J Pers Assess")
+    v, m = flag_verdict(c, r)
+    assert m.same_work_reason != "strict_prefix_title"
+    assert v == VERDICT_WRONG_PAPER
+
+
+def test_f2d_disagreeing_dois_defer():
+    # A truncation carrying the wrong DOI is a mis-assembled citation -> defer.
+    c = ClaimedRef(title="Comprehensive analysis of tumor microenvironment signals",
+                   authors=[], journal="Cell",
+                   claimed_doi="10.1016/j.cell.2019.01.001")
+    r = RetrievedRecord(resolved=True,
+                        title="Comprehensive analysis of tumor microenvironment "
+                              "signals in colorectal cancer progression and immune "
+                              "evasion across a multicenter patient cohort study",
+                        authors=["Kim"], journal="Cell",
+                        doi="10.1016/j.cell.2019.99.999")
+    v, m = flag_verdict(c, r)
+    assert m.fields.doi_match is False
+    assert m.same_work_reason != "strict_prefix_title"

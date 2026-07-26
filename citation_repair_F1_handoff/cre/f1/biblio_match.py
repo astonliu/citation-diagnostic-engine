@@ -231,6 +231,25 @@ def is_scoreable_title(title: str, journal: str = "") -> bool:
     return True
 
 
+def _strict_title_prefix(a: str, b: str) -> bool:
+    """True iff one NORMALIZED title is a strict prefix of the other at a word
+    boundary (the shorter is a truncation of the longer). NOT general
+    containment: 'either title inside the other' costs true positives (F2-D), so
+    a title embedded mid-string (the deliberately-untouched containment class,
+    e.g. 2280326 'Psychometric characteristics of the <claimed>') does not match.
+    Both sides must be distinctive so a trivially short fragment never prefixes an
+    unrelated title."""
+    na, nb = normalize_title(a), normalize_title(b)
+    if not na or not nb or na == nb:
+        return False
+    shorter, longer = (na, nb) if len(na) < len(nb) else (nb, na)
+    if not (is_distinctive_title(shorter) and is_distinctive_title(longer)):
+        return False
+    # Word-boundary prefix: the char in ``longer`` right after ``shorter`` must be
+    # a space, so 'metal' is not read as a prefix of 'metallurgy'.
+    return longer.startswith(shorter) and longer[len(shorter):len(shorter) + 1] == " "
+
+
 def jaro_winkler(a: str, b: str) -> float:
     """Prefix-weighted edit similarity in 0..1 (truncation-robust)."""
     return float(JaroWinkler.similarity(a, b))
@@ -712,6 +731,26 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
             and f.doi_match is not False and not disagree):
         m.same_work_reason = "physical_location_same_work"
         m.identity_signals = ("pages", "volume", "journal")
+        return VERDICT_SAME_WORK_VARIANT, m
+    # STRICT-PREFIX same-work quarantine (F2-D). When one normalized title is a
+    # strict prefix of the other at a word boundary, the shorter is a truncation
+    # of the longer -- the same work under a dropped subtitle. Strict prefix
+    # appears in 11/34 HIGH false positives and 0/17 true positives -- the cleanest
+    # single discriminator in the AUDITED set.
+    #
+    # But strict prefix alone is NOT sufficient in general: the extra tail can be a
+    # DISCRIMINATING qualifier that names a different work in a family --
+    # "Empagliflozin in heart failure" (EMPEROR-Reduced) is a strict prefix of
+    # "...with a preserved ejection fraction" (EMPEROR-Preserved); a same-author
+    # sequel appends "...a multicenter randomized trial...". In every such case a
+    # field CONFIDENTLY disagrees (first-author position or year), so the same
+    # ``not disagree`` deferral F2-C uses -- plus the DOI-disagreement deferral --
+    # keeps those genuine wrong papers HIGH while still quarantining a clean
+    # dropped-subtitle truncation.
+    if (f.doi_match is not False and not disagree
+            and _strict_title_prefix(claimed.title, cand.title)):
+        m.same_work_reason = "strict_prefix_title"
+        m.identity_signals = ("strict_prefix",)
         return VERDICT_SAME_WORK_VARIANT, m
     # A confident disagreement on a NON-identical title is wrong-paper evidence
     # and MUST stay in the HIGH band even when confirmatory field boosts lifted
