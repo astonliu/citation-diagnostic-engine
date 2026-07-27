@@ -473,3 +473,50 @@ def test_consistency_check_ignores_singletons_and_agreeing_groups():
          "verdict": VERDICT_MATCH},
     ]
     assert find_verdict_consistency_conflicts(recs) == []
+
+
+# ======================================================================
+# Item 1 (§14.3/§15) -- preprint_published_version requires version evidence
+# ======================================================================
+def test_item1_preprint_shape_with_disagreeing_dois_is_not_same_work():
+    # PMC12733676:B29 shape: preprint-shaped claim, DIFFERENT DOIs (+journal/year
+    # disagree) -> a different paper, NOT a version family -> routes to review.
+    c = ClaimedRef(title="Least Squares Generative Adversarial Networks",
+                   authors=["Mao"], year=2016, journal="arXiv:1611.04076",
+                   claimed_doi="10.48550/arXiv.1611.04076")
+    r = RetrievedRecord(resolved=True,
+                        title="On the Effectiveness of Least Squares Generative "
+                              "Adversarial Networks", authors=["Mao"], year=2018,
+                        journal="IEEE TPAMI", doi="10.1109/tpami.2018.2872043")
+    v, m = flag_verdict(c, r)
+    assert m.fields.doi_match is False
+    assert m.same_work_reason == "preprint_shape_unconfirmed"
+    assert v == VERDICT_WRONG_PAPER
+
+
+def test_item1_preprint_retitle_with_shared_doi_stays_same_work():
+    # A preprint retitle with a shared DOI (doiT): venue changes and year drifts,
+    # but the DOI does not disagree -> version family stands.
+    c = ClaimedRef(title="Deep learning for variant calling", authors=["Aguilar"],
+                   year=2020, journal="bioRxiv",
+                   claimed_doi="10.1101/2020.07.15.204305")
+    r = RetrievedRecord(resolved=True,
+                        title="A convolutional approach to variant detection",
+                        authors=["Aguilar"], year=2022, journal="Bioinformatics",
+                        doi="10.1101/2020.07.15.204305")
+    v, m = flag_verdict(c, r)
+    assert m.same_work_reason == "preprint_published_version"
+    assert v == VERDICT_SAME_WORK_VARIANT
+
+
+def test_item1_declared_relation_establishes_version_family():
+    # A declared is-preprint-of link on the resolved record establishes the version
+    # relation even when the DOI is absent on a side.
+    c = ClaimedRef(title="Some preprint title", authors=["Lee"], year=2020,
+                   journal="bioRxiv")
+    r = RetrievedRecord(resolved=True, title="The published retitle", authors=["Lee"],
+                        year=2022, journal="Nature",
+                        related_pmids={"is-preprint-of": ["123456"]})
+    v, m = flag_verdict(c, r)
+    assert m.same_work_reason == "preprint_published_version"
+    assert v == VERDICT_SAME_WORK_VARIANT

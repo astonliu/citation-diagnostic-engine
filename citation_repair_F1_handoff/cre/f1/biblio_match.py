@@ -641,6 +641,41 @@ def is_preprint_resolved(resolved) -> bool:
     return "preprint" in {p.lower() for p in (resolved.publication_types or [])}
 
 
+# Declared preprint<->published version relations, as they appear in a resolved
+# record's ``related_pmids`` map (hyphen and underscore spellings both seen).
+_VERSION_RELATION_KEYS = ("preprint", "has-preprint", "has_preprint",
+                          "is-preprint-of", "is_preprint_of",
+                          "is-version-of", "is_version_of")
+
+
+def _version_relation_evidence(claimed, cand, f: FieldAgreement) -> bool:
+    """Whether a preprint<->published VERSION relation is actually ESTABLISHED
+    (spec §14.3) -- a claim about provenance needs provenance evidence, not two
+    titles looking alike. True on either:
+
+      * a declared version relation on the resolved record (an
+        is-preprint-of / has-preprint / is-version-of link in ``related_pmids``);
+      * the claimed side reads as a preprint AND the DOIs do not CONFIDENTLY
+        disagree (``doi_match is not False``).
+
+    The refutation is keyed on the DOI, NOT on year or journal: a genuine
+    preprint->published pair normally CHANGES venue (arXiv -> the journal) and
+    DRIFTS the year by the publication lag, so a journal or year disagreement is
+    expected and cannot refute the relation (requiring them to agree would wrongly
+    reject 35264587, the canonical F2_V3_5 preprint retitle). A confident DOI
+    disagreement is a mismatch of a globally-unique work identifier and DOES
+    refute it: PMC12733676:B29 carries two different DOIs (Least Squares GAN vs
+    "On the Effectiveness of..."), so it is a different paper, not a version.
+
+    The authoritative network relations (Crossref is-preprint-of, the bioRxiv
+    published-DOI link) are established upstream in resolve_a.py; the offline
+    matcher has the record's related_pmids and the DOI agreement."""
+    rel = getattr(cand, "related_pmids", None) or {}
+    if any(k in rel for k in _VERSION_RELATION_KEYS):
+        return True
+    return is_preprint_source(claimed) and f.doi_match is not False
+
+
 def _physical_location_conjunction(f: FieldAgreement) -> bool:
     """The F2-C physical-location signal: canonicalized pages, volume, and journal
     all agree and the DOIs do not confidently disagree. Shared by the ordinary-
@@ -776,9 +811,21 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     first_author_ok = (f.first_author_match is True or
                        (f.first_author_match is None and f.author_match is True))
     if is_preprint_source(claimed) and first_author_ok and disagree:
-        m.same_work_reason = "preprint_published_version"
+        # A version relation is a claim about PROVENANCE, so it needs provenance
+        # evidence -- title similarity alone cannot establish it (spec §14.3/§15).
+        # PMC12733676:B29 (Least Squares GAN vs "On the Effectiveness of..."), with
+        # doi/journal/year all disagreeing, is a DIFFERENT paper and must not be
+        # quarantined as a preprint's published version.
+        if _version_relation_evidence(claimed, cand, f):
+            m.same_work_reason = "preprint_published_version"
+            m.identity_signals = ("preprint_source", "first_author",
+                                  "version_relation")
+            return VERDICT_SAME_WORK_VARIANT, m
+        # Preprint SHAPE only, no provenance evidence: not established as a version
+        # family -> route to review as a possible wrong paper, not same-work.
+        m.same_work_reason = "preprint_shape_unconfirmed"
         m.identity_signals = ("preprint_source", "first_author")
-        return VERDICT_SAME_WORK_VARIANT, m
+        return VERDICT_WRONG_PAPER, m
     # PHYSICAL-LOCATION same-work quarantine (F2-C; depends on F2-A). Two distinct
     # articles cannot occupy the same page range of the same volume of the same
     # journal. When the CANONICALIZED pages agree AND volume agrees AND journal
