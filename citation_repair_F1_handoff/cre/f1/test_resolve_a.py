@@ -36,8 +36,11 @@ class _FakeSession:
 
     def get(self, url, params=None, timeout=None, headers=None):
         self.calls.append(url)
+        # DOIs are case-insensitive and the resolver normalizes them to lowercase
+        # before building the URL, so match case-insensitively.
+        low = url.lower()
         for frag, payload in self.routes.items():
-            if frag in url:
+            if frag.lower() in low:
                 if payload is None:
                     return _Resp({}, status=404)
                 return _Resp(payload)
@@ -175,3 +178,91 @@ def test_batch_checkpoints_and_resumes(tmp_path):
         id_of=lambda r: r["id"], session=sess, steps=("cited_doi",))
     assert counts2["skipped"] == 2
     assert len(out.read_text().strip().splitlines()) == 2
+
+
+# ==========================================================================
+# Rev 5 audit: DataCite dereference (arXiv) + bioRxiv preprint->published link
+# ==========================================================================
+from cre.f1.resolve_a import (dereference_doi, resolve_by_datacite_doi,
+                              biorxiv_published_doi)
+from cre.f1.biblio_match import is_preprint_resolved
+
+
+def _datacite_preprint(doi, title, family="Aguilar", year=2021):
+    return {"data": {"attributes": {
+        "doi": doi, "titles": [{"title": title}],
+        "creators": [{"familyName": family}], "publicationYear": year,
+        "container": {"title": ""},
+        "types": {"resourceTypeGeneral": "Preprint"}}}}
+
+
+def test_arxiv_doi_dereferences_via_datacite_not_crossref():
+    doi = "10.48550/arXiv.2101.00001"
+    # Crossref would 404 for an arXiv DOI; the fake has ONLY a DataCite route.
+    sess = _FakeSession({"api.datacite.org/dois/10.48550/arxiv.2101.00001":
+                         _datacite_preprint("10.48550/arxiv.2101.00001",
+                                            "A deep learning preprint")})
+    rec = dereference_doi(doi, session=sess)
+    assert rec is not None and rec.title == "A deep learning preprint"
+    # DataCite Preprint resourceType -> is_preprint_resolved fires (spec §9 analogue)
+    assert is_preprint_resolved(rec) is True
+    # routed straight to DataCite: no Crossref call was made
+    assert not any("crossref" in u for u in sess.calls)
+
+
+def test_crossref_miss_falls_back_to_datacite_not_called_dead():
+    doi = "10.5555/only-on-datacite"
+    sess = _FakeSession({
+        "api.crossref.org/works/10.5555/only-on-datacite": None,   # 404
+        "api.datacite.org/dois/10.5555/only-on-datacite":
+            _datacite_preprint("10.5555/only-on-datacite", "Registered on DataCite",
+                               year=2020)})
+    rec = dereference_doi(doi, session=sess)
+    assert rec is not None and rec.title == "Registered on DataCite"
+    # Crossref was tried first, DataCite second -- a Crossref 404 is not "dead".
+    assert any("crossref" in u for u in sess.calls)
+    assert any("datacite" in u for u in sess.calls)
+
+
+def test_biorxiv_published_link_routes_same_work_not_repair():
+    # PMC8887078:R1 shape: cited bioRxiv preprint whose published version IS B.
+    claimed = ClaimedRef(title="A new coronavirus associated with human "
+                         "respiratory disease in China", authors=["Wu"], year=2020,
+                         claimed_doi="10.1101/2020.02.07.937862")
+    b = RetrievedRecord(resolved=True,
+                        title="The species Severe acute respiratory syndrome-related "
+                              "coronavirus: classifying 2019-nCoV and naming it "
+                              "SARS-CoV-2", authors=["Coronaviridae Study Group"],
+                        year=2020, doi="10.1038/s41564-020-0695-z", pmid="32123347")
+    sess = _FakeSession({"api.biorxiv.org/details/biorxiv/10.1101/2020.02.07.937862":
+                         {"collection": [{"published": "10.1038/s41564-020-0695-z"}]}})
+    ar = assess_a_vs_b(claimed, b, session=sess, steps=("cited_doi",))
+    assert ar.outcome == OUTCOME_NOT_F2
+    assert ar.a_source == "biorxiv_relation"
+    assert ar.proposed_repair is None
+    assert ar.evidence["relation"] == "preprint_of"
+
+
+def test_biorxiv_unpublished_preprint_falls_through_to_cascade():
+    # A bioRxiv preprint with no recorded publication -> no version-family shortcut;
+    # the cascade dereferences the preprint itself.
+    claimed = ClaimedRef(title="An unpublished preprint", authors=["X"], year=2021,
+                         claimed_doi="10.1101/2021.01.01.000001")
+    b = RetrievedRecord(resolved=True, title="Different resolved paper",
+                        doi="10.1000/b", pmid="1")
+    sess = _FakeSession({
+        "api.biorxiv.org/details/biorxiv/10.1101/2021.01.01.000001":
+            {"collection": [{"published": "NA"}]},
+        "api.biorxiv.org/details/medrxiv/10.1101/2021.01.01.000001":
+            {"collection": [{"published": "NA"}]},
+        "api.crossref.org/works/10.1101/2021.01.01.000001":
+            _crossref_work("10.1101/2021.01.01.000001", "An unpublished preprint")})
+    ar = assess_a_vs_b(claimed, b, session=sess, steps=("cited_doi",))
+    assert ar.a_source != "biorxiv_relation"
+    assert ar.outcome == OUTCOME_F2_WITH_REPAIR      # A (preprint) != B
+
+
+def test_biorxiv_published_doi_ignores_non_biorxiv_dois():
+    # A non-datestamped 10.1101 (CSHL journal) or any other DOI -> no bioRxiv call.
+    assert biorxiv_published_doi("10.1101/gr.209601.116", session=_FakeSession({})) == ""
+    assert biorxiv_published_doi("10.1038/x", session=_FakeSession({})) == ""
