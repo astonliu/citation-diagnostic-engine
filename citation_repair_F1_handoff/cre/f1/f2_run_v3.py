@@ -442,3 +442,54 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
     }
     return _write_run(records, out_dir=out_dir, out_prefix=out_prefix,
                       version=version, extra=diag, seed=seed)
+
+
+# =====================================================================
+# CLI entry point for the offline reband (spec §20 verification step)
+# =====================================================================
+def _cli(argv: "Optional[list[str]]" = None) -> int:
+    """``python -m cre.f1.f2_run_v3 --reband-from-cache ...`` -- the runnable form
+    of §20's "reband the frozen seed-37 frame offline" step. Wraps
+    ``reband_from_cache`` (previously a Python-only function, so the documented
+    command had never been executable).
+
+    The resolved cache is keyed by PMID and does NOT carry a source PMCID, so the
+    source-PMCID frame is derived from the ``--xml-dir`` file stems. That means a
+    real reband REQUIRES the pinned source-XML corpus present: against 0-byte XML
+    stubs the stem list is empty and ``reband_from_cache`` refuses (it will not
+    silently fan a PMID across an unscoped directory). Frame-wide verification
+    therefore only closes where the real corpus is readable -- see §2.2."""
+    import argparse
+    import glob
+
+    p = argparse.ArgumentParser(
+        prog="python -m cre.f1.f2_run_v3",
+        description="Offline reband of a frozen F2 frame from the two caches "
+                    "(source XML + resolved records); no network.")
+    p.add_argument("--reband-from-cache", dest="reband", action="store_true",
+                   required=True, help="run the offline reband (the only mode).")
+    p.add_argument("--resolved-cache", required=True,
+                   help="path to the resolved-record cache JSONL.")
+    p.add_argument("--xml-dir", required=True,
+                   help="directory of source PMC XML (its file stems define the "
+                        "source-PMCID frame).")
+    p.add_argument("--out-dir", default=".")
+    p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--version", default="v3_1")
+    args = p.parse_args(argv)
+
+    stems = [os.path.splitext(os.path.basename(x))[0]
+             for x in sorted(glob.glob(os.path.join(args.xml_dir, "*.xml"))
+                             + glob.glob(os.path.join(args.xml_dir, "*.nxml")))]
+    summary = reband_from_cache(
+        xml_dir=args.xml_dir, resolved_cache_path=args.resolved_cache,
+        out_dir=args.out_dir, version=args.version, seed=args.seed,
+        src_pmcids=stems or None)
+    # Print the scalar summary fields (skip the long audit lists) as JSON.
+    scalar = {k: v for k, v in summary.items() if not isinstance(v, list)}
+    print(json.dumps(scalar, indent=2))
+    return 0
+
+
+if __name__ == "__main__":               # pragma: no cover
+    raise SystemExit(_cli())
