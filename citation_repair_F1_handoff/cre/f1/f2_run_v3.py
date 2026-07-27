@@ -454,13 +454,16 @@ def _cli(argv: "Optional[list[str]]" = None) -> int:
     command had never been executable).
 
     The resolved cache is keyed by PMID and does NOT carry a source PMCID, so the
-    source-PMCID frame is derived from the ``--xml-dir`` file stems. That means a
-    real reband REQUIRES the pinned source-XML corpus present: against 0-byte XML
-    stubs the stem list is empty and ``reband_from_cache`` refuses (it will not
-    silently fan a PMID across an unscoped directory). Frame-wide verification
-    therefore only closes where the real corpus is readable -- see §2.2."""
+    source-PMCID frame is derived from the ``--xml-dir`` file stems. A real reband
+    REQUIRES the pinned source-XML corpus present, and this command FAILS LOUD when
+    it is not: no XML files -> argparse error (exit 2); a frame that comes back
+    empty (``n_records == 0`` -- 0-byte stubs, an empty cache, or files with no
+    PMID-bearing refs) -> a diagnostic on stderr and exit 3, with the misleading
+    all-zeros summary kept OFF stdout so it can never read as a pass. Frame-wide
+    verification therefore only closes where the real corpus is readable -- §2.2."""
     import argparse
     import glob
+    import sys
 
     p = argparse.ArgumentParser(
         prog="python -m cre.f1.f2_run_v3",
@@ -481,12 +484,32 @@ def _cli(argv: "Optional[list[str]]" = None) -> int:
     stems = [os.path.splitext(os.path.basename(x))[0]
              for x in sorted(glob.glob(os.path.join(args.xml_dir, "*.xml"))
                              + glob.glob(os.path.join(args.xml_dir, "*.nxml")))]
+    # Refuse an ABSENT corpus up front: no XML files at all is never a valid
+    # reband (a missing/wrong --xml-dir), so fail loud before pretending to run.
+    if not stems:
+        p.error(f"--xml-dir {args.xml_dir!r} contains no .xml/.nxml files; the "
+                f"pinned source corpus must be present for a reband.")
+
     summary = reband_from_cache(
         xml_dir=args.xml_dir, resolved_cache_path=args.resolved_cache,
         out_dir=args.out_dir, version=args.version, seed=args.seed,
-        src_pmcids=stems or None)
-    # Print the scalar summary fields (skip the long audit lists) as JSON.
+        src_pmcids=stems)
     scalar = {k: v for k, v in summary.items() if not isinstance(v, list)}
+
+    # Refuse an EMPTY frame: n_records == 0 means the corpus and/or cache produced
+    # nothing (0-byte XML stubs, an empty cache, a corpus of files with no
+    # PMID-bearing refs). An all-zeros summary at exit 0 reads as a PASS -- exactly
+    # the silent-empty-run failure this project keeps hitting -- so make it FATAL
+    # with a non-zero exit and keep the misleading summary OFF stdout.
+    if not summary.get("n_records"):
+        print(json.dumps(scalar, indent=2), file=sys.stderr)
+        print(f"ERROR: reband produced an EMPTY frame (n_records=0) from "
+              f"--xml-dir {args.xml_dir!r} / --resolved-cache "
+              f"{args.resolved_cache!r}. The source corpus and/or resolved cache "
+              f"is missing or unreadable (e.g. 0-byte XML stubs). This is NOT a "
+              f"valid verification; refusing.", file=sys.stderr)
+        return 3
+
     print(json.dumps(scalar, indent=2))
     return 0
 

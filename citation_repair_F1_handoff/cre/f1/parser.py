@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Iterator
 import os
 import re
+import sys
 
 try:
     from lxml import etree
@@ -340,7 +341,7 @@ def iter_pmc_dir(dirpath: str, *,
                 try:
                     yield from parse_pmc_xml(path, source_pmcid=pmcid)
                 except Exception as e:                       # noqa: BLE001
-                    print(f"[parse-skip] {pmcid}{suffix}: {e}")
+                    print(f"[parse-skip] {pmcid}{suffix}: {e}", file=sys.stderr)
                 break
         if not missing:
             return
@@ -355,4 +356,4 @@ def iter_pmc_dir(dirpath: str, *,
                 try:
                     yield from parse_pmc_xml(os.path.join(dp, fn), source_pmcid=pmcid)
                 except Exception as e:                       # noqa: BLE001
-                    print(f"[parse-skip] {fn}: {e}")
+                    print(f"[parse-skip] {fn}: {e}", file=sys.stderr)
