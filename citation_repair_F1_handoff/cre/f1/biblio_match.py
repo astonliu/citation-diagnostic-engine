@@ -38,6 +38,7 @@ from .textnorm import fold_bibliographic_text, fold_chemical_charges
 from .work_identity import (assess_same_work, first_author_equivalent,
                             doi_equivalent, journal_equivalent,
                             is_distinctive_title)
+from .journal_identity import journal_identity
 
 # ``Claimed`` is the handoff's name for the claimed-reference metadata object.
 Claimed = ClaimedRef
@@ -63,6 +64,12 @@ class FieldAgreement:
     volume_match: Optional[bool] = None
     pages_match: Optional[bool] = None
     doi_match: Optional[bool] = None
+    # F2-G (spec §8.1): how journal_match was decided and whether that method is
+    # authoritative enough for F2-C. Only issn_intersection / authority_alias /
+    # nlm_unique_id / manual_alias set ``journal_match_authoritative`` True;
+    # exact_text and containment_heuristic do not.
+    journal_match_method: str = ""
+    journal_match_authoritative: bool = False
 
 
 @dataclass
@@ -380,7 +387,14 @@ def field_agreement(claimed: Claimed, cand: RetrievedRecord) -> FieldAgreement:
     # the preprint year-tolerance below can require journal corroboration.
     cj, rj = _norm(claimed.journal), _norm(cand.journal)
     if cj and rj:
-        fa.journal_match = journal_equivalent(claimed.journal, cand.journal)
+        # F2-G: layered comparison (ISSN / NLM authority / manual-alias ahead of
+        # the unchanged containment fallback). With no pinned snapshot loaded the
+        # authority is empty, so this returns the SAME True/False containment
+        # result as before -- behavior is unchanged until a snapshot is dropped in.
+        jm, method, authoritative = journal_identity(claimed.journal, cand.journal)
+        fa.journal_match = jm
+        fa.journal_match_method = method
+        fa.journal_match_authoritative = authoritative
 
     # year: agree within +/-1. A 2-year gap is read as CAN'T-JUDGE (None, never a
     # penalty) ONLY when the resolved year is epub/preprint-derived (year_from_dep)

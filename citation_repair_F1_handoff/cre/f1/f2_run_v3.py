@@ -410,9 +410,20 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
         key=lambda row: (row["citation_id"], row["pmid"]),
     )
 
+    # F2-G residual census (spec §8.3): the distinct (written_journal,
+    # resolved_journal) pairs matched ONLY by the containment heuristic -- the
+    # review artifact from which ZD builds versioned manual aliases. Recomputed
+    # from the frame's journal pairs, ranked by frequency.
+    from .journal_identity import containment_only_census
+    journal_containment_census = containment_only_census(
+        (r.get("written_journal") or "", r.get("resolved_journal") or "")
+        for r in records)
+
     diag = {
         "n_resolved_cache": len(cache),
         "n_joined": len(items),
+        "journal_containment_census": journal_containment_census,
+        "n_journal_containment_only": len(journal_containment_census),
         "n_cache_rows_joined": n_cache_rows_joined,
         "n_occurrence_fanout": n_raw_occurrence_joins - n_cache_rows_joined,
         "n_occurrence_duplicates_deduped": n_occurrence_duplicates_deduped,
