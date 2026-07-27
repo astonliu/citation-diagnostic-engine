@@ -17,6 +17,15 @@ from cre.f1.resolve_a import (assess_a_vs_b, resolve_by_cited_doi, preflight,
 from cre.f1.schema import ClaimedRef, RetrievedRecord
 
 
+@pytest.fixture(autouse=True)
+def _no_backoff_sleep(monkeypatch):
+    # The error tests raise RequestException, which request_with_retry retries with
+    # real exponential backoff. Drive it with zero sleeping (the backoff is
+    # injectable for exactly this reason); production behavior is unchanged.
+    import cre.f1.ratelimit as rl
+    monkeypatch.setattr(rl.time, "sleep", lambda *a, **k: None)
+
+
 class _Resp:
     def __init__(self, payload, status=200):
         self._payload = payload
@@ -41,6 +50,8 @@ class _FakeSession:
         low = url.lower()
         for frag, payload in self.routes.items():
             if frag.lower() in low:
+                if isinstance(payload, Exception):
+                    raise payload              # simulate a thrown request
                 if payload is None:
                     return _Resp({}, status=404)
                 return _Resp(payload)
@@ -120,9 +131,11 @@ def test_a_resolves_to_nothing_is_unscoreable():
     claimed = ClaimedRef(title="A totally unfindable garbled title fragment",
                          authors=["Nemo"], year=1900)
     b = RetrievedRecord(resolved=True, title="B", doi="10.1/b", pmid="1")
-    sess = _FakeSession({})   # every search misses
-    ar = assess_a_vs_b(claimed, b, session=sess,
-                       steps=("cited_doi", "pubmed", "candidates"))
+    # A genuine clean miss: every source COMPLETES (200) with no candidate. (An
+    # all-404 session would now be retrieval_incomplete -> undetermined, §14.6.)
+    sess = _FakeSession({"api.crossref.org/works": {"message": {"items": []}},
+                         "api.openalex.org/works": {"results": []}})
+    ar = assess_a_vs_b(claimed, b, session=sess, steps=("candidates",))
     assert ar.outcome == OUTCOME_UNSCOREABLE
     assert ar.proposed_repair is None
 
@@ -266,3 +279,100 @@ def test_biorxiv_published_doi_ignores_non_biorxiv_dois():
     # A non-datestamped 10.1101 (CSHL journal) or any other DOI -> no bioRxiv call.
     assert biorxiv_published_doi("10.1101/gr.209601.116", session=_FakeSession({})) == ""
     assert biorxiv_published_doi("10.1038/x", session=_FakeSession({})) == ""
+
+
+# ==========================================================================
+# Item 3: OUTCOME_UNDETERMINED reachable (§14.6) + PMC8015328:ref011 resolver
+# ==========================================================================
+import requests as _requests  # noqa: E402
+from cre.f1.resolve_a import OUTCOME_UNDETERMINED  # noqa: E402
+
+
+def test_provider_error_routes_undetermined_not_unscoreable():
+    # A thrown search request must NOT be conflated with 'A not found'.
+    claimed = ClaimedRef(title="A findable enough title fragment", authors=["X"],
+                         year=2010)
+    b = RetrievedRecord(resolved=True, title="B", doi="10.1/b", pmid="1")
+    sess = _FakeSession({"api.crossref.org/works": _requests.ConnectionError("boom"),
+                         "api.openalex.org/works": _requests.ConnectionError("boom")})
+    ar = assess_a_vs_b(claimed, b, session=sess, steps=("candidates",))
+    assert ar.outcome == OUTCOME_UNDETERMINED
+    assert ar.evidence["provider_errors"]        # records which source errored
+
+
+def test_clean_miss_routes_unscoreable_not_undetermined():
+    # Every source completed (200) with no candidate -> clean miss -> unscoreable.
+    claimed = ClaimedRef(title="A totally unfindable garbled fragment",
+                         authors=["Nemo"], year=1900)
+    b = RetrievedRecord(resolved=True, title="B", doi="10.1/b", pmid="1")
+    sess = _FakeSession({"api.crossref.org/works": {"message": {"items": []}},
+                         "api.openalex.org/works": {"results": []}})
+    ar = assess_a_vs_b(claimed, b, session=sess, steps=("candidates",))
+    assert ar.outcome == OUTCOME_UNSCOREABLE
+
+
+# --- PMC8015328:ref011 as a resolver fixture (§18.2) ---------------------------
+# Confirmed TRUE_F2. The citation carries B's DOI (contaminated: written_doi ==
+# resolved_doi), so path 1 is correctly skipped; Nematology is not PubMed-indexed,
+# so path 2 misses and Crossref must carry A. A (Paurodontella persica) has its own
+# DOI, distinct from B (P. composticola) -> f2_with_repair, repair target = A.
+_REF011_TITLE = ("Description of Paurodontella persica sp. n. "
+                 "(Nematoda: Hexatylina) from Iran")
+_REF011_B_DOI = "10.11646/zootaxa.4658.1.9"       # the composticola record (B)
+_REF011_A_DOI = "10.1163/15685411-00003140"        # persica's real DOI (A)
+
+
+def _ref011_claimed():
+    return ClaimedRef(title=_REF011_TITLE, authors=["Panahandeh"], year=2019,
+                      journal="Nematology", claimed_doi=_REF011_B_DOI,
+                      volume="21", pages="1-12")
+
+
+def _ref011_b():
+    return RetrievedRecord(
+        resolved=True, title="Description of Paurodontella composticola sp. n.",
+        authors=["Panahandeh"], year=2019, journal="Zootaxa", doi=_REF011_B_DOI,
+        pmid="31169370", volume="4658", pages="120-130")
+
+
+def _ref011_crossref_hit():
+    return {"message": {"items": [{
+        "DOI": _REF011_A_DOI, "title": [_REF011_TITLE],
+        "author": [{"family": "Panahandeh"}], "issued": {"date-parts": [[2019]]},
+        "container-title": ["Nematology"], "volume": "21", "page": "1-12"}]}}
+
+
+def test_ref011_resolver_crossref_carries_it_to_f2_with_repair():
+    sess = _FakeSession({"api.crossref.org/works": _ref011_crossref_hit(),
+                         "api.openalex.org/works": {"results": []},
+                         "eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch":
+                             {"esearchresult": {"idlist": []}}})
+    ar = assess_a_vs_b(_ref011_claimed(), _ref011_b(), session=sess,
+                       steps=("cited_doi", "pubmed", "candidates"))
+    assert ar.outcome == OUTCOME_F2_WITH_REPAIR
+    assert ar.proposed_repair["doi"] == _REF011_A_DOI
+    assert ar.a_vs_b_doi_match is False
+
+
+def test_ref011_resolver_crossref_error_is_undetermined():
+    # Crossref throws -> undetermined, NOT unscoreable (the failure the audit
+    # flagged: a network error was indistinguishable from 'A not found').
+    sess = _FakeSession({"api.crossref.org/works": _requests.Timeout("slow"),
+                         "api.openalex.org/works": _requests.Timeout("slow"),
+                         "eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch":
+                             {"esearchresult": {"idlist": []}}})
+    ar = assess_a_vs_b(_ref011_claimed(), _ref011_b(), session=sess,
+                       steps=("cited_doi", "pubmed", "candidates"))
+    assert ar.outcome == OUTCOME_UNDETERMINED
+
+
+def test_ref011_resolver_crossref_clean_miss_is_unscoreable():
+    # Crossref completes but does not index Nematology -> clean miss -> unscoreable
+    # (distinct from the network-error case above).
+    sess = _FakeSession({"api.crossref.org/works": {"message": {"items": []}},
+                         "api.openalex.org/works": {"results": []},
+                         "eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch":
+                             {"esearchresult": {"idlist": []}}})
+    ar = assess_a_vs_b(_ref011_claimed(), _ref011_b(), session=sess,
+                       steps=("cited_doi", "pubmed", "candidates"))
+    assert ar.outcome == OUTCOME_UNSCOREABLE

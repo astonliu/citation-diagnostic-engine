@@ -144,9 +144,12 @@ def _datacite_record(attrs: dict) -> RetrievedRecord:
         publication_types=ptypes)
 
 
-def resolve_by_datacite_doi(doi: str, session=None) -> Optional[RetrievedRecord]:
+def resolve_by_datacite_doi(doi: str, session=None,
+                            errors: Optional[list] = None) -> Optional[RetrievedRecord]:
     """Dereference a DOI through DataCite (``api.datacite.org/dois/{doi}``, open,
-    no key). Required for arXiv (10.48550) and any DOI Crossref does not carry."""
+    no key). Required for arXiv (10.48550) and any DOI Crossref does not carry.
+    A THROWN request appends to ``errors`` (retrieval_incomplete); a non-200 (e.g.
+    a 404 = DOI not carried here) is a clean miss and does NOT (§14.4)."""
     doi = (doi or "").strip()
     if not doi:
         return None
@@ -154,6 +157,8 @@ def resolve_by_datacite_doi(doi: str, session=None) -> Optional[RetrievedRecord]
         resp = request_with_retry(session, f"{DATACITE_DOIS}/{doi}", {},
                                   limiter=DATACITE, timeout=20)
     except requests.RequestException:
+        if errors is not None:
+            errors.append("datacite_deref")
         return None
     data = _json_or_none(resp)
     if not data or not isinstance(data.get("data"), dict):
@@ -162,33 +167,38 @@ def resolve_by_datacite_doi(doi: str, session=None) -> Optional[RetrievedRecord]
     return rec if (rec.title or rec.doi) else None
 
 
-def _crossref_deref(doi: str, session=None) -> Optional[RetrievedRecord]:
+def _crossref_deref(doi: str, session=None,
+                    errors: Optional[list] = None) -> Optional[RetrievedRecord]:
     try:
         resp = request_with_retry(session, f"{CROSSREF_WORKS}/{doi}", {},
                                   limiter=CROSSREF, timeout=20)
     except requests.RequestException:
+        if errors is not None:
+            errors.append("crossref_deref")
         return None
     data = _json_or_none(resp)
     if not data or "message" not in data:
-        return None
+        return None                          # non-200 / 404: not carried, fall back
     rec = _crossref_record(data["message"])
     rec.resolved = True
     return rec if (rec.title or rec.doi) else None
 
 
-def dereference_doi(doi: str, session=None) -> Optional[RetrievedRecord]:
+def dereference_doi(doi: str, session=None,
+                    errors: Optional[list] = None) -> Optional[RetrievedRecord]:
     """Resolve a DOI to a record via the registration-agency-appropriate provider
     (spec §14.4). arXiv/DataCite prefixes go straight to DataCite; every other DOI
     tries Crossref first and FALLS BACK to DataCite on a Crossref miss -- a
     Crossref 404 is not evidence the DOI is dead, only that it is registered with a
-    different agency. Returns None only when no provider carries the DOI."""
+    different agency. Returns None only when no provider carries the DOI; a thrown
+    request is recorded in ``errors`` so the caller can route it to undetermined."""
     doi = _norm_doi(doi)
     if not doi:
         return None
     if any(doi.startswith(p) for p in _DATACITE_PREFIXES):
-        return resolve_by_datacite_doi(doi, session=session)
-    return _crossref_deref(doi, session=session) or \
-        resolve_by_datacite_doi(doi, session=session)
+        return resolve_by_datacite_doi(doi, session=session, errors=errors)
+    return _crossref_deref(doi, session=session, errors=errors) or \
+        resolve_by_datacite_doi(doi, session=session, errors=errors)
 
 
 def biorxiv_published_doi(doi: str, session=None) -> str:
@@ -218,7 +228,8 @@ def biorxiv_published_doi(doi: str, session=None) -> str:
 
 
 def resolve_by_cited_doi(claimed: ClaimedRef, resolved_doi: str,
-                         session=None) -> Optional[RetrievedRecord]:
+                         session=None, errors: Optional[list] = None
+                         ) -> Optional[RetrievedRecord]:
     """Step 1. When the citation carries its OWN DOI that differs from the resolved
     record's DOI, dereference it through the agency-appropriate provider
     (``dereference_doi``: Crossref, DataCite for arXiv/DataCite prefixes, with a
@@ -228,13 +239,15 @@ def resolve_by_cited_doi(claimed: ClaimedRef, resolved_doi: str,
     doi = (claimed.claimed_doi or "").strip()
     if not doi or doi_equivalent(doi, resolved_doi):
         return None
-    return dereference_doi(doi, session=session)
+    return dereference_doi(doi, session=session, errors=errors)
 
 
 def resolve_by_pubmed(claimed: ClaimedRef, *, api_key: str = "", email: str = "",
-                      session=None) -> Optional[RetrievedRecord]:
+                      session=None, errors: Optional[list] = None
+                      ) -> Optional[RetrievedRecord]:
     """Step 2. ESearch on title + first author + year, then EFetch the top PMID
-    and confirm it against the written title. Returns None on no confident hit."""
+    and confirm it against the written title. Returns None on no confident hit; a
+    thrown ESearch request is recorded in ``errors``."""
     if not claimed.title:
         return None
     terms = [f"{claimed.title}[Title]"]
@@ -249,6 +262,8 @@ def resolve_by_pubmed(claimed: ClaimedRef, *, api_key: str = "", email: str = ""
              "retmax": 3, **({"api_key": api_key} if api_key else {})},
             limiter=NCBI, timeout=20))
     except requests.RequestException:
+        if errors is not None:
+            errors.append("pubmed_esearch")
         return None
     if not es:
         return None
@@ -260,14 +275,18 @@ def resolve_by_pubmed(claimed: ClaimedRef, *, api_key: str = "", email: str = ""
     return None
 
 
-def resolve_by_candidates(claimed: ClaimedRef, session=None
+def resolve_by_candidates(claimed: ClaimedRef, session=None,
+                          errors: Optional[list] = None
                           ) -> Optional[RetrievedRecord]:
     """Steps 3-4. Crossref query.bibliographic + OpenAlex backstop, via the shared
     ``retrieve_candidates``. Returns the best candidate when it confidently
     matches the written title, else None. Crossref is REQUIRED, not optional:
     several cited venues (Plant and Soil, J Great Lakes Res, MiMB volumes) are not
-    PubMed-indexed, and 3 of the seed-37 HIGH true positives cite them."""
-    cands = retrieve_candidates(claimed, n=5, session=session)
+    PubMed-indexed, and 3 of the seed-37 HIGH true positives cite them. A thrown
+    search request is recorded in ``errors`` (via retrieve_candidates), so a flaky
+    Crossref never masquerades as 'A not found' -- decisive for PMC8015328:ref011,
+    whose A (Nematology, not PubMed-indexed) must come from Crossref."""
+    cands = retrieve_candidates(claimed, n=5, session=session, errors=errors)
     if not cands:
         return None
     bm = best_match(claimed, cands)
@@ -285,19 +304,22 @@ _CASCADE_DEFAULT = ("cited_doi", "pubmed", "candidates")
 
 def resolve_a(claimed: ClaimedRef, resolved_b: RetrievedRecord, *,
               api_key: str = "", email: str = "", session=None,
-              steps: Iterable[str] = _CASCADE_DEFAULT) -> tuple[str, Optional[RetrievedRecord]]:
+              steps: Iterable[str] = _CASCADE_DEFAULT,
+              errors: Optional[list] = None) -> tuple[str, Optional[RetrievedRecord]]:
     """Run the cascade, stopping at the first confident resolution of A. Returns
     ``(source, a_record)`` -- ``source`` is the step name, ``a_record`` is None
-    when nothing resolved A."""
+    when nothing resolved A. A thrown request in any step appends to ``errors`` so
+    the caller can tell 'A not found (all sources completed)' from 'a source
+    errored' (spec §14.6)."""
     for step in steps:
         if step == "cited_doi":
             a = resolve_by_cited_doi(claimed, resolved_b.doi if resolved_b else "",
-                                     session=session)
+                                     session=session, errors=errors)
         elif step == "pubmed":
             a = resolve_by_pubmed(claimed, api_key=api_key, email=email,
-                                  session=session)
+                                  session=session, errors=errors)
         elif step == "candidates":
-            a = resolve_by_candidates(claimed, session=session)
+            a = resolve_by_candidates(claimed, session=session, errors=errors)
         else:
             continue
         if a is not None:
@@ -360,9 +382,18 @@ def assess_a_vs_b(claimed: ClaimedRef, resolved_b: RetrievedRecord, *,
             a_vs_b_doi_match=False,
             evidence={"relation": "preprint_of", "preprint_doi": claimed.claimed_doi,
                       "published_doi": pub, "b_doi": resolved_b.doi})
+    errors: list = []
     source, a = resolve_a(claimed, resolved_b, api_key=api_key, email=email,
-                          session=session, steps=steps)
+                          session=session, steps=steps, errors=errors)
     if a is None:
+        # §14.6: a THROWN request (retrieval_incomplete) must not be conflated with
+        # a clean miss. A clean miss -> unscoreable; a source error -> undetermined,
+        # so a flaky run never silently shrinks the scoreable population.
+        if errors:
+            return AResolution(
+                outcome=OUTCOME_UNDETERMINED, a_source=source,
+                evidence={"reason": "a required source errored (retrieval "
+                          "incomplete); A undetermined", "provider_errors": errors})
         return AResolution(outcome=OUTCOME_UNSCOREABLE, a_source=source,
                            evidence={"reason": "A did not resolve in any source"})
     same, ts, doi_m = _a_equals_b(a, resolved_b)

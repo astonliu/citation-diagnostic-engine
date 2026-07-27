@@ -924,7 +924,8 @@ def _json_or_none(resp):
         return None
 
 
-def _crossref_candidates(claimed: Claimed, n: int, session) -> list[RetrievedRecord]:
+def _crossref_candidates(claimed: Claimed, n: int, session,
+                         errors: Optional[list] = None) -> list[RetrievedRecord]:
     query = " ".join(str(p) for p in (
         claimed.title, claimed.authors[0] if claimed.authors else "",
         claimed.year or "", claimed.journal) if p)
@@ -933,9 +934,13 @@ def _crossref_candidates(claimed: Claimed, n: int, session) -> list[RetrievedRec
                                   {"query.bibliographic": query, "rows": n},
                                   limiter=CROSSREF, timeout=20)
     except requests.RequestException:
+        if errors is not None:
+            errors.append("crossref_candidates")   # transport error, not a miss
         return []
     data = _json_or_none(resp)
     if data is None:
+        if errors is not None:
+            errors.append("crossref_candidates")   # non-200: errored search
         return []
     out = []
     for it in data.get("message", {}).get("items", []) or []:
@@ -944,15 +949,20 @@ def _crossref_candidates(claimed: Claimed, n: int, session) -> list[RetrievedRec
     return out
 
 
-def _openalex_candidates(claimed: Claimed, n: int, session) -> list[RetrievedRecord]:
+def _openalex_candidates(claimed: Claimed, n: int, session,
+                         errors: Optional[list] = None) -> list[RetrievedRecord]:
     try:
         resp = request_with_retry(session, OPENALEX_URL,
                                   {"search": claimed.title, "per-page": n},
                                   limiter=OPENALEX, timeout=20)
     except requests.RequestException:
+        if errors is not None:
+            errors.append("openalex_candidates")
         return []
     data = _json_or_none(resp)
     if data is None:
+        if errors is not None:
+            errors.append("openalex_candidates")
         return []
     out = []
     for it in data.get("results", []) or []:
@@ -962,17 +972,19 @@ def _openalex_candidates(claimed: Claimed, n: int, session) -> list[RetrievedRec
 
 
 def retrieve_candidates(claimed: Claimed, n: int = 5,
-                        session: requests.Session | None = None
-                        ) -> list[RetrievedRecord]:
+                        session: requests.Session | None = None,
+                        errors: Optional[list] = None) -> list[RetrievedRecord]:
     """Query Crossref ``query.bibliographic`` and OpenAlex ``search`` and parse
     the top-n of each into ``RetrievedRecord``. Dedup by DOI, then by normalized
     title. Reuses the shared CROSSREF / OPENALEX rate limiters.
 
-    Returns an empty list when both searches error or find nothing -- a network
-    failure is indistinguishable here from a true no-find, and the caller treats
-    "no candidates" as "not confidently matched" (escalate, never F1)."""
-    cands = _crossref_candidates(claimed, n, session) + \
-        _openalex_candidates(claimed, n, session)
+    Returns an empty list when both searches error or find nothing. Pass a list as
+    ``errors`` to DISTINGUISH the two: a transport failure or non-200 appends a
+    marker, so the F2-F cascade can route a thrown request to ``undetermined``
+    (retrieval_incomplete, spec §14.6) instead of conflating it with a clean miss
+    -- a flaky run must not silently shrink the scoreable population."""
+    cands = _crossref_candidates(claimed, n, session, errors=errors) + \
+        _openalex_candidates(claimed, n, session, errors=errors)
 
     deduped: list[RetrievedRecord] = []
     seen_doi: set[str] = set()
