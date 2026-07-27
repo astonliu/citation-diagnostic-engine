@@ -2,7 +2,20 @@
 
 **Spec date:** 2026-07-26
 
-**Revision:** 5.1 (supersedes revisions 1–5)
+**Revision:** 5.2 (supersedes revisions 1–5.1)
+
+**Amendments in 5.2 (2026-07-27) — intended as the last F2 spec change before the
+freeze; documentation and manifest only, no normative rule change, no behavior
+change, seed-37 band byte-identical:** (A) NEW §5.6 enumerates the `route_reason`
+controlled vocabulary — the only one the spec left un-enumerated — as a closed
+37-code registry mirrored by `cre/f1/reason_registry.py` and enforced by an
+equality test (which caught `translated_title_missing_volume_anchors`, omitted
+from the draft table); §19.1's `route_reason` row now cites it. (B) F2-G (§8) and
+F2-I (§13) are recorded as implemented-but-frozen-inert, with the pinned NLM
+snapshot hash and the activation baseline that MUST be re-measured against
+`canonical_title`. (C) §2.3's manifest gains the journal-authority + feature-flag
+fields with a contradiction check (`validate_manifest`). §2.2 records that the
+base-rate denominator is unchanged under the inert freeze.
 
 **Amendments in 5.1 (2026-07-27):** two defects surfaced during implementation and
 fixed here, both documentation-level, neither changing any normative rule:
@@ -137,6 +150,16 @@ amendment (see §20). Only a Colab run with the real pinned corpus can close thi
 before/after counts in this program are **development-scale (≤51 rows), not
 frame-wide**, and must be reported as such alongside the base rate.
 
+**Base-rate denominator under the inert freeze (2026-07-27, rev 5.2).** F2-I is frozen
+inert (§13), so no row leaves `unscoreable` and the denominator is unchanged from `a0c1060`.
+Activating F2-I later reclaims ~34 rows and **changes a published number**; it must be a
+separately measured, separately reported revision and must never be bundled with a
+fresh-seed run. `unscoreable` is 778 rows, all resolved on the PMID side: 752
+`no_claimed_title`, 24 `resolved_book_container`, 2 `resolved_no_title`. Of the 752, **345
+have no journal, no authors and no title — the parser extracted nothing at all** (1.5% of
+the frame). That is a disclosed exclusion, not a defect under repair; parser title recall
+sets this denominator.
+
 ### 2.3 Reproducibility manifest
 
 Every candidate run MUST write a manifest containing:
@@ -146,11 +169,36 @@ Every candidate run MUST write a manifest containing:
 - hashes and row counts of every input;
 - label snapshot hash, or `null` with `labels_unfrozen: true`;
 - all thresholds and feature flags;
-- NLM serial-authority snapshot name, publication date, and hash;
+- NLM serial-authority snapshot name, SHA-256, record count, **retrieval date (UTC) where
+  the artifact carries no publication date** (`J_Medline.txt` has none), and a `loaded`
+  boolean;
+- the reason-registry version (§5.6);
 - provider names, query versions, cache hashes, and retrieval timestamps;
 - Python version and dependency lock hash;
 - run start/end UTC timestamps;
 - output hashes and row counts.
+
+The journal-authority and feature-flag fields (added rev 5.2, enforced by
+`reason_registry.validate_manifest`) are:
+
+```json
+{
+  "journal_authority_snapshot": "nlm_J_Medline.txt",
+  "journal_authority_sha256": "1576d19a061e91db2237cddfca2aaa6c376c0850d466e2195753e1d35256efe1",
+  "journal_authority_records": 37972,
+  "journal_authority_retrieved_utc": "2026-07-26",
+  "journal_authority_loaded": false,
+  "journal_match_authoritative_rate": 0.0,
+  "f2i_field_transposition_active": false,
+  "f2d_strict_prefix_active": false,
+  "reason_registry_version": "5.2"
+}
+```
+
+`journal_authority_loaded` is what a reader checks to know which configuration produced an
+artifact. A run with `journal_match_authoritative_rate > 0` while `journal_authority_loaded`
+is `false` is a contradiction and MUST fail; likewise either `_active` flag being true while
+its rule is gated off. `validate_manifest` enforces these.
 
 A result without this manifest is diagnostic only.
 
@@ -304,6 +352,60 @@ They live in one versioned configuration object and are serialized into every ma
 `SAME_WORK_TITLE_SIM_MIN=0.92` remains unchanged in revision 5. A code default, notebook
 copy, or older comment with another value is not authoritative.
 
+### 5.6 Reason-code registry (added rev 5.2)
+
+`route_reason` (§19.1) is a controlled vocabulary and MUST be enumerated like every
+other. This is that enumeration — a **closed** registry of the 37 reason codes the
+detector can emit. The machine-readable source of truth is
+`cre/f1/reason_registry.py`; `test_reason_registry.py` statically scans the three
+emitter modules and asserts the emitted literals equal the registry EXACTLY, so the
+spec cannot drift behind the code (that test already caught
+`translated_title_missing_volume_anchors`, which an earlier draft of this table
+omitted). The schema in §19.1 MUST reject any `route_reason` not in this registry.
+
+**A.1 — same-work reasons → route `review_same_work_variant` (24).** From
+`work_identity.py`: `mixed_identity_citation`, `overwhelming_bibliographic_anchor`,
+`authoritative_title_alias`, `canonical_title_exact`, `malformed_title_wrapper`,
+`translated_title_metadata`, `translated_title_shared_anchors`,
+`translated_title_transliterated_author`, **`translated_title_missing_volume_anchors`**
+(RULE F — added to this table in rev 5.2), `historical_republication`,
+`conference_abstract_publication`, `shifted_author_title_artifact`, `correction_notice`,
+`title_stem_same_issue`, `corporate_title_prefix`, `living_chapter_revision`,
+`corporate_declaration_edition`, `institutional_document_revision`,
+`single_token_metadata_typo`, `shared_doi_same_work`. From `biblio_match.py`:
+`near_identical_title`, `physical_location_same_work` (F2-C), `preprint_published_version`
+(F2-B, requires version evidence), `strict_prefix_title` (F2-D — gated OFF §11, never
+emitted in the frozen configuration).
+
+**A.2 — non-same-work reasons → route `review_wrong_paper` (2).**
+`preprint_shape_unconfirmed` (preprint shape without version evidence),
+`resolved_preprint_target` (F2-B resolved-side signal). Both are set on
+`same_work_reason` but return the wrong-paper route.
+
+**A.3 — unscoreable buckets → route `unscoreable` (11).** From `unscoreable.py`:
+`resolved_book_container`, `resolved_no_title`, `field_transposition_journal_holds_title`
+(F2-I, authority-gated, inert §13), `field_transposition_authors_hold_title` (F2-I, inert),
+`no_claimed_title`, `author_residue_as_title`, `journal_as_title`,
+`journal_author_residue_as_title`, `single_word_title`, `numeric_or_year_only_title`,
+`regulatory_code`.
+
+**A.4 — registry rules.** The registry is closed: a new reason code requires a spec
+amendment in the same commit; a code emitting an unregistered reason is a schema failure.
+Reason codes carry the revision that introduced them; renaming is a breaking change to the
+artifact contract, never a silent edit. Three codes are registered but **not emitted in the
+frozen configuration** — `strict_prefix_title` (F2-D disabled) and the two
+`field_transposition_*` buckets (F2-I inert) — registered deliberately so activation needs
+no schema change.
+
+**A.5 — renamed predicates / new API (code-facing, cited by §5.4 and §8).**
+`n_field_disagreements` (`biblio_match`, count over author/year/**journal**/volume/pages,
+gates the override); `has_confident_disagreement` (`biblio_match`, boolean wrong-paper
+signal, **excludes `journal_match`**, gates volume/pages on `title_sim < 0.92`);
+`resolve_journal_id` (`journal_identity`, returns `None` for all input while inert);
+`containment_only_census` (`journal_identity`, emits the §8.3 census);
+`EmptyFrameError` / `refuse_empty` (`f2_run_v3`, empty-frame guard in the shared
+`_write_run`).
+
 ---
 
 ## 6. F2-E — recover leading title furniture first
@@ -441,7 +543,46 @@ report.
 
 ## 8. F2-G — authoritative journal identity
 
-**Implement before F2-C is accepted.**
+**Status: implemented, FROZEN INERT (2026-07-27, rev 5.2).** `JOURNAL_AUTHORITY.is_empty()`
+is `True`, `resolve_journal_id()` returns `None` for every input, every journal comparison
+runs through the unchanged containment fallback, and `journal_match_authoritative` is
+`False` on 100% of rows (verified on the 51-row band). The NLM snapshot is pinned by hash
+and NOT loaded, satisfying §16.3's precondition that authority snapshots be frozen.
+
+| field | value |
+|---|---|
+| file | `nlm_J_Medline.txt` |
+| SHA-256 | `1576d19a061e91db2237cddfca2aaa6c376c0850d466e2195753e1d35256efe1` |
+| size | 9.1 MB |
+| records | 37,972 |
+| loaded | **no** |
+
+Rationale for freezing inert (ZD, 2026-07-27; recorded so it is not relitigated): F2-G's
+measured precision contribution on the audited band is **zero** (the five journal-comparator
+rows already exit HIGH via the score path; the band is 33/11/7 either way); activating a
+code path hours before a single-use held-out draw (§16.3) would measure something switched
+on too late; and the activation baseline below **was measured with ad-hoc normalizations,
+not the shipped `canonical_title`**, so it must be re-measured before activation. Nothing is
+lost — the snapshot is downloaded and hashed.
+
+**Activation baseline (2026-07-26, MUST be re-measured against `canonical_title`).** The
+coverage figures were taken with two ad-hoc Colab normalizations; neither is the shipped
+path. Build A (plain): 73,484 unambiguous keys, both-sides-resolve 20,647/23,370 (88.3%),
+both-resolve-and-agree 20,431 (99.0%), disagree 216. Build B (+apostrophe-delete,
+leading-`the`, subtitle fallback): agree 20,557, disagree 381 — its **subtitle fallback is
+rejected and unimplemented** (gained 126 agreements, cost 165 disagreements: `J. Clin.
+Investig.` → `J` → MDPI's journal *J* `101751012`). M1: of 381 disagreements only **2** were
+ISSN-confirmed title changes; 379 were lookup error, dominated by bare-vs-qualified mastheads
+(`Life` `101095169` vs `Life (Basel)` `101580444`); two looked genuinely different —
+`Nematology`/`J Nematol` (that is `PMC8015328:ref011`, a confirmed TRUE_F2) and
+`Nat. Cell Biol.`/`Nature`. M3: activation would flip **913 rows (4.44%)** of
+authoritative-agree rows to `journal_match=True`. M4 coverage by verdict: `match` 91.5%,
+`review_same_work_variant` 84.8%, `review_wrong_paper` **76.5%**, `unscoreable` 36.8% —
+authority is quietest on the flagged band.
+
+**Implement before F2-C is accepted** — retained as the activation gate; not required while
+F2-G is frozen inert, since F2-C is not re-gated on `journal_match_authoritative` in this
+revision.
 
 The existing containment comparator is useful as a weak similarity feature but is not
 strong enough to prove physical-location identity.
@@ -656,6 +797,19 @@ positives, until adjudicated.
 ---
 
 ## 13. F2-I — field-transposition hypothesis
+
+**Status: implemented, FROZEN INERT (2026-07-27, rev 5.2).** The two
+`field_transposition_*` buckets fire only when the authority establishes that title-shaped
+text in the journal or first-author slot resolves to no known serial. Gated on
+`JOURNAL_AUTHORITY.is_empty()`, so with no snapshot loaded they never fire and a
+word-count-only misfire is structurally impossible (`Proceedings of the National Academy of
+Sciences of the United States of America` is 13 words and a real journal). Reclaimable
+population for activation: **34 rows** of the 752 `no_claimed_title` — 33 with the title in
+`written_journal` (`PMC10002665:R52` *"Foldseek: fast and accurate protein structure
+search"*; `PMC10373506:B68` *"Cdx2 is required for correct cell fate specification"*) and 1
+in `written_authors[0]` (`PMC8526552:B9`). Activation reclaims those rows from `unscoreable`
+and therefore **changes the base-rate denominator (§2.2)** — it must be a separately
+measured, separately reported revision, never bundled with a fresh-seed run.
 
 Do not swap fields destructively, and do not use B's journal to decide that A's fields are
 transposed.
@@ -1116,7 +1270,7 @@ key. At minimum, `all_rows.jsonl` enforces:
 | `agreements` | object containing every named comparison as `boolean \| null` plus its method |
 | `title_sim`, `match_score` | number in `[0,1]` or null; null requires a reason |
 | `route` | enum of every route in §5.1 |
-| `route_reason` | non-empty, versioned reason code |
+| `route_reason` | non-empty reason code from the §5.6 registry; the schema MUST reject any value not in it |
 | `rule_events` | ordered array; each event has rule ID/version, before route, after route, and evidence |
 | `a_resolution_status` | enum from §5.2 |
 | `a_b_identity_status` | enum from §5.3 or null when A is not uniquely resolved |
