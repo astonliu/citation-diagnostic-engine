@@ -33,6 +33,27 @@ from typing import Optional
 
 from .schema import ClaimedRef, RetrievedRecord
 from .biblio_match import normalize_title
+from .journal_identity import resolve_journal_id, JOURNAL_AUTHORITY
+
+
+def _looks_like_a_title_not_a_journal(s: str) -> bool:
+    """F2-I signal: ``s`` (a written_journal or written_authors[0] value) is
+    title-shaped text sitting in the wrong slot, not a real journal.
+
+    Word count ALONE is not enough -- 'Proceedings of the National Academy of
+    Sciences of the United States of America' is 13 words AND a real journal -- so
+    the discriminator is the NLM authority: title-shaped text that resolves to no
+    known serial is a transposed title. GATED on a populated authority: with no
+    snapshot loaded ``resolve_journal_id`` returns None for everything, which would
+    degenerate this to a bare word-count rule (the rejected version that misfires
+    on PNAS / 'Journal of Speech, Language, and Hearing Research'). So when the
+    authority is empty this returns False and F2-I is inert -- it activates only
+    once a real serials snapshot is loaded."""
+    if len(s.split()) < 6:
+        return False
+    if JOURNAL_AUTHORITY.is_empty():
+        return False                          # inert without a snapshot; never word-count
+    return resolve_journal_id(s) is None
 
 # Resolved-side titles that are placeholders, not titles (PubMed emits these).
 _PLACEHOLDER_TITLES = {
@@ -187,6 +208,21 @@ def classify_unscoreable(claimed: ClaimedRef,
 
     # --- claimed side --------------------------------------------------------
     if not nct:
+        # F2-I (spec §13): a title parked in the wrong slot. When the claimed title
+        # is empty but the journal (or first author) holds title-shaped text that
+        # resolves to NO known serial, the fields were transposed at parse time.
+        # These are NOT-YET-JUDGEABLE (re-parse and re-score, spec §13.1), a
+        # DISTINCT bucket from ``no_claimed_title`` -- they must be re-run, not
+        # counted in the unscoreable denominator.
+        if _looks_like_a_title_not_a_journal(claimed.journal or ""):
+            return ("field_transposition_journal_holds_title",
+                    "claimed title is empty and written_journal holds title-shaped "
+                    "text that resolves to no known serial; re-parse and re-score.")
+        a0 = claimed.authors[0] if claimed.authors else ""
+        if _looks_like_a_title_not_a_journal(a0):
+            return ("field_transposition_authors_hold_title",
+                    "claimed title is empty and written_authors[0] holds "
+                    "title-shaped text; re-parse and re-score.")
         # No claimed title at all -> nothing to score (caller may also handle
         # this, but naming it keeps the bucket honest).
         return ("no_claimed_title", "claimed reference has no title to compare.")
