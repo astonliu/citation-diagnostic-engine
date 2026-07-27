@@ -941,7 +941,10 @@ After code, configuration, authority snapshots, and prompts are frozen:
 
 1. select one new natural citation corpus that was not used for rule discovery,
    calibration, or threshold choice, and freeze its occurrence-level frame;
-2. run the frozen detector once and freeze the complete output before adjudication;
+2. run the frozen detector once and freeze the complete output before adjudication.
+   Because this draw is single-use, the runner refuses to write a zero-row artifact
+   (`_write_run` raises `EmptyFrameError` when the frame is empty; see §20) — an
+   empty output here must fail loud, never leave a legitimately-named empty file;
 3. adjudicate either every `review_wrong_paper` occurrence or a probability sample drawn
    only from that exact route, with the selection rule, seed, ordered frame hash, sample
    hash, and inclusion probability recorded before labels are viewed;
@@ -1232,15 +1235,19 @@ corpus must therefore be present**. The command FAILS LOUD when it is not, rathe
 than emitting an all-zeros summary at exit 0 (which would read as a pass): no
 `.xml`/`.nxml` files at all → argparse error, exit 2; a frame that comes back
 empty → **exit 3, diagnostic on stderr, nothing on stdout**. Critically, the
-empty-frame guard lives INSIDE `reband_from_cache` (`refuse_empty=True` by
-default), which raises `EmptyRebandError` **before writing any file** — so a
-refused run leaves **no** zero-row `*_summary.json` / `*.jsonl` on disk under a
-real-looking name (which a later `glob('*_summary.json')`, hash-pin, or another
-session/model would otherwise pick up as a real run). The equivalent
-`python -c "from cre.f1.f2_run_v3 import reband_from_cache; ..."` snippet inherits
-the same guard; a caller that genuinely wants an empty frame (e.g. a join-logic
-unit test) must pass `refuse_empty=False` explicitly. This corpus gap is why the
-step has not closed frame-wide in either local environment (§2.2).
+empty-frame guard lives in the shared `_write_run` (`refuse_empty=True` by
+default) that BOTH entry points funnel through — the reband AND the fresh-draw
+runner `run_f2_seed7_v3` — and raises `EmptyFrameError` **before writing any
+file**, so a refused run leaves **no** zero-row `*_summary.json` / `*.jsonl` on
+disk under a real-looking name (which a later `glob('*_summary.json')`, hash-pin,
+or another session/model would otherwise pick up as a real run). Placing it in
+`_write_run` rather than one caller also protects the higher-stakes path: the
+fresh-draw runner emits the SINGLE-USE held-out artifact (§16.3), which cannot be
+re-run. The equivalent `python -c "from cre.f1.f2_run_v3 import reband_from_cache;
+..."` snippet inherits the same guard; a caller that genuinely wants an empty
+frame (e.g. a join-logic unit test) must pass `refuse_empty=False` explicitly.
+This corpus gap is why the step has not closed frame-wide in either local
+environment (§2.2).
 
 Do not use fixed pass counts as acceptance criteria. The criterion is zero failures in the
 complete discovered suite plus every required semantic fixture in this spec.
