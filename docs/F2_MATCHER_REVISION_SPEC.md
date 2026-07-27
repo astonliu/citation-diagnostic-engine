@@ -1231,12 +1231,16 @@ The resolved cache is keyed by PMID and carries no source PMCID, so the
 corpus must therefore be present**. The command FAILS LOUD when it is not, rather
 than emitting an all-zeros summary at exit 0 (which would read as a pass): no
 `.xml`/`.nxml` files at all → argparse error, exit 2; a frame that comes back
-empty (`n_records == 0` — 0-byte stubs, an empty cache, or files with no
-PMID-bearing refs) → a diagnostic on stderr and **exit 3, with the summary kept
-off stdout**. This is why the step has not closed frame-wide in either local
-environment (§2.2). A `python -c "from cre.f1.f2_run_v3 import reband_from_cache;
-..."` snippet calling the same function is an equivalent alternative, but it must
-likewise treat `n_records == 0` as failure, not success.
+empty → **exit 3, diagnostic on stderr, nothing on stdout**. Critically, the
+empty-frame guard lives INSIDE `reband_from_cache` (`refuse_empty=True` by
+default), which raises `EmptyRebandError` **before writing any file** — so a
+refused run leaves **no** zero-row `*_summary.json` / `*.jsonl` on disk under a
+real-looking name (which a later `glob('*_summary.json')`, hash-pin, or another
+session/model would otherwise pick up as a real run). The equivalent
+`python -c "from cre.f1.f2_run_v3 import reband_from_cache; ..."` snippet inherits
+the same guard; a caller that genuinely wants an empty frame (e.g. a join-logic
+unit test) must pass `refuse_empty=False` explicitly. This corpus gap is why the
+step has not closed frame-wide in either local environment (§2.2).
 
 Do not use fixed pass counts as acceptance criteria. The criterion is zero failures in the
 complete discovered suite plus every required semantic fixture in this spec.
