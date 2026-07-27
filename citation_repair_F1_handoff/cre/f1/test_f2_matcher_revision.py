@@ -170,6 +170,40 @@ def test_f2c_same_pages_volume_journal_quarantines_title_divergence():
     assert v == VERDICT_SAME_WORK_VARIANT
 
 
+def test_item1_physical_location_low_title_is_traced_not_silently_matched():
+    # §5.4/§10/§10.1: a physical-location row whose score reaches accept ONLY via
+    # corroboration (title_sim < accept) must NOT short-circuit to match -- it is
+    # rebanded to review_same_work_variant with an auditable reason, not suppressed
+    # silently. Author+journal agree so the override would otherwise floor it to
+    # accept; title diverges (low title_sim); coordinates agree.
+    c = ClaimedRef(title="Regulation of the cell cycle", authors=["Nurse"],
+                   year=2003, journal="Nature", volume="425", pages="859-864")
+    r = RetrievedRecord(resolved=True,
+                        title="Cyclin-dependent kinases in yeast mitotic control "
+                              "and checkpoint signalling across the division cycle",
+                        authors=["Nurse"], year=2003, journal="Nature",
+                        volume="425", pages="859-64")
+    v, m = flag_verdict(c, r)
+    assert m.title_sim < 0.85 and m.score >= 0.85    # lifted to accept by boosts
+    assert m.same_work_reason == "physical_location_same_work"
+    assert v == VERDICT_SAME_WORK_VARIANT            # traced, not silent match
+
+
+def test_item1_physical_location_genuine_title_match_stays_match():
+    # A genuine same_record (title clears accept on its own) with agreeing
+    # coordinates is an ordinary match (§5.4 step 8), NOT a coordinate-review row.
+    c = ClaimedRef(title="Cyclin-dependent kinases and the fission yeast cycle",
+                   authors=["Nurse"], year=2003, journal="Nature",
+                   volume="425", pages="859-864")
+    r = RetrievedRecord(resolved=True,
+                        title="Cyclin-dependent kinases and the fission yeast cycle",
+                        authors=["Nurse"], year=2003, journal="Nature",
+                        volume="425", pages="859-64")
+    v, m = flag_verdict(c, r)
+    assert m.title_sim >= 0.85
+    assert v == VERDICT_MATCH
+
+
 def test_f2c_author_disagreement_defers_to_wrong_paper():
     # A confident author disagreement is affirmative distinct-work evidence: the
     # shared page range then reads as a mis-assembled/coincident citation (the

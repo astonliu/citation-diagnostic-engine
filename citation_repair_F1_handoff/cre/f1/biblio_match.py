@@ -627,6 +627,17 @@ def is_preprint_resolved(resolved) -> bool:
     return "preprint" in {p.lower() for p in (resolved.publication_types or [])}
 
 
+def _physical_location_conjunction(f: FieldAgreement) -> bool:
+    """The F2-C physical-location signal: canonicalized pages, volume, and journal
+    all agree and the DOIs do not confidently disagree. Shared by the ordinary-
+    match short-circuit (so a physical-location row is NOT cleared to ``match``
+    before the same-work branch is reached -- spec §5.4 step 5 precedes step 8,
+    and §10: F2-C may move a row to review_same_work_variant, never to match) and
+    by the F2-C branch itself, so the two can never drift apart."""
+    return (f.pages_match is True and f.volume_match is True
+            and f.journal_match is True and f.doi_match is not False)
+
+
 def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
                  accept: float = 0.85) -> tuple[str, MatchResult]:
     """Classify a (claimed, resolved-candidate) pair into a priority band.
@@ -705,7 +716,20 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # Clean accepted pairs are ordinary matches, not review variants.  For a
     # pair that would otherwise be reviewed, prefer a specific identity proof
     # over the generic near-title gate so the live path can route safely.
-    if not disagree and m.score >= accept:
+    #
+    # EXCEPTION (spec §5.4 / §10 / §10.1): a physical-location row whose match
+    # DEPENDS ON CORROBORATION (title_sim < MATCH_ACCEPT_SCORE, so the score only
+    # reached ``accept`` via author/journal boosts or the strong-corroboration
+    # override) must NOT short-circuit to ``match`` -- it falls through so F2-C (or
+    # a stronger identity proof) rebands it to review_same_work_variant with an
+    # auditable reason. §10.1 forbids exactly this silent lift (PMC10424567:R78 at
+    # title_sim 0.567 must not become ``match``), and the rev-5 traceability
+    # guardrail forbids suppressing a row with no rule named. A GENUINE title match
+    # (title_sim >= accept) with agreeing coordinates is an ordinary same_record
+    # and stays ``match`` (§5.4 step 3) -- e.g. a perfectly-cited reference. Net
+    # HIGH membership is unchanged either way.
+    if not disagree and m.score >= accept and not (
+            _physical_location_conjunction(f) and m.title_sim < accept):
         return VERDICT_MATCH, m
     if identity.same_work:
         m.same_work_reason = identity.reason
@@ -761,9 +785,7 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     #     rows (shared DOI, unrelated title, different author) stay HIGH.
     # A physical-location match with neither signal is a description defect on the
     # same work -> quarantine (audited), never silently cleared.
-    if (f.pages_match is True and f.volume_match is True
-            and f.journal_match is True
-            and f.doi_match is not False and not disagree):
+    if _physical_location_conjunction(f) and not disagree:
         m.same_work_reason = "physical_location_same_work"
         m.identity_signals = ("pages", "volume", "journal")
         return VERDICT_SAME_WORK_VARIANT, m
