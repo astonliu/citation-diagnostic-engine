@@ -7,12 +7,14 @@
 **Amendments in 5.1 (2026-07-27):** two defects surfaced during implementation and
 fixed here, both documentation-level, neither changing any normative rule:
 (1) §20 described an offline reband step with no runnable command, and
-`reband_from_cache` was a Python-only function — a CLI now makes it executable and
-§20 gives the concrete command; (2) §2.2 now discloses that no change since
-`a0c1060` has been verified frame-wide (§7.2), only on unit tests + the 51-row
-band, because neither working environment holds a readable pinned corpus. Editing
-this file changes its SHA-256; the `91c2f45…` pin refers to revision 5 and is
-superseded by the 5.1 hash recorded in the next manifest.
+`reband_from_cache` was a Python-only function — a CLI now makes it executable,
+§20 gives the concrete command, and the CLI FAILS LOUD (non-zero exit) on an
+absent/empty corpus instead of emitting an exit-0 all-zeros summary that reads as
+a pass; (2) §2.2 now discloses that no change since `a0c1060` has been verified
+frame-wide (§7.2), only on unit tests + the 51-row band, because neither working
+environment holds a readable pinned corpus. Editing this file changes its
+SHA-256; the `91c2f45…` pin refers to revision 5 and is superseded by the 5.1
+hash recorded in the next manifest.
 
 **Frozen scoring provenance:** `a0c1060e85d74a57de0f1c0bb8c9060c87a5caa4`
 
@@ -129,8 +131,9 @@ reband that §7.2 requires (“frame-wide movement MUST be reproduced from the p
 freeze”) has **not** been run for any of those changes, in either working
 environment: the primary checkout carries 0-byte source-XML stubs and the Drive
 copy is an unreadable ~42 MB placeholder, so the offline reband produces an empty
-frame in both (the CLI correctly refuses rather than emitting one — see §20). Only
-a Colab run with the real pinned corpus can close this. Until it does, all
+frame in both — the CLI now treats that (`n_records == 0`) as a FATAL error with a
+non-zero exit, rather than the exit-0 all-zeros summary it emitted before this
+amendment (see §20). Only a Colab run with the real pinned corpus can close this. Until it does, all
 before/after counts in this program are **development-scale (≤51 rows), not
 frame-wide**, and must be reported as such alongside the base rate.
 
@@ -1225,11 +1228,15 @@ cd /Users/kamachi/citation-repair-engine/citation_repair_F1_handoff
 
 The resolved cache is keyed by PMID and carries no source PMCID, so the
 `--xml-dir` file stems define the source-PMCID frame; the **real pinned source-XML
-corpus must therefore be present**. Against 0-byte stubs the stem list is empty and
-the command refuses rather than silently emitting an empty frame — which is why
-this step has not closed frame-wide in either local environment (§2.2). A
-`python -c "from cre.f1.f2_run_v3 import reband_from_cache; ..."` snippet calling
-the same function is an equivalent alternative.
+corpus must therefore be present**. The command FAILS LOUD when it is not, rather
+than emitting an all-zeros summary at exit 0 (which would read as a pass): no
+`.xml`/`.nxml` files at all → argparse error, exit 2; a frame that comes back
+empty (`n_records == 0` — 0-byte stubs, an empty cache, or files with no
+PMID-bearing refs) → a diagnostic on stderr and **exit 3, with the summary kept
+off stdout**. This is why the step has not closed frame-wide in either local
+environment (§2.2). A `python -c "from cre.f1.f2_run_v3 import reband_from_cache;
+..."` snippet calling the same function is an equivalent alternative, but it must
+likewise treat `n_records == 0` as failure, not success.
 
 Do not use fixed pass counts as acceptance criteria. The criterion is zero failures in the
 complete discovered suite plus every required semantic fixture in this spec.
