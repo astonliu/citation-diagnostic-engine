@@ -68,7 +68,7 @@ def test_cli_refuses_zero_byte_stub_corpus(tmp_path, capsys):
     # and NO summary JSON dumped before it (the ordering ZD flagged) -- only the
     # [parse-skip] line, which is legitimate context for why the frame is empty.
     assert out.out.strip() == ""
-    assert "ERROR: reband produced an EMPTY frame" in out.err
+    assert "ERROR:" in out.err and "EMPTY frame" in out.err
     assert "denominator_scoreable" not in out.err and "high_band_rate" not in out.err
     # And NO zero-row artifact is left on disk under a real-looking name -- the
     # trap a later glob / hash-pin would pick up.
@@ -79,13 +79,29 @@ def test_cli_refuses_zero_byte_stub_corpus(tmp_path, capsys):
 def test_reband_from_cache_refuses_empty_frame_without_writing(tmp_path):
     # The guard lives in reband_from_cache (refuse_empty default on), so the
     # `python -c "...reband_from_cache..."` path is protected too, not just the CLI.
-    from cre.f1.f2_run_v3 import reband_from_cache, EmptyRebandError
+    from cre.f1.f2_run_v3 import reband_from_cache, EmptyFrameError
     xml = tmp_path / "xml"; xml.mkdir()
     (xml / "PMC1.xml").write_text("")                 # 0-byte stub -> nothing parses
     cache = tmp_path / "c.jsonl"
     cache.write_text('{"pmid": "111", "rec": {"resolved": true, "title": "t", '
                      '"pmid": "111"}}\n')
-    with pytest.raises(EmptyRebandError):
+    with pytest.raises(EmptyFrameError):
         reband_from_cache(str(xml), str(cache), out_dir=str(tmp_path),
                           version="v3_1", src_pmcids=["PMC1"])
     assert list(tmp_path.glob("*_summary.json")) == []   # nothing written
+
+
+def test_fresh_draw_runner_refuses_empty_frame_without_writing(tmp_path):
+    # The higher-stakes symmetry (ZD): the fresh-draw runner emits the single-use
+    # held-out artifact (§16.3), so an empty draw must refuse to write too -- the
+    # guard now lives in _write_run, which both entry points funnel through.
+    from cre.f1.f2_run_v3 import run_f2_seed7_v3, EmptyFrameError
+    with pytest.raises(EmptyFrameError):
+        run_f2_seed7_v3([], out_dir=str(tmp_path), version="v3", seed=11)
+    assert list(tmp_path.glob("*_summary.json")) == []       # nothing written
+    assert list(tmp_path.glob("f2_random_oa_*.jsonl")) == []
+    # explicit opt-out still writes (deliberate empty frame)
+    summary = run_f2_seed7_v3([], out_dir=str(tmp_path), version="v3", seed=11,
+                              refuse_empty=False)
+    assert summary["n_records"] == 0
+    assert (tmp_path / "f2_random_oa_seed11_v3.jsonl").exists()

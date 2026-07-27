@@ -213,6 +213,9 @@ def test_run_f2_seed7_v3_guard_is_seed_aware(tmp_path):
     from cre.f1.f2_run_v3 import run_f2_seed7_v3
     with pytest.raises(RuntimeError):
         run_f2_seed7_v3([], out_dir=str(tmp_path), version="v2", seed=7)
-    summary = run_f2_seed7_v3([], out_dir=str(tmp_path), version="v2", seed=11)
+    # Empty items here only exercise the seed-aware VERSION guard, so opt out of
+    # the empty-frame guard (refuse_empty=False) to let the seed-11 write proceed.
+    summary = run_f2_seed7_v3([], out_dir=str(tmp_path), version="v2", seed=11,
+                              refuse_empty=False)
     assert summary["seed"] == 11
     assert (tmp_path / "f2_random_oa_seed11_v2.jsonl").exists()

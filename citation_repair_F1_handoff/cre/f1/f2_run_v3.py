@@ -61,7 +61,8 @@ _RETRIEVED_FIELDS = {f.name for f in dataclasses.fields(RetrievedRecord)}
 
 def run_f2_seed7_v3(items: Iterable[Item], *, out_dir: str = ".",
                     out_prefix: str = "f2_random_oa", version: str = "v3",
-                    accept: float = 0.85, seed: int = 7) -> dict:
+                    accept: float = 0.85, seed: int = 7,
+                    refuse_empty: bool = True) -> dict:
     """Assemble v3 records from ``items`` and write ``<prefix>_seed<seed>_<version>.*``.
 
     ``items`` preferably yields ``(pmid, src_pmcid, citation_id, claimed,
@@ -95,20 +96,36 @@ def run_f2_seed7_v3(items: Iterable[Item], *, out_dir: str = ".",
             pmid, src_pmcid, claimed, resolved, accept=accept,
             citation_id=citation_id))
     return _write_run(records, out_dir=out_dir, out_prefix=out_prefix,
-                      version=version, seed=seed)
+                      version=version, seed=seed, refuse_empty=refuse_empty)
 
 
 def _write_run(records: list, *, out_dir: str, out_prefix: str, version: str,
-               extra: Optional[dict] = None, seed: int = 7) -> dict:
+               extra: Optional[dict] = None, seed: int = 7,
+               refuse_empty: bool = True) -> dict:
     """Write ``<prefix>_seed<seed>_<version>.jsonl`` + ``..._summary.json`` and
     return the summary. Shared by the fresh-draw runner and the re-band path so the
     output schema and the HIGH-band metric cannot drift between them. ``seed``
     (default ``7``) parameterizes both the filenames and the summary ``"seed"``
-    field; ``seed=7`` reproduces the frozen seed-7 paths and summary byte-for-byte."""
-    os.makedirs(out_dir, exist_ok=True)
+    field; ``seed=7`` reproduces the frozen seed-7 paths and summary byte-for-byte.
+
+    EMPTY-FRAME GUARD (``refuse_empty``, default on): a run that produced ZERO
+    records is never a valid artifact, so raise ``EmptyFrameError`` BEFORE creating
+    any file -- a zero-row ``*_summary.json`` under a real-looking name is a trap
+    for a later glob / hash-pin / session. Living here (not in each caller) means
+    both entry points inherit it and no future one can skip it. A caller that
+    genuinely wants an empty frame (a join-logic unit test) passes
+    ``refuse_empty=False``."""
     records_path = os.path.join(out_dir, f"{out_prefix}_seed{seed}_{version}.jsonl")
     summary_path = os.path.join(out_dir, f"{out_prefix}_seed{seed}_{version}_summary.json")
+    if refuse_empty and not records:
+        raise EmptyFrameError(
+            f"refusing to write an EMPTY frame (0 records) to {records_path!r}: a "
+            f"zero-row artifact under a legitimate name is a trap for a later "
+            f"glob / hash-pin / session. This is especially load-bearing for a "
+            f"fresh held-out draw (§16.3), which cannot be re-run. Pass "
+            f"refuse_empty=False only to deliberately materialize an empty frame.")
 
+    os.makedirs(out_dir, exist_ok=True)
     metric = high_band_rate_of_scoreable(records)
     summary = {
         "version": version,
@@ -230,12 +247,22 @@ def load_resolved_cache(resolved_cache_path: str, *, src_pmcid_key: str = "src_p
     return out
 
 
-class EmptyRebandError(RuntimeError):
-    """A reband produced ZERO records. Raised BEFORE any artifact is written when
-    ``refuse_empty`` is set, so an empty frame never leaves a zero-row
-    ``*_summary.json`` on disk under a legitimate name -- a later session, a model,
-    or a `glob('*_summary.json')` would otherwise pick it up as a real run (the
-    stale-artifact / branch-drift failure class this project keeps hitting)."""
+class EmptyFrameError(RuntimeError):
+    """A run produced ZERO records. Raised by ``_write_run`` (which BOTH entry
+    points funnel through) BEFORE any artifact is written when ``refuse_empty`` is
+    set, so an empty frame never leaves a zero-row ``*_summary.json`` / ``*.jsonl``
+    on disk under a legitimate name -- a later session, a model, or a
+    `glob('*_summary.json')` would otherwise pick it up as a real run (the
+    stale-artifact / branch-drift failure class this project keeps hitting).
+
+    Guarding this in ``_write_run`` rather than in each caller means no future
+    entry point can write an empty frame without opting out, and it protects the
+    higher-stakes case: the fresh-draw runner emits the SINGLE-USE held-out
+    artifact (§16.3), which -- unlike a reband -- cannot simply be re-run."""
+
+
+# Backward-compatible alias (the guard first shipped reband-only under this name).
+EmptyRebandError = EmptyFrameError
 
 
 def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
@@ -382,17 +409,8 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
             f"live in the nested 'rec' sub-object of each line. Aborting before any "
             f"write so a corrupt v3_1 is never emitted.")
 
-    # Empty-frame guard (default on): a reband that joined NOTHING is never a valid
-    # result, so refuse BEFORE writing rather than leave a zero-row artifact under a
-    # real-looking name (exit-3 in the CLI only protects the terminal; this also
-    # protects a later glob / hash-pin / the `python -c` path). Join-logic unit
-    # tests that deliberately probe an empty join pass ``refuse_empty=False``.
-    if refuse_empty and not records:
-        raise EmptyRebandError(
-            f"reband produced an EMPTY frame (0 records) from xml_dir={xml_dir!r}, "
-            f"resolved_cache={resolved_cache_path!r}: the source corpus and/or "
-            f"cache is missing or unreadable (e.g. 0-byte XML stubs), or nothing "
-            f"joined. Refusing to write a zero-row artifact.")
+    # The empty-frame guard now lives in _write_run (both entry points inherit
+    # it), so ``refuse_empty`` is simply threaded through below.
 
     # F2_V3_3 audit visibility: enumerate the rows that CHANGED band from
     # review_wrong_paper (at the old 0.95 gate) to review_same_work_variant (at the
@@ -462,7 +480,8 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
             len(proof_rule_quarantined_below_gate),
     }
     return _write_run(records, out_dir=out_dir, out_prefix=out_prefix,
-                      version=version, extra=diag, seed=seed)
+                      version=version, extra=diag, seed=seed,
+                      refuse_empty=refuse_empty)
 
 
 # =====================================================================
@@ -521,7 +540,7 @@ def _cli(argv: "Optional[list[str]]" = None) -> int:
             xml_dir=args.xml_dir, resolved_cache_path=args.resolved_cache,
             out_dir=args.out_dir, version=args.version, seed=args.seed,
             src_pmcids=stems)
-    except EmptyRebandError as e:
+    except EmptyFrameError as e:
         print(f"ERROR: {e} This is NOT a valid verification; no artifact written.",
               file=sys.stderr)
         return 3
