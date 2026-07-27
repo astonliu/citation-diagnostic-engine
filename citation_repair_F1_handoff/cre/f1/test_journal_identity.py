@@ -130,3 +130,48 @@ def test_field_agreement_exposes_method_and_authoritative():
     assert fa.journal_match is True
     assert fa.journal_match_method == M_CONTAINMENT
     assert fa.journal_match_authoritative is False
+
+
+# ==========================================================================
+# Item 4: resolve_journal_id API + paren-stripped ambiguity-safety
+# ==========================================================================
+from cre.f1.journal_identity import resolve_journal_id  # noqa: E402
+
+
+def test_resolve_journal_id_unique_and_absent_and_ambiguous():
+    a = _authority()
+    assert resolve_journal_id("JAMA", authority=a) == "NLM7501160"
+    assert resolve_journal_id("Journal of the American Medical Association",
+                              authority=a) == "NLM7501160"
+    assert resolve_journal_id("Some Journal Not In The Table", authority=a) is None
+    assert resolve_journal_id("Bulletin", authority=a) is None      # ambiguous -> None
+
+
+def test_resolve_journal_id_none_without_snapshot():
+    # The inert-without-data property F2-I depends on: an empty authority resolves
+    # nothing, so the F2-I title-in-journal rule must gate on a populated table.
+    empty = JournalAuthority()
+    assert empty.is_empty() is True
+    assert resolve_journal_id("Current Topics in Developmental Biology",
+                              authority=empty) is None
+
+
+def test_paren_stripped_variant_matches_masthead_suffix():
+    # A citing side that writes "Life" resolves to the NLM record "Life (Basel)"
+    # via the paren-stripped variant -- when that stripped form is UNIQUE.
+    a = JournalAuthority()
+    a.add("Life (Basel, Switzerland)", "NLM101580444")
+    assert resolve_journal_id("Life", authority=a) == "NLM101580444"
+
+
+def test_paren_stripped_collision_is_ambiguous_and_falls_through():
+    # Two different NLM records share the paren-stripped form "life" -> ambiguous
+    # -> resolve_journal_id None, and journal_identity falls through to containment
+    # instead of confidently resolving to one arbitrary record (the safety measure).
+    a = JournalAuthority()
+    a.add("Life (Basel, Switzerland)", "NLM101580444")
+    a.add("Life (Chicago, Ill.)", "NLM101095169")
+    assert resolve_journal_id("Life", authority=a) is None
+    match, method, authoritative = journal_identity("Life", "Life sciences",
+                                                    authority=a)
+    assert method != M_AUTHORITY_ALIAS       # ambiguous -> not resolved by authority
