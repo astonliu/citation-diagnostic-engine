@@ -552,17 +552,24 @@ def match_score(claimed: Claimed, cand: RetrievedRecord,
         score -= 0.10
 
     # --- strong-corroboration override -------------------------------------
-    disagree = sum(1 for v in (f.author_match, f.year_match, f.journal_match,
-                               f.volume_match, f.pages_match) if v is False)
+    # n_field_disagreements: a COUNT over all five fields INCLUDING journal,
+    # unconditional (no title-sim gate). Distinct from flag_verdict's
+    # ``has_confident_disagreement`` boolean, which excludes journal and gates
+    # volume/pages on title_sim -- keep the names separate so a journal-comparison
+    # (F2-G) change is traceable through the override but not misread as
+    # wrong-paper evidence.
+    n_field_disagreements = sum(
+        1 for v in (f.author_match, f.year_match, f.journal_match,
+                    f.volume_match, f.pages_match) if v is False)
     # Fire ONLY when both high-entropy fields agree and nothing contradicts.
     # author_match is True AND journal_match is True already implies neither of
-    # those disagrees; ``disagree == 0`` additionally blocks a contradicting
-    # year/volume/pages (same author+journal but year off by 5 -> likely a
-    # different work, do not rescue).
+    # those disagrees; ``n_field_disagreements == 0`` additionally blocks a
+    # contradicting year/volume/pages (same author+journal but year off by 5 ->
+    # likely a different work, do not rescue).
     first_author_ok = (f.first_author_match is True or
                        (f.first_author_match is None and f.author_match is True))
     override_fired = (first_author_ok and f.journal_match is True
-                      and disagree == 0 and score < accept)
+                      and n_field_disagreements == 0 and score < accept)
     if override_fired:
         score = accept
     # -----------------------------------------------------------------------
@@ -723,16 +730,21 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     Call is_scoreable_title on both titles before calling this."""
     m = match_score(claimed, cand, accept=accept)
     f = m.fields
-    # Tri-state: only a REAL disagreement (is False) counts; None (unparsed) does
-    # not. A confident author/year disagreement.
-    disagree = ((f.first_author_match is False)
-                or (f.author_match is False) or (f.year_match is False)
-                # A coordinate mismatch below the near-identical-title gate is
-                # an adjacent-record signal, not harmless pagination formatting.
-                # This prevents a same-journal/volume neighbour from being
-                # auto-cleared solely by the composite's other boosts.
-                or ((f.volume_match is False or f.pages_match is False)
-                    and m.title_sim < SAME_WORK_TITLE_SIM_MIN))
+    # has_confident_disagreement: a BOOLEAN wrong-paper signal. Tri-state -- only a
+    # REAL disagreement (is False) counts; None (unparsed) does not. NOTE
+    # journal_match is DELIBERATELY EXCLUDED here (unlike match_score's
+    # n_field_disagreements count): a journal disagreement blocks the override
+    # rescue (via that count) but does NOT by itself signal a wrong paper, because
+    # the containment journal comparator is a weak feature (F2-G §8.1) and a
+    # genuine same work routinely changes venue (preprint->journal). volume/pages
+    # count only BELOW the near-identical-title gate (an adjacent-record signal,
+    # not harmless pagination formatting). If excluding journal here is ever
+    # reconsidered, it needs its own measurement first.
+    has_confident_disagreement = (
+        (f.first_author_match is False)
+        or (f.author_match is False) or (f.year_match is False)
+        or ((f.volume_match is False or f.pages_match is False)
+            and m.title_sim < SAME_WORK_TITLE_SIM_MIN))
     identity = assess_same_work(claimed, cand, title_similarity=m.title_sim)
     # A corporate-author or series/edition conflict is AFFIRMATIVE evidence that
     # these are distinct records (two organizations, or two editions of a
@@ -777,7 +789,7 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # (title_sim >= accept) with agreeing coordinates is an ordinary same_record
     # and stays ``match`` (§5.4 step 3) -- e.g. a perfectly-cited reference. Net
     # HIGH membership is unchanged either way.
-    if not disagree and m.score >= accept and not (
+    if not has_confident_disagreement and m.score >= accept and not (
             _physical_location_conjunction(f) and m.title_sim < accept):
         return VERDICT_MATCH, m
     if identity.same_work:
@@ -788,7 +800,7 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # the PMID resolves to the same work, so author/year drift on it is a
     # revision / metadata-drift signature, not wrong-paper evidence. Requires a
     # real disagreement (so an unparsed-field ``None`` never diverts).
-    if (m.title_sim >= SAME_WORK_TITLE_SIM_MIN and disagree
+    if (m.title_sim >= SAME_WORK_TITLE_SIM_MIN and has_confident_disagreement
             and is_distinctive_title(claimed.title)
             and is_distinctive_title(cand.title)
             and not identity.blocked_by):
@@ -810,7 +822,7 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # still seen by a human.
     first_author_ok = (f.first_author_match is True or
                        (f.first_author_match is None and f.author_match is True))
-    if is_preprint_source(claimed) and first_author_ok and disagree:
+    if is_preprint_source(claimed) and first_author_ok and has_confident_disagreement:
         # A version relation is a claim about PROVENANCE, so it needs provenance
         # evidence -- title similarity alone cannot establish it (spec §14.3/§15).
         # PMC12733676:B29 (Least Squares GAN vs "On the Effectiveness of..."), with
@@ -846,7 +858,7 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     #     rows (shared DOI, unrelated title, different author) stay HIGH.
     # A physical-location match with neither signal is a description defect on the
     # same work -> quarantine (audited), never silently cleared.
-    if _physical_location_conjunction(f) and not disagree:
+    if _physical_location_conjunction(f) and not has_confident_disagreement:
         m.same_work_reason = "physical_location_same_work"
         m.identity_signals = ("pages", "volume", "journal")
         return VERDICT_SAME_WORK_VARIANT, m
@@ -860,7 +872,7 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # volume_match/first_author_match/year_match all not-False and no serial/part/
     # update/edition-marker conflict, with frame-wide firings frozen first. Flip
     # ``_F2D_STRICT_PREFIX_ENABLED`` only under that full conjunction.
-    if (_F2D_STRICT_PREFIX_ENABLED and f.doi_match is not False and not disagree
+    if (_F2D_STRICT_PREFIX_ENABLED and f.doi_match is not False and not has_confident_disagreement
             and _strict_title_prefix(claimed.title, cand.title)):
         m.same_work_reason = "strict_prefix_title"
         m.identity_signals = ("strict_prefix",)
@@ -871,7 +883,7 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # to a genuine F2 (16639420: +0.05 for the now-parsed matching author pushes
     # its year-mismatched score past accept). Mirrors lookup.compare_and_flag's
     # flag rule; guarantees C1 (never drop a genuine wrong-paper from HIGH).
-    if disagree:
+    if has_confident_disagreement:
         return VERDICT_WRONG_PAPER, m
     # No confident disagreement below the same-work threshold.
     if m.score >= accept:
