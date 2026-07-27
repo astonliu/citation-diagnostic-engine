@@ -64,7 +64,28 @@ def test_cli_refuses_zero_byte_stub_corpus(tmp_path, capsys):
                          "--xml-dir", str(xml), "--out-dir", str(tmp_path)])
     assert rc == 3
     out = capsys.readouterr()
-    # The misleading all-zeros summary must NOT reach stdout (it would read as a
-    # pass); the diagnostic + summary go to stderr.
-    assert "n_records" not in out.out and "denominator_scoreable" not in out.out
-    assert "EMPTY frame" in out.err
+    # Nothing on stdout (it would read as a pass). On stderr: the refusal ERROR,
+    # and NO summary JSON dumped before it (the ordering ZD flagged) -- only the
+    # [parse-skip] line, which is legitimate context for why the frame is empty.
+    assert out.out.strip() == ""
+    assert "ERROR: reband produced an EMPTY frame" in out.err
+    assert "denominator_scoreable" not in out.err and "high_band_rate" not in out.err
+    # And NO zero-row artifact is left on disk under a real-looking name -- the
+    # trap a later glob / hash-pin would pick up.
+    assert list(tmp_path.glob("*_summary.json")) == []
+    assert list(tmp_path.glob("f2_random_oa_*.jsonl")) == []
+
+
+def test_reband_from_cache_refuses_empty_frame_without_writing(tmp_path):
+    # The guard lives in reband_from_cache (refuse_empty default on), so the
+    # `python -c "...reband_from_cache..."` path is protected too, not just the CLI.
+    from cre.f1.f2_run_v3 import reband_from_cache, EmptyRebandError
+    xml = tmp_path / "xml"; xml.mkdir()
+    (xml / "PMC1.xml").write_text("")                 # 0-byte stub -> nothing parses
+    cache = tmp_path / "c.jsonl"
+    cache.write_text('{"pmid": "111", "rec": {"resolved": true, "title": "t", '
+                     '"pmid": "111"}}\n')
+    with pytest.raises(EmptyRebandError):
+        reband_from_cache(str(xml), str(cache), out_dir=str(tmp_path),
+                          version="v3_1", src_pmcids=["PMC1"])
+    assert list(tmp_path.glob("*_summary.json")) == []   # nothing written

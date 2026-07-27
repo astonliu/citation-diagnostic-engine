@@ -416,8 +416,10 @@ def test_reband_counts_unmatched_cache_line(tmp_path):
     _write_cache(str(cache), [{"src_pmcid": "PMC0001", "pmid": "does-not-exist",
                                "resolved": True, "title": "R", "authors": ["Z"],
                                "year": 2019}])
+    # refuse_empty=False: this test deliberately probes an all-dropped join, so an
+    # empty frame is the expected, inspected outcome (not a corpus-missing failure).
     summary = reband_from_cache(str(xml_dir), str(cache), out_dir=str(tmp_path),
-                                version="v3_1")
+                                version="v3_1", refuse_empty=False)
     assert summary["n_unmatched_dropped"] == 1
     assert summary["n_joined"] == 0
 
@@ -438,7 +440,7 @@ def test_reband_present_but_unmatched_src_pmcid_never_misjoins(tmp_path):
                                "resolved": True, "title": "Resolved paper",
                                "authors": ["Zauthor"], "year": 2019}])
     summary = reband_from_cache(str(xml_dir), str(cache), out_dir=str(tmp_path),
-                                version="v3_1")
+                                version="v3_1", refuse_empty=False)  # empty join is the point
     assert summary["n_joined"] == 0                # NOT re-joined to PMC_B
     assert summary["n_pmid_only_join"] == 0
     assert summary["n_unmatched_dropped"] == 1
@@ -461,7 +463,7 @@ def test_reband_present_but_unmatched_src_pmcid_not_counted_ambiguous(tmp_path):
                                "resolved": True, "title": "R", "authors": ["Z"],
                                "year": 2019}])
     summary = reband_from_cache(str(xml_dir), str(cache), out_dir=str(tmp_path),
-                                version="v3_1")
+                                version="v3_1", refuse_empty=False)  # empty join is the point
     assert summary["n_unmatched_dropped"] == 1
     assert summary["n_ambiguous_dropped"] == 0
     assert summary["n_joined"] == 0

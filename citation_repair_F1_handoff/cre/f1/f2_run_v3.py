@@ -230,12 +230,21 @@ def load_resolved_cache(resolved_cache_path: str, *, src_pmcid_key: str = "src_p
     return out
 
 
+class EmptyRebandError(RuntimeError):
+    """A reband produced ZERO records. Raised BEFORE any artifact is written when
+    ``refuse_empty`` is set, so an empty frame never leaves a zero-row
+    ``*_summary.json`` on disk under a legitimate name -- a later session, a model,
+    or a `glob('*_summary.json')` would otherwise pick it up as a real run (the
+    stale-artifact / branch-drift failure class this project keeps hitting)."""
+
+
 def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
                       out_dir: str = ".", out_prefix: str = "f2_random_oa",
                       version: str = "v3_1", accept: float = 0.85,
                       src_pmcid_key: str = "src_pmcid",
                       pmid_key: str = "pmid", seed: int = 7,
-                      src_pmcids: Optional[Iterable[str]] = None) -> dict:
+                      src_pmcids: Optional[Iterable[str]] = None,
+                      refuse_empty: bool = True) -> dict:
     """Rebuild the F2 frame from the two Drive caches and re-band it with the
     CURRENTLY-LOADED fixes -- NO NCBI/Crossref call. Writes
     ``<prefix>_seed<seed>_<version>.*`` (default ``seed=7``, ``version="v3_1"``).
@@ -373,6 +382,18 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
             f"live in the nested 'rec' sub-object of each line. Aborting before any "
             f"write so a corrupt v3_1 is never emitted.")
 
+    # Empty-frame guard (default on): a reband that joined NOTHING is never a valid
+    # result, so refuse BEFORE writing rather than leave a zero-row artifact under a
+    # real-looking name (exit-3 in the CLI only protects the terminal; this also
+    # protects a later glob / hash-pin / the `python -c` path). Join-logic unit
+    # tests that deliberately probe an empty join pass ``refuse_empty=False``.
+    if refuse_empty and not records:
+        raise EmptyRebandError(
+            f"reband produced an EMPTY frame (0 records) from xml_dir={xml_dir!r}, "
+            f"resolved_cache={resolved_cache_path!r}: the source corpus and/or "
+            f"cache is missing or unreadable (e.g. 0-byte XML stubs), or nothing "
+            f"joined. Refusing to write a zero-row artifact.")
+
     # F2_V3_3 audit visibility: enumerate the rows that CHANGED band from
     # review_wrong_paper (at the old 0.95 gate) to review_same_work_variant (at the
     # new 0.92 gate) -- i.e. SAME_WORK_VARIANT rows whose title_sim sits in
@@ -490,26 +511,22 @@ def _cli(argv: "Optional[list[str]]" = None) -> int:
         p.error(f"--xml-dir {args.xml_dir!r} contains no .xml/.nxml files; the "
                 f"pinned source corpus must be present for a reband.")
 
-    summary = reband_from_cache(
-        xml_dir=args.xml_dir, resolved_cache_path=args.resolved_cache,
-        out_dir=args.out_dir, version=args.version, seed=args.seed,
-        src_pmcids=stems)
-    scalar = {k: v for k, v in summary.items() if not isinstance(v, list)}
-
-    # Refuse an EMPTY frame: n_records == 0 means the corpus and/or cache produced
-    # nothing (0-byte XML stubs, an empty cache, a corpus of files with no
-    # PMID-bearing refs). An all-zeros summary at exit 0 reads as a PASS -- exactly
-    # the silent-empty-run failure this project keeps hitting -- so make it FATAL
-    # with a non-zero exit and keep the misleading summary OFF stdout.
-    if not summary.get("n_records"):
-        print(json.dumps(scalar, indent=2), file=sys.stderr)
-        print(f"ERROR: reband produced an EMPTY frame (n_records=0) from "
-              f"--xml-dir {args.xml_dir!r} / --resolved-cache "
-              f"{args.resolved_cache!r}. The source corpus and/or resolved cache "
-              f"is missing or unreadable (e.g. 0-byte XML stubs). This is NOT a "
-              f"valid verification; refusing.", file=sys.stderr)
+    # An EMPTY frame is fatal and is refused INSIDE reband_from_cache (refuse_empty
+    # defaults on), so NO zero-row artifact is written -- protecting a later glob /
+    # hash-pin, not just the terminal. Turn that into a clean exit 3 with the
+    # diagnostic FIRST on stderr and nothing on stdout (so it can never read as a
+    # pass).
+    try:
+        summary = reband_from_cache(
+            xml_dir=args.xml_dir, resolved_cache_path=args.resolved_cache,
+            out_dir=args.out_dir, version=args.version, seed=args.seed,
+            src_pmcids=stems)
+    except EmptyRebandError as e:
+        print(f"ERROR: {e} This is NOT a valid verification; no artifact written.",
+              file=sys.stderr)
         return 3
 
+    scalar = {k: v for k, v in summary.items() if not isinstance(v, list)}
     print(json.dumps(scalar, indent=2))
     return 0
 
