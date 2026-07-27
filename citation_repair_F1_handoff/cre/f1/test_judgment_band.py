@@ -524,3 +524,80 @@ def test_run_band_resume_no_duplicate(tmp_path, frame_dir, patched_pubtypes):
     assert man2["counts"]["docs_processed"] == 0
     second = _read(out, "judgment_band_items.jsonl")
     assert len(second) == len(first)              # no duplicate append
+
+
+# ==========================================================================
+# run_band(): Part C -- per-atomic-claim coverage distribution tally
+# ==========================================================================
+def _four_claim_extractor(sentence):
+    """One claim per abstract-scoped coverage bucket (established, contradicted,
+    unconfirmed-specific, off-topic)."""
+    return ["c-established", "c-contradicted", "c-unconfirmed", "c-offtopic"]
+
+
+def _structured_judge(claims, evidence):
+    """A judge that carries the raw structured fields, one per bucket, with
+    ``established`` consistent with the tri-state aggregation."""
+    return [
+        {"established": True, "engages_subject": True,
+         "contradicts": False, "unconfirmed_specifics": []},
+        {"established": False, "engages_subject": True,
+         "contradicts": True, "unconfirmed_specifics": []},
+        {"established": None, "engages_subject": True,
+         "contradicts": False, "unconfirmed_specifics": ["a mouse model"]},
+        {"established": None, "engages_subject": False,
+         "contradicts": False, "unconfirmed_specifics": []},
+    ]
+
+
+def test_run_band_coverage_distribution_tallies_per_claim(
+        tmp_path, frame_dir, patched_pubtypes):
+    """Part C: the four abstract-scoped buckets are tallied PER ATOMIC CLAIM,
+    surfaced under manifest['coverage_distribution'] AND in counts, and sum to
+    the number of coverage verdicts. Only a contradiction is a fault, so this
+    item (one contradicted claim) routes F6_FLAGGED."""
+    out = str(tmp_path / "out")
+    man = jb.run_band(
+        frame_dir, out, extractor=_four_claim_extractor,
+        coverage_judge=_structured_judge, fetch_abstract=_abstract,
+        fetch_reflist=_reflist, session=_StubSession())
+
+    dist = man["coverage_distribution"]
+    assert dist[jb.COVERAGE_ESTABLISHED] == 1
+    assert dist[jb.COVERAGE_CONTRADICTED] == 1
+    assert dist[jb.COVERAGE_UNCONFIRMED_SPECIFIC] == 1
+    assert dist[jb.COVERAGE_OFF_TOPIC] == 1
+    assert "contradicted" in dist["note"].lower()
+
+    # C1: the same four counters live in counts (existing route counters intact).
+    for bucket in (jb.COVERAGE_ESTABLISHED, jb.COVERAGE_CONTRADICTED,
+                   jb.COVERAGE_UNCONFIRMED_SPECIFIC, jb.COVERAGE_OFF_TOPIC):
+        assert man["counts"][bucket] == 1
+
+    # per-claim sums equal the number of verdicts (acceptance row 19)
+    items = _read(out, "judgment_band_items.jsonl")
+    n_verdicts = sum(len(it["coverage_verdicts"]) for it in items)
+    assert n_verdicts == 4
+    assert (dist[jb.COVERAGE_ESTABLISHED] + dist[jb.COVERAGE_CONTRADICTED]
+            + dist[jb.COVERAGE_UNCONFIRMED_SPECIFIC]
+            + dist[jb.COVERAGE_OFF_TOPIC]) == n_verdicts
+
+    # a contradiction is the only abstract-scoped fault -> F6_FLAGGED
+    assert man["counts"][jb.ROUTE_F6_FLAGGED] == 1
+
+
+def test_run_band_coverage_distribution_skips_no_usable_abstract(
+        tmp_path, frame_dir, patched_pubtypes):
+    """The no-usable-abstract path carries no structured fields, so its verdicts
+    are NOT counted in any coverage bucket (they are accounted at item level by
+    no_usable_abstract). All four buckets stay zero here."""
+    out = str(tmp_path / "out")
+    man = jb.run_band(
+        frame_dir, out, extractor=_extractor, coverage_judge=_judge_all(None),
+        fetch_abstract=lambda pmid: "N/A", fetch_reflist=_reflist,
+        session=_StubSession())
+    assert man["counts"]["no_usable_abstract"] == 1
+    dist = man["coverage_distribution"]
+    assert all(dist[b] == 0 for b in (
+        jb.COVERAGE_ESTABLISHED, jb.COVERAGE_CONTRADICTED,
+        jb.COVERAGE_UNCONFIRMED_SPECIFIC, jb.COVERAGE_OFF_TOPIC))

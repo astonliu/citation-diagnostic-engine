@@ -3,16 +3,24 @@
 WHAT THIS IS
 ------------
 One shared front-end that turns a parsed citation into a *judgeable item* (its
-atomic claims plus the evidence needed to check them), applies the COVERAGE
-GATE, and routes:
+atomic claims plus the evidence needed to check them), applies the ABSTRACT-
+SCOPED COVERAGE GATE, and routes on the three findings an abstract can support:
 
-  * any atomic claim the cited paper does NOT establish  -> ``F6_FLAGGED``
-  * every atomic claim established                        -> ``FULL_COVERAGE``
+  * the cited abstract CONTRADICTS an atomic claim         -> ``F6_FLAGGED``
+  * every atomic claim is stated and supported             -> ``FULL_COVERAGE``
                                                             (staged for the F3
                                                              provenance
                                                              discriminator, next
                                                              spec)
-  * some claims unknown (``None``), none refuted          -> ``HELD_LOW_CONFIDENCE``
+  * an abstract is silent on a claim, leaves a specificity
+    unconfirmed, or could not be judged                    -> ``HELD_LOW_CONFIDENCE``
+
+``F6_FLAGGED`` AT THIS STAGE MEANS THE CITED ABSTRACT CONTRADICTS THE CLAIM --
+not that the cited paper fails to support it (ZD 2026-07-27). A coverage gap in
+the taxonomy sense cannot be established from an abstract alone: a claim genuinely
+supported in the cited paper's Results but absent from its abstract is *unknown*
+here, and is held, never flagged. Adjudicating a true coverage gap requires
+full-text evidence, a later stage; the HELD bucket is that escalation queue.
 
 It emits a per-item record AND an annotator payload that is IDENTICAL across
 strata and BLIND to the system's proposed verdict. The band is the FROZEN
@@ -212,12 +220,18 @@ def coverage_verdicts(claims: list, evidence: dict, *,
                       judge: CoverageJudge) -> list:
     """Per-claim coverage verdict from the injected ``judge``.
 
-    ``established`` is a tri-state: True means the cited paper STATES AND
-    SUPPORTS the claim (presence, F3-D3), False means it does not, None means the
-    judge could not decide. Verdicts are stamped with
-    :data:`COVERAGE_PROMPT_VERSION`. A judge that returns nothing / too few
-    items leaves the remaining claims at ``established=None`` (unknown, never a
-    gap)."""
+    ``established`` is abstract-scoped and tri-state: True means the abstract
+    STATES AND SUPPORTS the claim (presence, F3-D3), False means the abstract
+    CONTRADICTS it (the only abstract-scoped fault), None means the abstract is
+    silent, leaves a load-bearing specificity unconfirmed, or the judge could not
+    decide -- unknown, never a gap. Verdicts are stamped with
+    :data:`COVERAGE_PROMPT_VERSION`. A judge that returns nothing / too few items
+    leaves the remaining claims at ``established=None``.
+
+    The raw structured fields (``engages_subject``, ``contradicts``,
+    ``unconfirmed_specifics``) ride alongside so run_band can tally the coverage
+    distribution; they default to None/[] on a judge (e.g. the no-usable-abstract
+    path) that does not supply them. Item-record fields only -- never blind."""
     if not claims:
         return []
     raw = judge(claims, evidence) or []
@@ -230,6 +244,9 @@ def coverage_verdicts(claims: list, evidence: dict, *,
             "established": _tristate(v.get("established")),
             "rationale": v.get("rationale", ""),
             "evidence_span": v.get("evidence_span", ""),
+            "engages_subject": v.get("engages_subject"),
+            "contradicts": v.get("contradicts"),
+            "unconfirmed_specifics": v.get("unconfirmed_specifics", []),
             "prompt_version": COVERAGE_PROMPT_VERSION,
         })
     return out
@@ -258,6 +275,45 @@ def _proposed_verdict(route_value: str) -> "str | None":
     guess (F6); FULL_COVERAGE is staged for the F3 discriminator (undecided
     here) and HELD carries no guess."""
     return "F6" if route_value == ROUTE_F6_FLAGGED else None
+
+
+# Coverage-distribution buckets: the four findings an abstract can yield about a
+# claim, tallied PER ATOMIC CLAIM for the calibration pass. This separates "the
+# abstract contradicts this" (the only abstract-scoped fault) from "the abstract
+# doesn't say," so the ratio can decide whether abstract-scoped F6 is a headline
+# result or a screening stage.
+COVERAGE_ESTABLISHED = "coverage_established"
+COVERAGE_CONTRADICTED = "coverage_contradicted"
+COVERAGE_UNCONFIRMED_SPECIFIC = "coverage_unconfirmed_specific"
+COVERAGE_OFF_TOPIC = "coverage_off_topic"
+_COVERAGE_BUCKETS = (
+    COVERAGE_ESTABLISHED, COVERAGE_CONTRADICTED,
+    COVERAGE_UNCONFIRMED_SPECIFIC, COVERAGE_OFF_TOPIC,
+)
+
+
+def coverage_bucket(verdict: dict) -> "str | None":
+    """Classify one per-claim coverage verdict into its abstract-scoped bucket.
+
+    Sourced from the raw structured fields the coverage parser carries:
+      * ``contradicts`` true                         -> COVERAGE_CONTRADICTED (F6)
+      * ``engages_subject`` false                    -> COVERAGE_OFF_TOPIC (HELD)
+      * engaged, specifics unconfirmed               -> COVERAGE_UNCONFIRMED_SPECIFIC (HELD)
+      * engaged, no contradiction, nothing unconfirmed -> COVERAGE_ESTABLISHED
+
+    Returns None when the verdict carries no structured judgment (the
+    deterministic no-usable-abstract path), so it is not miscounted as a judged
+    claim -- those are already accounted for by the item-level
+    ``no_usable_abstract`` counter."""
+    if verdict.get("contradicts") is True:
+        return COVERAGE_CONTRADICTED
+    if verdict.get("engages_subject") is False:
+        return COVERAGE_OFF_TOPIC
+    if verdict.get("engages_subject") is True:
+        if verdict.get("unconfirmed_specifics"):
+            return COVERAGE_UNCONFIRMED_SPECIFIC
+        return COVERAGE_ESTABLISHED
+    return None
 
 
 # ==========================================================================
@@ -374,6 +430,13 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
         ROUTE_FULL_COVERAGE: 0,
         ROUTE_HELD: 0,
         ROUTE_PARSE_QUARANTINE: 0,     # malformed model output, row quarantined
+        # Per-atomic-claim coverage distribution (not per item). The route
+        # counters above stay item-level and unchanged; these four partition the
+        # coverage judgments made against a usable abstract.
+        COVERAGE_ESTABLISHED: 0,
+        COVERAGE_CONTRADICTED: 0,      # the only abstract-scoped evidence of a fault
+        COVERAGE_UNCONFIRMED_SPECIFIC: 0,
+        COVERAGE_OFF_TOPIC: 0,
     }
     pubtype_cache: dict = {}
 
@@ -468,6 +531,16 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                 item["proposed_verdict"] = _proposed_verdict(r)
                 counts[r] += 1
 
+                # Per-atomic-claim coverage tally (calibration): the abstract-
+                # scoped distribution the tri-state gate produces. Verdicts on
+                # the no-usable-abstract path carry no structured fields and are
+                # skipped (coverage_bucket returns None), already counted at item
+                # level under no_usable_abstract.
+                for verdict in item["coverage_verdicts"]:
+                    bucket = coverage_bucket(verdict)
+                    if bucket is not None:
+                        counts[bucket] += 1
+
                 # Stamp pinned prompt versions on the item record.
                 item["claim_extract_prompt_version"] = CLAIM_EXTRACT_PROMPT_VERSION
                 item["coverage_prompt_version"] = COVERAGE_PROMPT_VERSION
@@ -506,6 +579,20 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
             "fetch_reflist_wired": fetch_reflist is not None,
         },
         "counts": counts,
+        "coverage_distribution": {
+            COVERAGE_ESTABLISHED: counts[COVERAGE_ESTABLISHED],
+            COVERAGE_CONTRADICTED: counts[COVERAGE_CONTRADICTED],
+            COVERAGE_UNCONFIRMED_SPECIFIC: counts[COVERAGE_UNCONFIRMED_SPECIFIC],
+            COVERAGE_OFF_TOPIC: counts[COVERAGE_OFF_TOPIC],
+            "note": (
+                "Per atomic claim, abstract-scoped. coverage_contradicted is the "
+                "ONLY abstract-scoped evidence of a fault (routes F6_FLAGGED); "
+                "coverage_unconfirmed_specific and coverage_off_topic are the "
+                "full-text escalation queue (route HELD_LOW_CONFIDENCE). "
+                "coverage_established routes FULL_COVERAGE. The no-usable-abstract "
+                "path is excluded here and counted under counts.no_usable_abstract."
+            ),
+        },
         "distinct_cited_pmids_looked_up": len(pubtype_cache),
         "items_path": items_path,
         "annotation_queue_path": queue_path,
