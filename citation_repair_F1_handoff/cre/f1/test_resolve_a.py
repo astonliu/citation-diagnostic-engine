@@ -376,3 +376,52 @@ def test_ref011_resolver_crossref_clean_miss_is_unscoreable():
     ar = assess_a_vs_b(_ref011_claimed(), _ref011_b(), session=sess,
                        steps=("cited_doi", "pubmed", "candidates"))
     assert ar.outcome == OUTCOME_UNSCOREABLE
+
+
+# ==========================================================================
+# Item 4: uniqueness check -> ambiguous_multiple (§14.5)
+# ==========================================================================
+from cre.f1.resolve_a import OUTCOME_AMBIGUOUS_MULTIPLE, resolve_by_candidates  # noqa: E402
+
+
+def test_two_eligible_clusters_route_ambiguous_multiple():
+    # Two DISTINCT works (different DOIs) whose titles both clear the eligibility
+    # bar against the written title -> refuse to pick one; ambiguous_multiple, no
+    # repair. Titles differ (so retrieve_candidates does not dedup them) but each
+    # is >= A_TITLE_CONFIDENT similar to the claimed title.
+    claimed = ClaimedRef(title="Deep learning for medical image segmentation",
+                         authors=["Lee"], year=2020)
+    b = RetrievedRecord(resolved=True, title="An unrelated resolved paper",
+                        doi="10.1/b", pmid="1")
+    sess = _FakeSession({"api.crossref.org/works": {"message": {"items": [
+        {"DOI": "10.1000/x1", "title": ["Deep learning for medical image "
+         "segmentation"], "author": [{"family": "Lee"}],
+         "issued": {"date-parts": [[2020]]}, "container-title": ["J A"]},
+        {"DOI": "10.1000/x2", "title": ["Deep learning for medical image "
+         "segmentation methods"], "author": [{"family": "Kim"}],
+         "issued": {"date-parts": [[2019]]}, "container-title": ["J B"]}]}},
+        "api.openalex.org/works": {"results": []}})
+    ar = assess_a_vs_b(claimed, b, session=sess, steps=("candidates",))
+    assert ar.outcome == OUTCOME_AMBIGUOUS_MULTIPLE
+    assert ar.proposed_repair is None
+    assert len(ar.evidence["candidates"]) == 2
+
+
+def test_one_eligible_cluster_resolves_uniquely():
+    # Two hits that are the SAME work (shared DOI) collapse to one cluster ->
+    # resolved_unique, a repair is proposed.
+    claimed = ClaimedRef(title="Deep learning for medical image segmentation",
+                         authors=["Lee"], year=2020)
+    b = RetrievedRecord(resolved=True, title="An unrelated resolved paper",
+                        doi="10.1/b", pmid="1")
+    sess = _FakeSession({"api.crossref.org/works": {"message": {"items": [
+        {"DOI": "10.1000/same", "title": ["Deep learning for medical image "
+         "segmentation"], "author": [{"family": "Lee"}],
+         "issued": {"date-parts": [[2020]]}, "container-title": ["J A"]}]}},
+        "api.openalex.org/works": {"results": [
+            {"doi": "https://doi.org/10.1000/same",
+             "title": "Deep learning for medical image segmentation",
+             "publication_year": 2020}]}})
+    ar = assess_a_vs_b(claimed, b, session=sess, steps=("candidates",))
+    assert ar.outcome == OUTCOME_F2_WITH_REPAIR
+    assert ar.proposed_repair["doi"] == "10.1000/same"

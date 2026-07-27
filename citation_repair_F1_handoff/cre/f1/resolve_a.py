@@ -62,7 +62,8 @@ import requests
 from .schema import ClaimedRef, RetrievedRecord
 from .ratelimit import CROSSREF, DATACITE, BIORXIV, NCBI, request_with_retry
 from .lookup import fetch_pubmed
-from .biblio_match import (retrieve_candidates, best_match, title_sim,
+from .biblio_match import (retrieve_candidates, title_sim,
+                           SAME_WORK_TITLE_SIM_MIN,
                            _coerce_year, _crossref_record)
 from .work_identity import doi_equivalent, _norm_doi
 
@@ -84,6 +85,7 @@ OUTCOME_NOT_F2 = "not_f2"                 # A resolves to B: identifier is corre
 OUTCOME_F2_WITH_REPAIR = "f2_with_repair"  # A resolves to C != B: proposed repair = C
 OUTCOME_UNSCOREABLE = "unscoreable"        # A resolves to nothing resolvable
 OUTCOME_UNDETERMINED = "undetermined"      # cascade errored on the network, retry later
+OUTCOME_AMBIGUOUS_MULTIPLE = "ambiguous_multiple"  # >1 eligible A cluster; no repair
 
 # A candidate is a confident resolution of A when its title matches the written
 # title this closely (0..1). Kept conservative: a wrong A is worse than an
@@ -275,28 +277,72 @@ def resolve_by_pubmed(claimed: ClaimedRef, *, api_key: str = "", email: str = ""
     return None
 
 
+def _eligible_clusters(claimed: ClaimedRef, cands: list) -> list:
+    """Group the eligible candidates (title_sim >= A_TITLE_CONFIDENT vs the written
+    title) into identity CLUSTERS. Two eligible candidates are the same cluster
+    when they share a normalized DOI or their titles are near-identical
+    (title_sim >= SAME_WORK_TITLE_SIM_MIN) -- so a preprint+published pair or a
+    minor title variant counts once. Returns a list of clusters, each a list of
+    candidates; the first candidate of each cluster is its representative."""
+    eligible = [c for c in cands
+                if c.title and title_sim(claimed.title, c.title) >= A_TITLE_CONFIDENT]
+    clusters: list[list] = []
+    for c in eligible:
+        placed = False
+        for cl in clusters:
+            if _same_cluster(c, cl[0]):
+                cl.append(c)
+                placed = True
+                break
+        if not placed:
+            clusters.append([c])
+    return clusters
+
+
+def _same_cluster(a: RetrievedRecord, b: RetrievedRecord) -> bool:
+    """Two candidates are one identity cluster by AUTHORITATIVE ID first (spec
+    §14.4): if both carry DOIs, the DOIs decide -- DIFFERENT DOIs are different
+    works even when the titles are identical (a shared title is not identity, it
+    is the run-on/duplicate-title hazard). Only when a DOI is missing on a side do
+    we fall back to near-identical titles."""
+    if a.doi and b.doi:
+        return doi_equivalent(a.doi, b.doi)
+    return bool(a.title and b.title
+                and title_sim(a.title, b.title) >= SAME_WORK_TITLE_SIM_MIN)
+
+
 def resolve_by_candidates(claimed: ClaimedRef, session=None,
-                          errors: Optional[list] = None
+                          errors: Optional[list] = None,
+                          ambiguous: Optional[list] = None
                           ) -> Optional[RetrievedRecord]:
     """Steps 3-4. Crossref query.bibliographic + OpenAlex backstop, via the shared
-    ``retrieve_candidates``. Returns the best candidate when it confidently
-    matches the written title, else None. Crossref is REQUIRED, not optional:
-    several cited venues (Plant and Soil, J Great Lakes Res, MiMB volumes) are not
-    PubMed-indexed, and 3 of the seed-37 HIGH true positives cite them. A thrown
-    search request is recorded in ``errors`` (via retrieve_candidates), so a flaky
-    Crossref never masquerades as 'A not found' -- decisive for PMC8015328:ref011,
-    whose A (Nematology, not PubMed-indexed) must come from Crossref."""
+    ``retrieve_candidates``. Crossref is REQUIRED, not optional: several cited
+    venues (Plant and Soil, J Great Lakes Res, MiMB volumes) are not PubMed-indexed,
+    and 3 of the seed-37 HIGH true positives cite them. A thrown search request is
+    recorded in ``errors`` (via retrieve_candidates), so a flaky Crossref never
+    masquerades as 'A not found' -- decisive for PMC8015328:ref011.
+
+    UNIQUENESS (spec §14.5): resolution is confident only when exactly ONE identity
+    cluster is eligible. When two or more DISTINCT clusters clear the bar, the
+    candidates are recorded in ``ambiguous`` and None is returned -- the resolver
+    does NOT pick one by provider order or a small score margin, because
+    confidently proposing the WRONG repair target C is the worst failure a repair
+    system can have."""
     cands = retrieve_candidates(claimed, n=5, session=session, errors=errors)
     if not cands:
         return None
-    bm = best_match(claimed, cands)
-    if not bm.found or bm.best is None:
+    clusters = _eligible_clusters(claimed, cands)
+    if not clusters:
         return None
-    if title_sim(claimed.title, bm.best.record.title) >= A_TITLE_CONFIDENT:
-        rec = bm.best.record
-        rec.resolved = True
-        return rec
-    return None
+    if len(clusters) > 1:
+        if ambiguous is not None:
+            ambiguous.extend({"title": cl[0].title, "doi": cl[0].doi,
+                              "year": cl[0].year} for cl in clusters)
+        return None                           # >1 eligible cluster -> ambiguous
+    # exactly one eligible cluster: return its best-scoring member
+    best = max(clusters[0], key=lambda c: title_sim(claimed.title, c.title))
+    best.resolved = True
+    return best
 
 
 _CASCADE_DEFAULT = ("cited_doi", "pubmed", "candidates")
@@ -305,12 +351,15 @@ _CASCADE_DEFAULT = ("cited_doi", "pubmed", "candidates")
 def resolve_a(claimed: ClaimedRef, resolved_b: RetrievedRecord, *,
               api_key: str = "", email: str = "", session=None,
               steps: Iterable[str] = _CASCADE_DEFAULT,
-              errors: Optional[list] = None) -> tuple[str, Optional[RetrievedRecord]]:
+              errors: Optional[list] = None,
+              ambiguous: Optional[list] = None
+              ) -> tuple[str, Optional[RetrievedRecord]]:
     """Run the cascade, stopping at the first confident resolution of A. Returns
     ``(source, a_record)`` -- ``source`` is the step name, ``a_record`` is None
-    when nothing resolved A. A thrown request in any step appends to ``errors`` so
-    the caller can tell 'A not found (all sources completed)' from 'a source
-    errored' (spec §14.6)."""
+    when nothing resolved A. A thrown request in any step appends to ``errors``;
+    two or more eligible candidate clusters append to ``ambiguous`` (spec §14.5/
+    §14.6), so the caller can tell 'not found', 'source errored', and 'ambiguous'
+    apart."""
     for step in steps:
         if step == "cited_doi":
             a = resolve_by_cited_doi(claimed, resolved_b.doi if resolved_b else "",
@@ -319,7 +368,8 @@ def resolve_a(claimed: ClaimedRef, resolved_b: RetrievedRecord, *,
             a = resolve_by_pubmed(claimed, api_key=api_key, email=email,
                                   session=session, errors=errors)
         elif step == "candidates":
-            a = resolve_by_candidates(claimed, session=session, errors=errors)
+            a = resolve_by_candidates(claimed, session=session, errors=errors,
+                                      ambiguous=ambiguous)
         else:
             continue
         if a is not None:
@@ -383,12 +433,21 @@ def assess_a_vs_b(claimed: ClaimedRef, resolved_b: RetrievedRecord, *,
             evidence={"relation": "preprint_of", "preprint_doi": claimed.claimed_doi,
                       "published_doi": pub, "b_doi": resolved_b.doi})
     errors: list = []
+    ambiguous: list = []
     source, a = resolve_a(claimed, resolved_b, api_key=api_key, email=email,
-                          session=session, steps=steps, errors=errors)
+                          session=session, steps=steps, errors=errors,
+                          ambiguous=ambiguous)
     if a is None:
-        # §14.6: a THROWN request (retrieval_incomplete) must not be conflated with
-        # a clean miss. A clean miss -> unscoreable; a source error -> undetermined,
-        # so a flaky run never silently shrinks the scoreable population.
+        # §14.5/§14.6, in precedence: a concrete multi-cluster conflict
+        # (ambiguous_multiple) is the most actionable and blocks a repair; then a
+        # THROWN request (retrieval_incomplete -> undetermined) which must never be
+        # conflated with a clean miss; else a clean miss -> unscoreable. Only the
+        # last shrinks the scoreable population.
+        if ambiguous:
+            return AResolution(
+                outcome=OUTCOME_AMBIGUOUS_MULTIPLE, a_source=source,
+                evidence={"reason": "more than one eligible A cluster; refusing to "
+                          "propose a repair", "candidates": ambiguous})
         if errors:
             return AResolution(
                 outcome=OUTCOME_UNDETERMINED, a_source=source,
@@ -462,7 +521,8 @@ def resolve_a_batch(rows: Iterable[dict], out_path: str, *,
                     except ValueError:
                         continue
     counts = {OUTCOME_NOT_F2: 0, OUTCOME_F2_WITH_REPAIR: 0,
-              OUTCOME_UNSCOREABLE: 0, OUTCOME_UNDETERMINED: 0, "skipped": 0}
+              OUTCOME_UNSCOREABLE: 0, OUTCOME_UNDETERMINED: 0,
+              OUTCOME_AMBIGUOUS_MULTIPLE: 0, "skipped": 0}
     with open(out_path, "a") as f:
         for row in rows:
             rid = id_of(row)
