@@ -2,7 +2,17 @@
 
 **Spec date:** 2026-07-26
 
-**Revision:** 5 (supersedes revisions 1–4)
+**Revision:** 5.1 (supersedes revisions 1–5)
+
+**Amendments in 5.1 (2026-07-27):** two defects surfaced during implementation and
+fixed here, both documentation-level, neither changing any normative rule:
+(1) §20 described an offline reband step with no runnable command, and
+`reband_from_cache` was a Python-only function — a CLI now makes it executable and
+§20 gives the concrete command; (2) §2.2 now discloses that no change since
+`a0c1060` has been verified frame-wide (§7.2), only on unit tests + the 51-row
+band, because neither working environment holds a readable pinned corpus. Editing
+this file changes its SHA-256; the `91c2f45…` pin refers to revision 5 and is
+superseded by the 5.1 hash recorded in the next manifest.
 
 **Frozen scoring provenance:** `a0c1060e85d74a57de0f1c0bb8c9060c87a5caa4`
 
@@ -111,6 +121,18 @@ Until that blocker is closed, the historical counts are reported as:
   35 other.
 
 Neither scenario is “known truth.”
+
+**Frame-wide verification status (amended 2026-07-27).** Every number produced for
+any change since `a0c1060` — F2-A/B/C/D/E/F/G/I, the routing fixes, and the
+resolver work — comes from unit tests plus the 51-row HIGH band. The frame-wide
+reband that §7.2 requires (“frame-wide movement MUST be reproduced from the pinned
+freeze”) has **not** been run for any of those changes, in either working
+environment: the primary checkout carries 0-byte source-XML stubs and the Drive
+copy is an unreadable ~42 MB placeholder, so the offline reband produces an empty
+frame in both (the CLI correctly refuses rather than emitting one — see §20). Only
+a Colab run with the real pinned corpus can close this. Until it does, all
+before/after counts in this program are **development-scale (≤51 rows), not
+frame-wide**, and must be reported as such alongside the base rate.
 
 ### 2.3 Reproducibility manifest
 
@@ -1190,6 +1212,24 @@ After each step:
 - reband the frozen seed-37 frame offline when the step affects deterministic scoring;
 - compare route movement and verify all original HIGH rows are accounted for;
 - do not run the network resolver until all provider preflights pass.
+
+The offline reband is run with (added 2026-07-27 — previously described but not
+runnable; `reband_from_cache` was a Python-only function and no CLI existed):
+
+```bash
+cd /Users/kamachi/citation-repair-engine/citation_repair_F1_handoff
+../.venv_cre/bin/python -m cre.f1.f2_run_v3 --reband-from-cache \
+  --resolved-cache <resolved-cache.jsonl> --xml-dir <source-xml-dir> \
+  --seed 37 --version candidate_02 --out-dir <out-dir>
+```
+
+The resolved cache is keyed by PMID and carries no source PMCID, so the
+`--xml-dir` file stems define the source-PMCID frame; the **real pinned source-XML
+corpus must therefore be present**. Against 0-byte stubs the stem list is empty and
+the command refuses rather than silently emitting an empty frame — which is why
+this step has not closed frame-wide in either local environment (§2.2). A
+`python -c "from cre.f1.f2_run_v3 import reband_from_cache; ..."` snippet calling
+the same function is an equivalent alternative.
 
 Do not use fixed pass counts as acceptance criteria. The criterion is zero failures in the
 complete discovered suite plus every required semantic fixture in this spec.
