@@ -327,6 +327,29 @@ def coverage_bucket(verdict: dict) -> "str | None":
 # keeps it; only the annotator's view is narrowed).
 ANNOTATION_EVIDENCE_KEYS = ("cited_pmid", "cited_abstract", "cited_is_review",
                             "review_reflist", "review_fulltext_available")
+_ANNOTATION_BLIND_KEYS = frozenset({
+    "proposed_route", "proposed_verdict", "rationale",
+})
+
+
+def _scrub_annotation_value(value):
+    """Recursively remove machine-judgment keys from annotator-visible data.
+
+    The outer evidence whitelist is necessary but not sufficient: injected
+    evidence can contain nested dictionaries (notably review-reference rows).
+    Preserve their useful source metadata while dropping forbidden keys at any
+    depth. Tuples are normalized to lists so the returned payload remains JSON-
+    serializable under the same contract as the ordinary evidence path.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _scrub_annotation_value(nested)
+            for key, nested in value.items()
+            if key not in _ANNOTATION_BLIND_KEYS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_scrub_annotation_value(nested) for nested in value]
+    return value
 
 
 def _new_worksheet() -> dict:
@@ -353,19 +376,23 @@ def annotation_payload(item: dict) -> dict:
     annotator commits, for disagreement analysis).
 
     Blindness is a WHITELIST at both levels: these seven keys, and within
-    ``evidence`` only :data:`ANNOTATION_EVIDENCE_KEYS`. A contaminated evidence
-    dict is silently narrowed rather than rejected -- a stray key is not worth
-    aborting a batch over, and dropping it costs the annotator nothing."""
+    ``evidence`` only :data:`ANNOTATION_EVIDENCE_KEYS`. The machine-judgment
+    keys are also removed recursively from nested item-derived containers. A
+    contaminated evidence dict is silently narrowed rather than rejected -- a
+    stray key is not worth aborting a batch over, and dropping it costs the
+    annotator nothing."""
     evidence = item.get("evidence")
     if not isinstance(evidence, dict):
         evidence = {}
     return {
-        "item_key": item["item_key"],
-        "citing_sentence": item["citing_sentence"],
-        "cited_pmid": item["cited_pmid"],
-        "atomic_claims": item.get("atomic_claims", []),
-        "evidence": {k: v for k, v in evidence.items()
-                     if k in ANNOTATION_EVIDENCE_KEYS},
+        "item_key": _scrub_annotation_value(item["item_key"]),
+        "citing_sentence": _scrub_annotation_value(item["citing_sentence"]),
+        "cited_pmid": _scrub_annotation_value(item["cited_pmid"]),
+        "atomic_claims": _scrub_annotation_value(item.get("atomic_claims", [])),
+        "evidence": _scrub_annotation_value({
+            k: v for k, v in evidence.items()
+            if k in ANNOTATION_EVIDENCE_KEYS
+        }),
         "label_space": list(LABEL_SPACE_F3),
         "worksheet": _new_worksheet(),
     }
