@@ -297,7 +297,11 @@ def from_legacy_coverage(
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
             raise DiscriminatorContractError("legacy coverage rows must be objects")
-        value = row.get("established")
+        if "established" not in row:
+            raise DiscriminatorContractError(
+                "legacy coverage rows must carry an established field"
+            )
+        value = row["established"]
         if value is True:
             state = SupportState.SUPPORTED
         elif value is False:
@@ -309,7 +313,14 @@ def from_legacy_coverage(
                 "legacy established must be exact True, False, or None"
             )
         span = row.get("evidence_span", "")
-        spans = (span.strip(),) if _nonblank(span) else ()
+        if span is None:
+            spans = ()
+        elif isinstance(span, str):
+            spans = (span.strip(),) if _nonblank(span) else ()
+        else:
+            raise DiscriminatorContractError(
+                "legacy evidence_span must be a string or null"
+            )
         # rationale is a log-only field; an explicit-null value normalizes to ""
         # (parallel to evidence_span above, which _nonblank already tolerates)
         # rather than rejecting an otherwise-valid legacy row. A non-string,
