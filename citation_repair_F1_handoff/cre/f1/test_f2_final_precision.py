@@ -124,6 +124,79 @@ def test_corporate_abbreviation_is_a_token_change_and_stays_high():
     assert flag_verdict(c, r)[0] == VERDICT_WRONG_PAPER
 
 
+# ---------------------------------------------------------------------
+# Corporate-author conflict is AFFIRMATIVE evidence, not absence of a format
+# match (2026-08-06). The block is lifted only when the two names are not in
+# conflict AND the pair is PHYSICALLY proven to be one work; both conjuncts are
+# load-bearing, and each test below fails if either is dropped.
+# ---------------------------------------------------------------------
+
+def test_corporate_acronym_gloss_with_physical_anchor_leaves_high():
+    """'World Medical Association (WMA)' vs 'World Medical Association': a
+    parenthetical acronym glossing the words beside it is typography, not a
+    second organization.  The exact DOI and physical slot carry the proof."""
+    c = _c(title="Declaration of Helsinki: ethical principles for medical research",
+           authors=["World Medical Association (WMA)"], year=2025, journal="JAMA",
+           volume="333", pages="71-74", claimed_doi="10.1000/wma")
+    r = _r(title="Declaration of Helsinki: ethical principles for medical research",
+           authors=["World Medical Association"], year=2025, journal="JAMA",
+           volume="333", pages="71-74", doi="10.1000/wma")
+    assert flag_verdict(c, r)[0] == VERDICT_SAME_WORK_VARIANT
+
+
+def test_corporate_truncated_trailing_token_leaves_high():
+    """JATS truncates the closing token of a long institutional name
+    ('...Taxonomy of, V'); a truncation is not two organizations."""
+    c = _c(title="The species severe acute respiratory syndrome-related coronavirus",
+           authors=["Coronaviridae Study Group of the International Committee on Taxonomy of, V"],
+           year=2020, journal="Nat Microbiol", volume="5", pages="536-544",
+           claimed_doi="10.1000/cov")
+    r = _r(title="The species severe acute respiratory syndrome-related coronavirus",
+           authors=["Coronaviridae Study Group of the International Committee on Taxonomy of Viruses"],
+           year=2020, journal="Nat Microbiol", volume="5", pages="536-544",
+           doi="10.1000/cov")
+    assert flag_verdict(c, r)[0] == VERDICT_SAME_WORK_VARIANT
+
+
+def test_corporate_physical_slot_agreement_without_a_doi_leaves_high():
+    """The second sufficiency route: no DOI on either side, but venue, volume,
+    first page and year all agree.  A trailing parenthetical QUALIFIER naming a
+    sub-body is kept as real tokens -- containment, not a gloss, carries it."""
+    c = _c(title="Third report of the expert panel on high blood cholesterol in adults",
+           authors=["National Cholesterol Education Program Expert Panel"],
+           year=2002, journal="Circulation", volume="106", pages="3143-3421")
+    r = _r(title="Third report of the expert panel on high blood cholesterol in adults",
+           authors=["National Cholesterol Education Program (NCEP) Expert Panel "
+                    "(Adult Treatment Panel III)"],
+           year=2002, journal="Circulation", volume="106", pages="3143-421")
+    assert flag_verdict(c, r)[0] == VERDICT_SAME_WORK_VARIANT
+
+
+def test_corporate_containment_without_physical_proof_stays_high():
+    """Name containment ALONE never clears the block: string shape is not proof
+    of same work.  Volume and first page disagree, so the pair stays HIGH."""
+    c = _c(title="Clinical guidance for pediatric care",
+           authors=["Committee for Pediatric Care"], year=2020,
+           journal="Child Health", volume="10", pages="1-9")
+    r = _r(title="Clinical guidance for pediatric care",
+           authors=["National Committee for Pediatric Care"], year=2020,
+           journal="Child Health", volume="12", pages="40-49")
+    assert flag_verdict(c, r)[0] == VERDICT_WRONG_PAPER
+
+
+def test_corporate_acronym_gloss_does_not_rescue_a_different_organization():
+    """The gloss rule strips typography; it never equates two DISTINCT bodies.
+    'International ... (ICPC)' vs 'National ...' keeps its conflict despite a
+    shared DOI and a fully agreeing physical slot."""
+    c = _c(title="Clinical guidance for pediatric care",
+           authors=["International Committee for Pediatric Care (ICPC)"], year=2020,
+           journal="Child Health", volume="10", pages="1-9", claimed_doi="10.1000/icpc")
+    r = _r(title="Clinical guidance for pediatric care",
+           authors=["National Committee for Pediatric Care"], year=2020,
+           journal="Child Health", volume="10", pages="1-9", doi="10.1000/icpc")
+    assert flag_verdict(c, r)[0] == VERDICT_WRONG_PAPER
+
+
 @pytest.mark.parametrize("authors", [
     ["National Perioperative Care Committee"],   # corporate edition family
     ["Rhodes"],                                  # personal-author edition family

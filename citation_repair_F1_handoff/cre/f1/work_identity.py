@@ -250,6 +250,112 @@ def _corporate_author_equivalent(claimed: ClaimedRef,
     return bool(a and b and a == b)
 
 
+# A parenthetical acronym that merely GLOSSES the words beside it ("World Medical
+# Association (WMA)", "National Cholesterol Education Program (NCEP) Expert
+# Panel"). Bounded to a single unspaced token so a parenthetical QUALIFIER that
+# names a sub-body ("(Adult Treatment Panel III)") can never match and is kept as
+# real tokens.
+_ACRONYM_GLOSS_RE = re.compile(r"\s*\(\s*([A-Za-z][A-Za-z.&\-]{1,15})\s*\)")
+
+
+def _strip_acronym_gloss(value: str) -> str:
+    """Remove a parenthetical acronym whose letters are the initials of the tokens
+    immediately before (or after) it -- the expansion is present in the SAME
+    string, so the acronym adds no information and is pure typography.
+
+    This is deliberately NOT acronym EXPANSION: "AAP Committee on Nutrition" vs
+    "American Academy of Pediatrics Committee on Nutrition" carries its expansion
+    in the OTHER string, replacing tokens, and is left untouched (it stays a
+    genuine token change -- see
+    ``test_corporate_abbreviation_is_a_token_change_and_stays_high``).
+    """
+    text = value or ""
+
+    def repl(match: "re.Match[str]") -> str:
+        letters = re.sub(r"[^a-z]", "", match.group(1).lower())
+        if len(letters) < 2:
+            return match.group(0)
+        before = re.sub(r"[^\w\s]", " ", text[:match.start()]).split()
+        after = re.sub(r"[^\w\s]", " ", text[match.end():]).split()
+        for words in (before[-len(letters):], after[:len(letters)]):
+            if (len(words) == len(letters)
+                    and "".join(w[0].lower() for w in words) == letters):
+                return " "
+        return match.group(0)
+
+    return _ACRONYM_GLOSS_RE.sub(repl, text)
+
+
+def _corporate_name_tokens(value: str) -> list[str]:
+    return _corporate_author_format_key(_strip_acronym_gloss(value)).split()
+
+
+def _corporate_token_equivalent(left: str, right: str, *, terminal: bool) -> bool:
+    """Whether two institutional-name tokens are the SAME word."""
+    if left == right:
+        return True
+    # A spelling/localization variant of one word ("anaesthesiologists" vs
+    # "anesthesiologists", 0.985). The length floor plus this threshold keep
+    # DIFFERENT words apart: "national" vs "international" scores 0.789.
+    if (min(len(left), len(right)) >= 6
+            and JaroWinkler.similarity(left, right) >= 0.92):
+        return True
+    # JATS truncates the FINAL token of a long institutional name ("...Committee
+    # on Taxonomy of, V" for "...on Taxonomy of Viruses"). Allowed at the closing
+    # token only, never mid-name.
+    return terminal and bool(left and right) and (left.startswith(right)
+                                                  or right.startswith(left))
+
+
+def _corporate_name_contained(inner: list[str], outer: list[str]) -> bool:
+    """Whether ``inner`` occurs as a CONTIGUOUS run inside ``outer``."""
+    if not inner or len(inner) > len(outer):
+        return False
+    last = len(inner) - 1
+    return any(
+        all(_corporate_token_equivalent(inner[i], outer[start + i],
+                                        terminal=(i == last))
+            for i in range(len(inner)))
+        for start in range(len(outer) - len(inner) + 1))
+
+
+def _corporate_names_conflict(claimed: ClaimedRef,
+                              resolved: RetrievedRecord) -> bool:
+    """AFFIRMATIVE evidence that two institutional authors are DIFFERENT bodies.
+
+    Absence of a format-key match is not that evidence: a parenthetical acronym,
+    a truncated trailing token, or periods where commas belong are one
+    organization written two ways.  A conflict requires that NEITHER name is
+    contained in the other -- i.e. one carries a distinctive word the other
+    cannot account for ("National" vs "International" Committee for Pediatric
+    Care; "AAP" vs "American Academy of Pediatrics").
+    """
+    left = _corporate_name_tokens(claimed.authors[0] if claimed.authors else "")
+    right = _corporate_name_tokens(resolved.authors[0] if resolved.authors else "")
+    if not left or not right:
+        return True
+    return not (_corporate_name_contained(left, right)
+                or _corporate_name_contained(right, left))
+
+
+def _corporate_physically_sufficient(claimed: ClaimedRef,
+                                     resolved: RetrievedRecord) -> bool:
+    """PHYSICAL proof that two records are the same work, independent of how the
+    institutional author is spelled: an exact shared DOI, or agreement on the
+    full physical slot (venue AND volume AND first page AND year).
+
+    Format-key equality is a convenience, never the proof -- string shape alone
+    must not be read as "same organization".
+    """
+    if doi_equivalent(claimed.claimed_doi, resolved.doi):
+        return True
+    return bool(claimed.year and resolved.year
+                and int(claimed.year) == int(resolved.year)
+                and journal_equivalent(claimed.journal, resolved.journal)
+                and _volume_agrees(claimed, resolved)
+                and _first_pages_agree(claimed, resolved))
+
+
 def first_author_equivalent(claimed: ClaimedRef, resolved: RetrievedRecord) -> bool:
     if _corporate_author_equivalent(claimed, resolved):
         return True
@@ -376,8 +482,19 @@ def _derivative_block(claimed: ClaimedRef, resolved: RetrievedRecord) -> str:
         return "series_ordinal_conflict"
     left_raw = claimed.authors[0] if claimed.authors else ""
     right_raw = resolved.authors[0] if resolved.authors else ""
+    # A corporate-author conflict is AFFIRMATIVE two-organization evidence, so the
+    # block is NOT raised merely because the format keys differ. It is lifted only
+    # when BOTH hold: the two names are not in conflict (neither carries a
+    # distinctive word the other cannot account for), AND the pair is physically
+    # proven to be one work (exact shared DOI, or venue+volume+first-page+year).
+    # Either condition alone is insufficient -- the National vs International
+    # Committee for Pediatric Care pair shares a run-on DOI and stays blocked on
+    # the name conflict, while a merely similar-looking name with no physical
+    # anchor stays blocked for want of proof.
     if (_CORPORATE_RE.search(left_raw) and _CORPORATE_RE.search(right_raw)
-            and not _corporate_author_equivalent(claimed, resolved)):
+            and not _corporate_author_equivalent(claimed, resolved)
+            and not (not _corporate_names_conflict(claimed, resolved)
+                     and _corporate_physically_sufficient(claimed, resolved))):
         return "corporate_author_conflict"
     ct, rt = canonical_title(claimed.title), canonical_title(resolved.title)
     return ""
