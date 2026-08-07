@@ -335,11 +335,12 @@ def test_claim_explosion_has_no_item_cap_or_counter_deduplication(
     assert len(_records(out / "judgment_band_items.jsonl")[0]["atomic_claims"]) == n_claims
 
 
-def test_one_sentence_four_references_repeats_extraction_but_judges_each_ref(
+def test_one_sentence_four_references_extracts_once_but_judges_each_ref(
         tmp_path, monkeypatch):
-    """A shared citance is four distinct cited-work judgments.  Current code
-    repeats extraction four times; coverage cannot be shared because evidence is
-    reference-specific, and its per-claim tally is correspondingly per ref."""
+    """A shared citance is four distinct cited-work judgments.  Extraction is a
+    pure function of the sentence, so it is cached and runs once; coverage cannot
+    be shared because evidence is reference-specific, and its per-claim tally is
+    correspondingly per ref."""
     _patch_pubtypes(monkeypatch)
     refs = "".join(
         f'<ref id="R{i}"><element-citation><article-title>R{i}</article-title>'
@@ -366,8 +367,108 @@ def test_one_sentence_four_references_repeats_extraction_but_judges_each_ref(
     assert len(items) == 4
     assert len({i["citing_sentence"] for i in items}) == 1
     assert all(i["atomic_claims"] == ["Shared finding"] for i in items)
-    assert calls == {"extract": 4, "coverage": 4}
+    assert calls == {"extract": 1, "coverage": 4}
     assert man["counts"][jb.COVERAGE_ESTABLISHED] == 4
+    # Every per-reference counter is untouched by the cache.
+    assert man["counts"]["refs_seen"] == man["counts"]["items_built"] == 4
+    assert man["counts"][jb.ROUTE_FULL_COVERAGE] == 4
+
+
+def _two_sentence_dir(tmp_path, first="First finding", second="Second finding"):
+    """One doc, two citances, one distinct cited reference each."""
+    refs = "".join(
+        f'<ref id="R{i}"><element-citation><article-title>R{i}</article-title>'
+        f'<pub-id pub-id-type="pmid">{i}</pub-id></element-citation></ref>'
+        for i in (1, 2))
+    xml = ('<article><body>'
+           f'<p>{first} <xref ref-type="bibr" rid="R1">1</xref>.</p>'
+           f'<p>{second} <xref ref-type="bibr" rid="R2">2</xref>.</p>'
+           '</body><back><ref-list>' + refs + "</ref-list></back></article>")
+    xml_dir = tmp_path / "xml"; xml_dir.mkdir()
+    (xml_dir / "PMC9.xml").write_text(xml, encoding="utf-8")
+    return str(xml_dir)
+
+
+def test_distinct_sentences_extract_once_each_and_leave_counters_unchanged(
+        tmp_path, monkeypatch):
+    """The cache must be inert on a corpus with no repeated sentence: one
+    extraction per reference, and every counter exactly as before."""
+    _patch_pubtypes(monkeypatch)
+    calls = {"extract": 0, "coverage": 0}
+    def call_llm(prompt):
+        if "CITED-PAPER ABSTRACT" not in prompt:
+            calls["extract"] += 1
+            return '{"claims":["One claim"]}'
+        calls["coverage"] += 1
+        return ('{"engages_subject":true,"contradicts":false,'
+                '"unconfirmed_specifics":[],"rationale":"ok","evidence_span":"x"}')
+    out = tmp_path / "out"
+    man = jb.run_band(_two_sentence_dir(tmp_path), str(out),
+                      extractor=bp.make_extractor(call_llm),
+                      coverage_judge=ca.make_coverage_judge(call_llm),
+                      fetch_abstract=lambda pmid: f"abstract {pmid}",
+                      session=object())
+    assert calls == {"extract": 2, "coverage": 2}
+    assert man["counts"] == {
+        "docs_processed": 1, "refs_seen": 2, "items_built": 2,
+        jb.EXCLUDED_NO_CITANCE: 0, jb.EXCLUDED_NO_CITED_PMID: 0,
+        "no_usable_abstract": 0, "cited_is_review": 0,
+        jb.ROUTE_F6_FLAGGED: 0, jb.ROUTE_FULL_COVERAGE: 2, jb.ROUTE_HELD: 0,
+        jb.ROUTE_PARSE_QUARANTINE: 0,
+        jb.COVERAGE_ESTABLISHED: 2, jb.COVERAGE_CONTRADICTED: 0,
+        jb.COVERAGE_UNCONFIRMED_SPECIFIC: 0, jb.COVERAGE_OFF_TOPIC: 0,
+    }
+
+
+def test_extraction_cache_does_not_span_documents(tmp_path, monkeypatch):
+    """The cache is scoped to a document, so an identical sentence in a second
+    paper is extracted again rather than inherited across the doc boundary."""
+    _patch_pubtypes(monkeypatch)
+    xml_dir = tmp_path / "xml"; xml_dir.mkdir()
+    for pmcid in ("PMC1", "PMC2"):
+        (xml_dir / f"{pmcid}.xml").write_text(_XML, encoding="utf-8")
+    calls = {"extract": 0}
+    def extractor(sentence):
+        calls["extract"] += 1
+        return [sentence]
+    out = tmp_path / "out"
+    man = jb.run_band(str(xml_dir), str(out), extractor=extractor,
+                      coverage_judge=lambda c, e: [{"established": True}] * len(c),
+                      fetch_abstract=lambda _: "abstract", session=object())
+    assert man["counts"]["docs_processed"] == 2
+    assert calls["extract"] == 2
+
+
+def test_failed_extraction_is_not_cached_so_each_reference_quarantines(
+        tmp_path, monkeypatch):
+    """A malformed reply must keep its per-reference retry and its per-reference
+    quarantine count; only successful extractions are cached."""
+    _patch_pubtypes(monkeypatch)
+    calls = {"extract": 0}
+    def call_llm(prompt):
+        if "CITED-PAPER ABSTRACT" not in prompt:
+            calls["extract"] += 1
+            return '```json\n{"claims":["x"]}\n```'
+        return ('{"engages_subject":true,"contradicts":false,'
+                '"unconfirmed_specifics":[],"rationale":"ok","evidence_span":"x"}')
+    refs = "".join(
+        f'<ref id="R{i}"><element-citation><article-title>R{i}</article-title>'
+        f'<pub-id pub-id-type="pmid">{i}</pub-id></element-citation></ref>'
+        for i in range(1, 5))
+    xml = ("<article><body><p>Shared finding <xref ref-type=\"bibr\" "
+           "rid=\"R1 R2 R3 R4\">5,6,7,8</xref>.</p></body><back><ref-list>" +
+           refs + "</ref-list></back></article>")
+    xml_dir = tmp_path / "xml"; xml_dir.mkdir()
+    (xml_dir / "PMC9.xml").write_text(xml, encoding="utf-8")
+    out = tmp_path / "out"
+    man = jb.run_band(str(xml_dir), str(out),
+                      extractor=bp.make_extractor(call_llm),
+                      coverage_judge=ca.make_coverage_judge(call_llm),
+                      fetch_abstract=lambda pmid: f"abstract {pmid}",
+                      session=object())
+    assert calls["extract"] == 4
+    assert man["counts"][jb.ROUTE_PARSE_QUARANTINE] == 4
+    assert man["counts"]["items_built"] == 0
 
 
 @pytest.mark.xfail(strict=True, reason="coverage prompt uses chained replacement")

@@ -420,6 +420,11 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
     it is replayed on resume; buffering keeps a mid-document stop from leaving
     half a doc's rows behind for the next run to append a second time.
 
+    The REFERENCE stays the unit of judgment and of counting. Only claim
+    extraction is shared: it is keyed on the exact citing sentence within a doc,
+    so a citance citing [5,6,7,8] extracts once and is judged four times. Every
+    counter, item record, and queue row remains per reference.
+
     Writes three files in ``out_dir``:
       * ``judgment_band_items.jsonl``            -- one item record per unit,
         carrying the system's proposed_route / proposed_verdict (item record ONLY).
@@ -495,6 +500,14 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
             # Rows for THIS doc, held until it completes (see the docstring).
             doc_items: list = []
             doc_queue: list = []
+            # Atomic claims are a pure function of the citing sentence, so one
+            # citance citing [5,6,7,8] extracts ONCE instead of once per
+            # reference. Coverage is deliberately NOT shared: each cited paper
+            # brings its own evidence, so it stays one judge call per reference
+            # and the per-claim tally stays per reference too. Scoped to the doc
+            # -- a citance is a within-document object, so this captures the
+            # fanout while keeping the cache bounded on a corpus run.
+            claims_cache: dict = {}
 
             for ref in refs:
                 counts["refs_seen"] += 1
@@ -536,8 +549,16 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                 # Only ValueError (the parse/schema failure) is caught; operational
                 # errors (network, etc.) still propagate as before.
                 try:
-                    item["atomic_claims"] = extract_atomic_claims(
-                        item["citing_sentence"], extractor=extractor)
+                    sentence = item["citing_sentence"]
+                    if sentence not in claims_cache:
+                        # Assigned only on success, so a sentence whose reply is
+                        # malformed keeps its per-reference retry and its
+                        # per-reference quarantine count.
+                        claims_cache[sentence] = extract_atomic_claims(
+                            sentence, extractor=extractor)
+                    # Copy: the cached list is shared by every reference on this
+                    # citance, and each item record owns its own claims.
+                    item["atomic_claims"] = list(claims_cache[sentence])
                     item["coverage_verdicts"] = coverage_verdicts(
                         item["atomic_claims"], item["evidence"],
                         judge=coverage_judge)
