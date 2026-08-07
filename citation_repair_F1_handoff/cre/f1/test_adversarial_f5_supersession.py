@@ -60,3 +60,27 @@ def test_f5_invokes_the_injected_contradiction_judgment_for_eligible_candidate()
         policy=f5.F5Policy())
     assert calls == [True]
     assert temporal.state.value == "QUALIFYING_CONTRADICTION"
+
+
+@pytest.mark.xfail(strict=True, reason="date.fromisoformat accepts non-YYYY-MM-DD forms")
+@pytest.mark.parametrize("date", ["20240101", "2024-W01-1"])
+def test_date_contract_rejects_non_yyyy_mm_dd_iso_forms(date):
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        f5._parse_date(date, "adversarial")
+
+
+@pytest.mark.xfail(strict=True, reason="NoticeStatus validates only the date field's type")
+def test_notice_status_rejects_invalid_date_text():
+    with pytest.raises(ValueError):
+        f5.NoticeStatus(notice_kind="correction", notice_resolution="flagged",
+                        date="not-a-date")
+
+
+@pytest.mark.xfail(strict=True, reason="RetrievalResult permits duplicate work IDs")
+def test_version_chain_rejects_duplicate_candidate_work_ids():
+    candidates = (
+        f5.CandidateWork(id="W2", pub_date="2021-01-01"),
+        f5.CandidateWork(id="W2", pub_date="2022-01-01"),
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        f5.RetrievalResult(candidates, "adequate", "ok")

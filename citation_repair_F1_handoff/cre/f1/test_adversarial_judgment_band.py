@@ -368,3 +368,119 @@ def test_one_sentence_four_references_repeats_extraction_but_judges_each_ref(
     assert all(i["atomic_claims"] == ["Shared finding"] for i in items)
     assert calls == {"extract": 4, "coverage": 4}
     assert man["counts"][jb.COVERAGE_ESTABLISHED] == 4
+
+
+@pytest.mark.xfail(strict=True, reason="coverage prompt uses chained replacement")
+def test_atomic_claim_placeholder_text_remains_inert_in_coverage_prompt():
+    prompts = []
+    def call_llm(prompt):
+        prompts.append(prompt)
+        return ('{"engages_subject":true,"contradicts":false,'
+                '"unconfirmed_specifics":[],"rationale":"ok","evidence_span":"x"}')
+    claim = "The literal token <<EVIDENCE>> is part of this claim"
+    result = ca.judge_coverage_tristate(call_llm, claim, "SECRET ABSTRACT")
+    assert result["established"] is True
+    assert claim in prompts[0]
+
+
+@pytest.mark.xfail(strict=True, reason="valid but wrong-shaped cache data is not validated")
+@pytest.mark.parametrize("cached", [[], {"abstract": 7}])
+def test_wrong_shaped_cache_is_ignored_and_refetched(tmp_path, cached):
+    cache = tmp_path / "cache"; cache.mkdir()
+    (cache / "abstract_pmid_7.json").write_text(json.dumps(cached), encoding="utf-8")
+    sess = _SequenceSession([_Resp(200, "<x><AbstractText>Fresh.</AbstractText></x>")])
+    assert er.fetch_abstract("7", session=sess, cache_dir=str(cache)) == "Fresh."
+    assert sess.calls == 1
+
+
+@pytest.mark.parametrize("engages,contradicts,has_specific", [
+    (engages, contradicts, has_specific)
+    for engages in (False, True)
+    for contradicts in (False, True)
+    for has_specific in (False, True)
+])
+def test_all_eight_tristate_input_combinations(
+        engages, contradicts, has_specific):
+    specifics = ["dose"] if has_specific else []
+    if not engages and (contradicts or specifics):
+        with pytest.raises(ValueError, match="engages_subject=false"):
+            ca.aggregate_coverage(engages, contradicts, specifics)
+        return
+    expected = (False if contradicts else None if not engages or specifics else True)
+    established = ca.aggregate_coverage(engages, contradicts, specifics)
+    assert established is expected
+    assert jb.route([{"established": established}]) == (
+        jb.ROUTE_F6_FLAGGED if expected is False else
+        jb.ROUTE_FULL_COVERAGE if expected is True else jb.ROUTE_HELD)
+
+
+def test_abstract_equal_to_citing_claim_remains_ordinary_usable_evidence():
+    text = "The same sentence appears on both sides."
+    prompts = []
+    def call_llm(prompt):
+        prompts.append(prompt)
+        return ('{"engages_subject":true,"contradicts":false,'
+                '"unconfirmed_specifics":[],"rationale":"ok","evidence_span":"x"}')
+    result = ca.judge_coverage_tristate(call_llm, text, text)
+    assert result["established"] is True
+    assert prompts[0].count(text) == 2
+
+
+@pytest.mark.xfail(strict=True, reason="zero claims route by vacuous all()")
+def test_zero_claim_item_is_held_out_of_annotation_queue(tmp_path, monkeypatch):
+    _patch_pubtypes(monkeypatch)
+    out = tmp_path / "out"
+    man = jb.run_band(_write_xml(tmp_path), str(out), extractor=lambda _: [],
+                      coverage_judge=lambda *_: [], fetch_abstract=lambda _: "abstract",
+                      session=object())
+    assert man["counts"][jb.ROUTE_HELD] == 1
+    assert _records(out / "judgment_band_annotation_queue.jsonl") == []
+
+
+@pytest.mark.xfail(strict=True, reason="resume manifest reports only the latest invocation")
+def test_resume_manifest_counts_match_all_durable_rows(tmp_path, monkeypatch):
+    _patch_pubtypes(monkeypatch)
+    out = tmp_path / "out"
+    common = dict(extractor=lambda s: [s],
+                  coverage_judge=lambda c, e: [{"established": True}] * len(c),
+                  fetch_abstract=lambda _: "abstract", session=object())
+    jb.run_band(_write_xml(tmp_path), str(out), **common)
+    resumed = jb.run_band(str(tmp_path / "xml"), str(out), **common)
+    rows = _records(out / "judgment_band_items.jsonl")
+    assert resumed["counts"]["items_built"] == len(rows)
+
+
+def test_document_with_every_reference_excluded_writes_no_item_rows(
+        tmp_path, monkeypatch):
+    _patch_pubtypes(monkeypatch)
+    xml_dir = tmp_path / "xml"; xml_dir.mkdir()
+    xml = ("<article><body><p>Cited <xref ref-type=\"bibr\" rid=\"R1\">1</xref>.</p>"
+           "</body><back><ref-list>"
+           "<ref id=\"R1\"><element-citation><article-title>No PMID</article-title>"
+           "</element-citation></ref>"
+           "<ref id=\"R2\"><element-citation><article-title>Never cited</article-title>"
+           "<pub-id pub-id-type=\"pmid\">2</pub-id></element-citation></ref>"
+           "</ref-list></back></article>")
+    (xml_dir / "PMCexcluded.xml").write_text(xml, encoding="utf-8")
+    out = tmp_path / "out"
+    man = jb.run_band(str(xml_dir), str(out), extractor=lambda _: ["x"],
+                      coverage_judge=lambda *_: [], fetch_abstract=lambda _: "abstract",
+                      session=object())
+    assert man["counts"][jb.EXCLUDED_NO_CITED_PMID] == 1
+    assert man["counts"][jb.EXCLUDED_NO_CITANCE] == 1
+    assert man["counts"]["items_built"] == 0
+    assert _records(out / "judgment_band_items.jsonl") == []
+
+
+@pytest.mark.xfail(strict=True, reason="parse_pmc_xml does not traverse namespaced ref tags")
+def test_parse_pmc_xml_accepts_default_namespaced_jats(tmp_path):
+    path = tmp_path / "namespaced.xml"
+    path.write_text(
+        '<article xmlns="urn:jats"><body><p>Finding '
+        '<xref ref-type="bibr" rid="R1">1</xref>.</p></body><back><ref-list>'
+        '<ref id="R1"><element-citation><article-title>Paper</article-title>'
+        '<pub-id pub-id-type="pmid">1</pub-id></element-citation></ref>'
+        '</ref-list></back></article>', encoding="utf-8")
+    refs = parse_pmc_xml(str(path), source_pmcid="PMCNS")
+    assert len(refs) == 1
+    assert refs[0].claimed.claimed_pmid == "1"
