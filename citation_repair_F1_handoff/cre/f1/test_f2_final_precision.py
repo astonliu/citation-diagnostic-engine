@@ -245,3 +245,48 @@ def test_derivative_genre_clean_high_scoring_pair_is_not_forced_high():
     c = _c(title="A systematic review of exercise interventions for adolescent depression", authors=["Carter", "Morres"], year=2016, journal="J Affect Disord", volume="191", pages="62-71")
     r = _r(title="A systematic review of exercise interventions for adolescents depression", authors=["Carter", "Morres"], year=2016, journal="J Affect Disord", volume="191", pages="62-71", doi="10.1016/j.jad.2015.11.014")
     assert flag_verdict(c, r)[0] == VERDICT_MATCH
+
+
+# ---------------------------------------------------------------------
+# Item 3 (frame-scoping remediation, 2026-08-07): the corporate containment
+# allowance admitted false clears. Containment is NOT identity: a parent vs its
+# own committee, or names differing in one distinctive token, must stay HIGH.
+# These three are the acceptance criteria; each was review_wrong_paper at 858a22f,
+# wrongly review_same_work_variant after e5ac4c7, and review_wrong_paper again now.
+# ---------------------------------------------------------------------
+def test_corporate_parent_vs_committee_divergent_titles_stays_high():
+    # AAP vs its Committee on Nutrition; the extra tokens + DIVERGENT titles
+    # (infants vs children) are two different works sharing one identifier.
+    c = _c(title="Dietary guidance for infants",
+           authors=["American Academy of Pediatrics"], year=2020,
+           journal="Pediatrics", volume="145", pages="394-404",
+           claimed_doi="10.1542/peds.2020-1")
+    r = _r(title="Dietary guidance for children",
+           authors=["American Academy of Pediatrics Committee on Nutrition"],
+           year=2020, journal="Pediatrics", volume="145", pages="394-404",
+           doi="10.1542/peds.2020-1")
+    assert flag_verdict(c, r)[0] == VERDICT_WRONG_PAPER
+
+
+def test_corporate_international_vs_interventional_stays_high():
+    # Distinct first tokens (JaroWinkler 0.9227) must NOT be equated: two
+    # different societies, identical title, shared identifier.
+    c = _c(title="Consensus on coronary stenting",
+           authors=["International Cardiology Society"], year=2020,
+           journal="Cardiology", volume="30", pages="1-9",
+           claimed_doi="10.1000/card")
+    r = _r(title="Consensus on coronary stenting",
+           authors=["Interventional Cardiology Society"], year=2020,
+           journal="Cardiology", volume="30", pages="1-9", doi="10.1000/card")
+    assert flag_verdict(c, r)[0] == VERDICT_WRONG_PAPER
+
+
+def test_corporate_group_A_vs_group_AB_stays_high():
+    # Short group designators A vs AB are distinct bodies, not a truncation.
+    c = _c(title="Randomized trial results",
+           authors=["National Clinical Study Group A"], year=2020, journal="Trials",
+           volume="21", pages="1-9", claimed_doi="10.1000/grp")
+    r = _r(title="Randomized trial results",
+           authors=["National Clinical Study Group AB"], year=2020, journal="Trials",
+           volume="21", pages="1-9", doi="10.1000/grp")
+    assert flag_verdict(c, r)[0] == VERDICT_WRONG_PAPER

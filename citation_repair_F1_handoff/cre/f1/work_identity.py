@@ -295,16 +295,21 @@ def _corporate_token_equivalent(left: str, right: str, *, terminal: bool) -> boo
     if left == right:
         return True
     # A spelling/localization variant of one word ("anaesthesiologists" vs
-    # "anesthesiologists", 0.985). The length floor plus this threshold keep
-    # DIFFERENT words apart: "national" vs "international" scores 0.789.
+    # "anesthesiologists", 0.985). Threshold RAISED 0.92 -> 0.95: at 0.92 it wrongly
+    # equated the DISTINCT first tokens "international" / "interventional" (0.9227),
+    # clearing two different societies as one; the genuine spelling variant (0.985)
+    # is well above 0.95, and "national" / "international" (0.789) is far below.
     if (min(len(left), len(right)) >= 6
-            and JaroWinkler.similarity(left, right) >= 0.92):
+            and JaroWinkler.similarity(left, right) >= 0.95):
         return True
     # JATS truncates the FINAL token of a long institutional name ("...Committee
     # on Taxonomy of, V" for "...on Taxonomy of Viruses"). Allowed at the closing
-    # token only, never mid-name.
-    return terminal and bool(left and right) and (left.startswith(right)
-                                                  or right.startswith(left))
+    # token only, and ONLY when the longer token is a genuine truncated WORD
+    # (length >= 5) -- so short alphanumeric group designators are NOT equated
+    # ("Group A" vs "Group AB": "a"/"ab" are distinct groups, not a truncation).
+    return (terminal and bool(left and right)
+            and max(len(left), len(right)) >= 5
+            and (left.startswith(right) or right.startswith(left)))
 
 
 def _corporate_name_contained(inner: list[str], outer: list[str]) -> bool:
@@ -325,17 +330,31 @@ def _corporate_names_conflict(claimed: ClaimedRef,
 
     Absence of a format-key match is not that evidence: a parenthetical acronym,
     a truncated trailing token, or periods where commas belong are one
-    organization written two ways.  A conflict requires that NEITHER name is
-    contained in the other -- i.e. one carries a distinctive word the other
-    cannot account for ("National" vs "International" Committee for Pediatric
-    Care; "AAP" vs "American Academy of Pediatrics").
+    organization written two ways.
+
+    Containment is NOT identity. Two names where neither contains the other
+    conflict outright ("National" vs "International" Committee for Pediatric Care).
+    Two names in a strict CONTAINMENT relation -- one carrying EXTRA distinctive
+    tokens ("American Academy of Pediatrics" vs "...Committee on Nutrition") -- are
+    the same body only when they cite the SAME document, which shows up as an
+    IDENTICAL title; when the titles diverge, the extra tokens distinguish a parent
+    from its subunit's different work, and that is a conflict. Equal-length mutual
+    containment is identity ("World Medical Association (WMA)" vs "World Medical
+    Association") and never conflicts.
     """
     left = _corporate_name_tokens(claimed.authors[0] if claimed.authors else "")
     right = _corporate_name_tokens(resolved.authors[0] if resolved.authors else "")
     if not left or not right:
         return True
-    return not (_corporate_name_contained(left, right)
-                or _corporate_name_contained(right, left))
+    if not (_corporate_name_contained(left, right)
+            or _corporate_name_contained(right, left)):
+        return True                      # neither contains the other -> conflict
+    if len(left) == len(right):
+        return False                     # equal length + contained = identity
+    # Strict containment: one name has EXTRA distinctive tokens. Same body only if
+    # the titles are identical (canonical form); divergent titles -> conflict.
+    ct, rt = canonical_title(claimed.title), canonical_title(resolved.title)
+    return not (ct != "" and ct == rt)
 
 
 def _corporate_physically_sufficient(claimed: ClaimedRef,
