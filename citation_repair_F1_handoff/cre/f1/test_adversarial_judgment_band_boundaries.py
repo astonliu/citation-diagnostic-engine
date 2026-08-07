@@ -310,10 +310,6 @@ def test_resume_after_publish_interrupt_has_no_duplicate_items_or_queue(
     assert len(queue_ids) == len(set(queue_ids)) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the band parser accepts an escaped lone surrogate that JSONL cannot encode",
-)
 def test_lone_surrogate_model_text_is_quarantined_instead_of_crashing(
         tmp_path, monkeypatch):
     _patch_not_review(monkeypatch)

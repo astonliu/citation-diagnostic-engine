@@ -401,6 +401,49 @@ def annotation_payload(item: dict) -> dict:
 # ==========================================================================
 # 6. Pipeline over a dir of PMC-OA citing papers -- drive-first, resumable
 # ==========================================================================
+def _safe_text(s: str) -> str:
+    """Force an exception message into text that always survives the JSONL write.
+
+    An encoding error's own message can carry the offending character, so storing
+    a raw ``str(e)`` in a durable record can be exactly as unwritable as the row
+    it replaced -- that would move the crash, not remove it."""
+    return s.encode("utf-8", "backslashreplace").decode("ascii", "replace")
+
+
+def _safe_json(obj):
+    """Recursively replace ONLY the strings UTF-8 cannot encode.
+
+    Valid non-ASCII -- accents, smart quotes, CJK, emoji -- is preserved verbatim.
+    A blanket ASCII-fold would silently narrow the corpus, which is a worse defect
+    than the crash this guards against."""
+    if isinstance(obj, str):
+        try:
+            obj.encode("utf-8")
+        except UnicodeEncodeError:
+            return _safe_text(obj)
+        return obj
+    if isinstance(obj, dict):
+        return {_safe_json(k): _safe_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_safe_json(v) for v in obj]
+    return obj
+
+
+def _reject_unencodable(obj, what: str) -> None:
+    """Raise ValueError if obj cannot survive the JSONL round trip.
+
+    json.loads accepts a lone surrogate; UTF-8 cannot encode one. So strict schema
+    validation passes, the record is built, and the write blows up later in
+    _append_jsonl -- past the per-reference guard, aborting the batch after the
+    doc's earlier rows are already flushed and before its checkpoint line is
+    written. Catching it here, while that guard is still in scope, turns a
+    batch-killing UnicodeEncodeError into an ordinary parse quarantine."""
+    try:
+        json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError, TypeError, ValueError) as e:
+        raise ValueError(f"{what} is not JSONL-encodable: {_safe_text(str(e))}")
+
+
 def _append_jsonl(fh, obj: dict) -> None:
     fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
     fh.flush()
@@ -519,8 +562,13 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
             try:
                 refs = parse_pmc_xml(path, source_pmcid=pmcid)
             except Exception as e:                    # noqa: BLE001 - best-effort
-                print(f"[band-parse-skip] {pmcid}: {e}")
-                _append_jsonl(ckpt_fh, {"pmcid": pmcid, "error": str(e)})
+                # _safe_text FIRST: a parse error's message can itself carry text
+                # neither the console nor the checkpoint file can encode, and the
+                # print would abort the batch from the very path meant to survive
+                # one. Print exactly what gets stored.
+                safe_error = _safe_text(str(e))
+                print(f"[band-parse-skip] {pmcid}: {safe_error}")
+                _append_jsonl(ckpt_fh, {"pmcid": pmcid, "error": safe_error})
                 done.add(pmcid)
                 continue
 
@@ -589,19 +637,38 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                     item["coverage_verdicts"] = coverage_verdicts(
                         item["atomic_claims"], item["evidence"],
                         judge=coverage_judge)
+                    # Strict schema validation passes text that JSONL cannot
+                    # encode (a lone surrogate parses as a perfectly good string).
+                    # Check BOTH durable artifacts here, inside the guard, so the
+                    # failure quarantines this reference through the branch below
+                    # instead of escaping to _append_jsonl and killing the batch.
+                    _reject_unencodable(item, "item record")
+                    _reject_unencodable(annotation_payload(item),
+                                        "annotation payload")
                 except ValueError as e:
                     item["proposed_route"] = ROUTE_PARSE_QUARANTINE
                     item["proposed_verdict"] = None
-                    item["parse_error"] = str(e)
+                    # _safe_text for the same reason as the doc-level path above:
+                    # the message can carry the very text that could not be
+                    # encoded (a strict loader interpolates a raw duplicate JSON
+                    # key, for one), so both the print and the stored value would
+                    # re-raise from inside this handler. Sanitize once, use twice.
+                    safe_error = _safe_text(str(e))
+                    item["parse_error"] = safe_error
                     item["claim_extract_prompt_version"] = CLAIM_EXTRACT_PROMPT_VERSION
                     item["coverage_prompt_version"] = COVERAGE_PROMPT_VERSION
                     item["ts"] = int(time.time())
                     counts[ROUTE_PARSE_QUARANTINE] += 1
                     print(f"[band-parse-quarantine] {pmcid} "
-                          f"{item['citation_id']}: {e}")
+                          f"{item['citation_id']}: {safe_error}")
                     # Durable record for later inspection/retry; not added to the
                     # blind annotation queue (no coverage verdicts to annotate).
-                    doc_items.append(item)
+                    # The row recording the failure must itself be writable: when
+                    # the payload is what was unencodable it is still on the item
+                    # (evidence is assembled before this guard, and the verdicts
+                    # were assigned before the check caught them). Sanitize only
+                    # the strings UTF-8 rejects; valid non-ASCII survives verbatim.
+                    doc_items.append(_safe_json(item))
                     continue
                 r = route(item["coverage_verdicts"])
                 item["proposed_route"] = r
