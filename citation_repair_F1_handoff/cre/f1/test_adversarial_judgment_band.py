@@ -271,3 +271,101 @@ def test_resume_after_mid_document_interrupt_does_not_duplicate_prior_rows(
                 fetch_abstract=lambda _: "abstract", session=object())
     ids = [r["citation_id"] for r in _records(out / "judgment_band_items.jsonl")]
     assert len(ids) == len(set(ids))
+
+
+@pytest.mark.parametrize("suffix", [
+    "\nmore valid-looking prose",
+    '{"engages_subject":true,"contradicts":false,"unconfirmed_specifics":[],"rationale":"again","evidence_span":"x"}',
+])
+def test_valid_coverage_json_followed_by_extra_data_is_quarantined(
+        tmp_path, monkeypatch, suffix):
+    """A syntactically valid first object must not hide trailing prose or a
+    second object.  This is distinct from an unescaped quote within one object."""
+    _patch_pubtypes(monkeypatch)
+    valid = ('{"engages_subject":true,"contradicts":false,'
+             '"unconfirmed_specifics":[],"rationale":"ok","evidence_span":"x"}')
+    with pytest.raises(ValueError, match="Extra data"):
+        bp.parse_coverage(valid + suffix)
+
+    def call_llm(prompt):
+        if "CITED-PAPER ABSTRACT" not in prompt:
+            return '{"claims":["A finding"]}'
+        return valid + suffix
+
+    out = tmp_path / "out"
+    man = jb.run_band(_write_xml(tmp_path), str(out),
+                      extractor=bp.make_extractor(call_llm),
+                      coverage_judge=ca.make_coverage_judge(call_llm),
+                      fetch_abstract=lambda _: "abstract", session=object())
+    assert man["counts"][jb.ROUTE_PARSE_QUARANTINE] == 1
+    assert _records(out / "judgment_band_annotation_queue.jsonl") == []
+
+
+@pytest.mark.parametrize("sentence,n_claims", [
+    ("A and B are active [1].", 2),
+    ("A, B, C, D, and E are active [1].", 5),
+    ("A, B, C, D, E, F, G, H, I, J, K, and L are active [1].", 12),
+    ("A, (B and C), D, (E, F), and G are active [1].", 7),
+    ("A, B, and C are active [1]. A and B are active [1].", 5),
+])
+def test_claim_explosion_has_no_item_cap_or_counter_deduplication(
+        tmp_path, monkeypatch, sentence, n_claims):
+    """Model-produced, distinct claims are all coverage work.  This exercises
+    the frozen extractor plumbing, not the prompt's linguistic quality."""
+    _patch_pubtypes(monkeypatch)
+    xml_dir = tmp_path / "xml"; xml_dir.mkdir()
+    (xml_dir / "PMC9.xml").write_text(
+        _XML.replace("A finding", sentence.replace(" [1]", "")), encoding="utf-8")
+    claims = [f"subject-{i} has the shared property" for i in range(n_claims)]
+    calls = {"extract": 0, "coverage": 0}
+
+    def call_llm(prompt):
+        if "CITED-PAPER ABSTRACT" not in prompt:
+            calls["extract"] += 1
+            return json.dumps({"claims": claims})
+        calls["coverage"] += 1
+        return ('{"engages_subject":true,"contradicts":false,'
+                '"unconfirmed_specifics":[],"rationale":"ok","evidence_span":"x"}')
+
+    out = tmp_path / "out"
+    man = jb.run_band(str(xml_dir), str(out), extractor=bp.make_extractor(call_llm),
+                      coverage_judge=ca.make_coverage_judge(call_llm),
+                      fetch_abstract=lambda _: "abstract", session=object())
+    assert calls == {"extract": 1, "coverage": n_claims}
+    assert man["counts"][jb.COVERAGE_ESTABLISHED] == n_claims
+    assert len(_records(out / "judgment_band_items.jsonl")[0]["atomic_claims"]) == n_claims
+
+
+def test_one_sentence_four_references_repeats_extraction_but_judges_each_ref(
+        tmp_path, monkeypatch):
+    """A shared citance is four distinct cited-work judgments.  Current code
+    repeats extraction four times; coverage cannot be shared because evidence is
+    reference-specific, and its per-claim tally is correspondingly per ref."""
+    _patch_pubtypes(monkeypatch)
+    refs = "".join(
+        f'<ref id="R{i}"><element-citation><article-title>R{i}</article-title>'
+        f'<pub-id pub-id-type="pmid">{i}</pub-id></element-citation></ref>'
+        for i in range(1, 5))
+    xml = ("<article><body><p>Shared finding <xref ref-type=\"bibr\" "
+           "rid=\"R1 R2 R3 R4\">5,6,7,8</xref>.</p></body><back><ref-list>" +
+           refs + "</ref-list></back></article>")
+    xml_dir = tmp_path / "xml"; xml_dir.mkdir()
+    (xml_dir / "PMC9.xml").write_text(xml, encoding="utf-8")
+    calls = {"extract": 0, "coverage": 0}
+    def call_llm(prompt):
+        if "CITED-PAPER ABSTRACT" not in prompt:
+            calls["extract"] += 1
+            return '{"claims":["Shared finding"]}'
+        calls["coverage"] += 1
+        return ('{"engages_subject":true,"contradicts":false,'
+                '"unconfirmed_specifics":[],"rationale":"ok","evidence_span":"x"}')
+    out = tmp_path / "out"
+    man = jb.run_band(str(xml_dir), str(out), extractor=bp.make_extractor(call_llm),
+                      coverage_judge=ca.make_coverage_judge(call_llm),
+                      fetch_abstract=lambda pmid: f"abstract {pmid}", session=object())
+    items = _records(out / "judgment_band_items.jsonl")
+    assert len(items) == 4
+    assert len({i["citing_sentence"] for i in items}) == 1
+    assert all(i["atomic_claims"] == ["Shared finding"] for i in items)
+    assert calls == {"extract": 4, "coverage": 4}
+    assert man["counts"][jb.COVERAGE_ESTABLISHED] == 4
