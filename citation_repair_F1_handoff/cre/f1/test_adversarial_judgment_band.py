@@ -415,6 +415,8 @@ def test_distinct_sentences_extract_once_each_and_leave_counters_unchanged(
         "no_usable_abstract": 0, "cited_is_review": 0,
         jb.ROUTE_F6_FLAGGED: 0, jb.ROUTE_FULL_COVERAGE: 2, jb.ROUTE_HELD: 0,
         jb.ROUTE_PARSE_QUARANTINE: 0,
+        "parse_quarantine_" + jb.QUARANTINE_CAUSE_UNENCODABLE_TEXT: 0,
+        "parse_quarantine_" + jb.QUARANTINE_CAUSE_NOT_SERIALIZABLE: 0,
         jb.COVERAGE_ESTABLISHED: 2, jb.COVERAGE_CONTRADICTED: 0,
         jb.COVERAGE_UNCONFIRMED_SPECIFIC: 0, jb.COVERAGE_OFF_TOPIC: 0,
     }

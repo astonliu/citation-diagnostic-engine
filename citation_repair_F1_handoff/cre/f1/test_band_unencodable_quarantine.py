@@ -160,6 +160,129 @@ def test_safe_json_reaches_into_nested_containers():
     assert json.dumps(out, ensure_ascii=False).encode("utf-8")
 
 
+# --------------------------------------------------------------------------
+# a value json cannot serialize at all -- a CODE defect, not model text
+# --------------------------------------------------------------------------
+class NotSerializable:
+    """Stands in for a seam returning an HTTP response instead of its text."""
+
+
+def test_safe_json_rewrites_a_non_serializable_value():
+    """Detecting the poison is not enough: without this the quarantine row is as
+    unwritable as the row it replaced and the batch still dies at the write."""
+    out = jb._safe_json({"evidence": {"cited_abstract": NotSerializable()}})
+    assert json.dumps(out, ensure_ascii=False).encode("utf-8")
+    assert "NotSerializable" in out["evidence"]["cited_abstract"]
+
+
+@pytest.mark.parametrize("value", [None, True, False, 0, 1, -3, 1.5])
+def test_safe_json_leaves_json_native_scalars_alone(value):
+    """The repr guard must not swallow values JSON carries natively -- False and
+    0 especially, which a truthiness test would destroy."""
+    out = jb._safe_json({"v": value})
+    assert out["v"] is value or out["v"] == value
+    assert type(out["v"]) is type(value)
+
+
+def test_reject_unencodable_separates_a_code_defect_from_model_text():
+    with pytest.raises(jb.UnencodableRecord) as text_case:
+        jb._reject_unencodable({"t": SURROGATE}, "item record")
+    assert text_case.value.cause == jb.QUARANTINE_CAUSE_UNENCODABLE_TEXT
+
+    with pytest.raises(jb.UnencodableRecord) as code_case:
+        jb._reject_unencodable({"o": NotSerializable()}, "item record")
+    assert code_case.value.cause == jb.QUARANTINE_CAUSE_NOT_SERIALIZABLE
+    # Still a ValueError, so the existing per-reference guard needs no new branch.
+    assert isinstance(code_case.value, ValueError)
+
+
+def test_non_serializable_record_quarantines_and_the_batch_survives(
+        tmp_path, monkeypatch):
+    """assemble_evidence passes fetch_abstract's return through unnormalized, so a
+    wiring bug lands an object on the record. It must quarantine, not abort."""
+    _patch_not_review(monkeypatch)
+    out_dir = tmp_path / "out"
+    manifest = jb.run_band(
+        _xml_dir(tmp_path), str(out_dir),
+        extractor=lambda sentence: ["A finding"],
+        coverage_judge=lambda claims, evidence: [
+            {"established": True, "rationale": "ok", "evidence_span": "s"}],
+        fetch_abstract=lambda pmid: NotSerializable(),      # the code defect
+        session=object())
+
+    assert manifest["counts"][jb.ROUTE_PARSE_QUARANTINE] == 1
+    # Visible in the funnel as a code defect, NOT as model noise.
+    assert manifest["counts"]["parse_quarantine_not_serializable"] == 1
+    assert manifest["counts"]["parse_quarantine_unencodable_text"] == 0
+    assert [r["pmcid"] for r in _checkpoint(out_dir)] == ["PMC1"]   # batch survived
+
+    row = _items(out_dir)[0]
+    assert row["parse_quarantine_cause"] == jb.QUARANTINE_CAUSE_NOT_SERIALIZABLE
+    assert "evidence.cited_abstract" in row["sanitized_paths"]
+    assert json.dumps(row, ensure_ascii=False).encode("utf-8")
+
+
+# --------------------------------------------------------------------------
+# the row says what was rewritten
+# --------------------------------------------------------------------------
+def test_quarantine_row_names_every_field_it_rewrote(tmp_path, monkeypatch):
+    _manifest, out_dir = _run(tmp_path, monkeypatch,
+                              call_llm=_scripted(bad_coverage_index=0))
+    row = _items(out_dir)[0]
+    assert row["sanitized_paths"], "a rewritten row must say so"
+    # Every named path is real, and the surrogate came from the coverage span.
+    assert any("evidence_span" in p for p in row["sanitized_paths"])
+    assert row["parse_quarantine_cause"] == jb.QUARANTINE_CAUSE_UNENCODABLE_TEXT
+
+
+def test_an_ordinary_malformed_reply_reports_nothing_rewritten(
+        tmp_path, monkeypatch):
+    """sanitized_paths is always present, so its absence never has to be read as
+    'unknown'. A plain parse failure rewrote nothing and says so."""
+    def call_llm(prompt):
+        if "CITED-PAPER ABSTRACT" not in prompt:
+            return "```json\n{\"claims\": [\"A finding\"]}\n```"   # fenced
+        return _coverage_reply()
+
+    manifest, out_dir = _run(tmp_path, monkeypatch, call_llm=call_llm)
+    assert manifest["counts"][jb.ROUTE_PARSE_QUARANTINE] == 1
+    row = _items(out_dir)[0]
+    assert row["sanitized_paths"] == []
+    assert row["parse_quarantine_cause"] is None       # not an encodability failure
+    assert manifest["counts"]["parse_quarantine_unencodable_text"] == 0
+    assert manifest["counts"]["parse_quarantine_not_serializable"] == 0
+
+
+# --------------------------------------------------------------------------
+# distinct keys must not collapse onto one
+# --------------------------------------------------------------------------
+#   "é" + surrogate and "è" + surrogate: the accents are encodable so
+#   backslashreplace leaves them, then the ascii decode folds BOTH to U+FFFD and
+#   the surrogates escape identically -- two distinct keys, one sanitized name.
+_COLLIDING_KEY_A = "é" + SURROGATE
+_COLLIDING_KEY_B = "è" + SURROGATE
+
+
+def test_the_collision_fixture_really_collides():
+    """Guards the test below from passing vacuously: distinct surrogates escape
+    to distinct text and would NOT collide, so the fixture has to be this pair."""
+    assert _COLLIDING_KEY_A != _COLLIDING_KEY_B
+    assert jb._safe_text(_COLLIDING_KEY_A) == jb._safe_text(_COLLIDING_KEY_B)
+
+
+def test_two_distinct_unencodable_keys_do_not_collapse():
+    """Sanitizing keys can map two distinct names onto one; the second value
+    would silently overwrite the first. Keep both and say so."""
+    touched: list = []
+    out = jb._safe_json(
+        {_COLLIDING_KEY_A: "first", _COLLIDING_KEY_B: "second"}, touched)
+
+    assert len(out) == 2, "a distinct key was silently dropped"
+    assert sorted(out.values()) == ["first", "second"]
+    assert json.dumps(out, ensure_ascii=False).encode("utf-8")
+    assert any("key collision" in path for path in touched)
+
+
 def test_safe_text_output_always_encodes():
     assert jb._safe_text("café " + SURROGATE + " tail").encode("utf-8")
 

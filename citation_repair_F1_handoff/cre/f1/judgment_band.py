@@ -410,27 +410,89 @@ def _safe_text(s: str) -> str:
     return s.encode("utf-8", "backslashreplace").decode("ascii", "replace")
 
 
-def _safe_json(obj):
-    """Recursively replace ONLY the strings UTF-8 cannot encode.
+def _child_path(path: str, part) -> str:
+    return f"{path}.{part}" if path else str(part)
+
+
+def _safe_json(obj, touched=None, _path=""):
+    """Recursively rewrite ONLY what JSONL cannot carry, recording every change.
 
     Valid non-ASCII -- accents, smart quotes, CJK, emoji -- is preserved verbatim.
     A blanket ASCII-fold would silently narrow the corpus, which is a worse defect
-    than the crash this guards against."""
+    than the crash this guards against.
+
+    Three things get rewritten:
+
+      * a string UTF-8 cannot encode (a lone surrogate in model text);
+      * a value ``json`` cannot serialize at all -- a CODE defect rather than
+        model text, e.g. a seam returning an HTTP response instead of its text.
+        Without this the quarantine row stays as unwritable as the row it
+        replaced and the batch still dies at the write, which is the exact
+        failure this whole path exists to prevent;
+      * a key whose sanitized form collides with a sibling, which would
+        otherwise let the second value silently overwrite the first.
+
+    ``touched`` collects one dotted path per rewrite, so the durable row can state
+    which fields are no longer verbatim. A reader inspecting a quarantined row
+    must never have to guess which text is the model's and which is ours."""
+    if touched is None:
+        touched = []
     if isinstance(obj, str):
         try:
             obj.encode("utf-8")
         except UnicodeEncodeError:
+            touched.append(_path or "<root>")
             return _safe_text(obj)
         return obj
     if isinstance(obj, dict):
-        return {_safe_json(k): _safe_json(v) for k, v in obj.items()}
+        out: dict = {}
+        for key, value in obj.items():
+            safe_key = key
+            if isinstance(key, str):
+                try:
+                    key.encode("utf-8")
+                except UnicodeEncodeError:
+                    safe_key = _safe_text(key)
+                    touched.append(_child_path(_path, safe_key) + " (key)")
+            if safe_key in out:
+                index = 2
+                while f"{safe_key}#{index}" in out:
+                    index += 1
+                safe_key = f"{safe_key}#{index}"
+                touched.append(_child_path(_path, safe_key) + " (key collision)")
+            out[safe_key] = _safe_json(value, touched,
+                                       _child_path(_path, safe_key))
+        return out
     if isinstance(obj, (list, tuple)):
-        return [_safe_json(v) for v in obj]
-    return obj
+        return [_safe_json(v, touched, f"{_path}[{i}]")
+                for i, v in enumerate(obj)]
+    if obj is None or isinstance(obj, (bool, int, float)):
+        return obj
+    touched.append(_path or "<root>")
+    return _safe_text(repr(obj))
+
+
+# Why a quarantine happened. Both causes route to ROUTE_PARSE_QUARANTINE -- the
+# route is unchanged -- but they must not share one counter: the first is model
+# noise, the second is a bug in our own wiring, and a code defect that reads as
+# model noise in the funnel is a defect nobody goes looking for.
+QUARANTINE_CAUSE_UNENCODABLE_TEXT = "unencodable_text"
+QUARANTINE_CAUSE_NOT_SERIALIZABLE = "not_serializable"
+
+
+class UnencodableRecord(ValueError):
+    """A record that cannot survive the JSONL round trip.
+
+    A ``ValueError`` subclass, so the existing per-reference guard catches it with
+    no new branch; ``cause`` is what lets the funnel tell the two apart."""
+
+    def __init__(self, message: str, cause: str):
+        super().__init__(message)
+        self.cause = cause
 
 
 def _reject_unencodable(obj, what: str) -> None:
-    """Raise ValueError if obj cannot survive the JSONL round trip.
+    """Raise UnencodableRecord (a ValueError) if obj cannot survive the round trip.
 
     json.loads accepts a lone surrogate; UTF-8 cannot encode one. So strict schema
     validation passes, the record is built, and the write blows up later in
@@ -440,8 +502,14 @@ def _reject_unencodable(obj, what: str) -> None:
     batch-killing UnicodeEncodeError into an ordinary parse quarantine."""
     try:
         json.dumps(obj, ensure_ascii=False).encode("utf-8")
-    except (UnicodeEncodeError, UnicodeDecodeError, TypeError, ValueError) as e:
-        raise ValueError(f"{what} is not JSONL-encodable: {_safe_text(str(e))}")
+    except (UnicodeEncodeError, UnicodeDecodeError) as e:
+        raise UnencodableRecord(
+            f"{what} is not JSONL-encodable: {_safe_text(str(e))}",
+            QUARANTINE_CAUSE_UNENCODABLE_TEXT)
+    except (TypeError, ValueError) as e:
+        raise UnencodableRecord(
+            f"{what} is not JSONL-serializable: {_safe_text(str(e))}",
+            QUARANTINE_CAUSE_NOT_SERIALIZABLE)
 
 
 def _append_jsonl(fh, obj: dict) -> None:
@@ -530,6 +598,12 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
         ROUTE_FULL_COVERAGE: 0,
         ROUTE_HELD: 0,
         ROUTE_PARSE_QUARANTINE: 0,     # malformed model output, row quarantined
+        # Sub-counters partitioning the encodability share of PARSE_QUARANTINE.
+        # A plain malformed reply counts in neither; a code defect (a value json
+        # cannot serialize) lands in the second and is visible in the funnel
+        # instead of hiding inside the model-noise total.
+        "parse_quarantine_" + QUARANTINE_CAUSE_UNENCODABLE_TEXT: 0,
+        "parse_quarantine_" + QUARANTINE_CAUSE_NOT_SERIALIZABLE: 0,
         # Per-atomic-claim coverage distribution (not per item). The route
         # counters above stay item-level and unchanged; these four partition the
         # coverage judgments made against a usable abstract.
@@ -654,11 +728,19 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                     # key, for one), so both the print and the stored value would
                     # re-raise from inside this handler. Sanitize once, use twice.
                     safe_error = _safe_text(str(e))
+                    # None for an ordinary malformed reply; one of the two
+                    # QUARANTINE_CAUSE_* values when the record itself could not
+                    # be written. Tri-state: None means "not an encodability
+                    # failure", never "unknown cause".
+                    cause = getattr(e, "cause", None)
                     item["parse_error"] = safe_error
+                    item["parse_quarantine_cause"] = cause
                     item["claim_extract_prompt_version"] = CLAIM_EXTRACT_PROMPT_VERSION
                     item["coverage_prompt_version"] = COVERAGE_PROMPT_VERSION
                     item["ts"] = int(time.time())
                     counts[ROUTE_PARSE_QUARANTINE] += 1
+                    if cause is not None:
+                        counts["parse_quarantine_" + cause] += 1
                     print(f"[band-parse-quarantine] {pmcid} "
                           f"{item['citation_id']}: {safe_error}")
                     # Durable record for later inspection/retry; not added to the
@@ -667,8 +749,14 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                     # the payload is what was unencodable it is still on the item
                     # (evidence is assembled before this guard, and the verdicts
                     # were assigned before the check caught them). Sanitize only
-                    # the strings UTF-8 rejects; valid non-ASCII survives verbatim.
-                    doc_items.append(_safe_json(item))
+                    # what JSONL rejects; valid non-ASCII survives verbatim.
+                    # sanitized_paths is ALWAYS present -- empty when the row is
+                    # verbatim -- so an absent field never has to be interpreted,
+                    # and a reader can tell our text from the model's.
+                    sanitized_paths: list = []
+                    row = _safe_json(item, sanitized_paths)
+                    row["sanitized_paths"] = sanitized_paths
+                    doc_items.append(row)
                     continue
                 r = route(item["coverage_verdicts"])
                 item["proposed_route"] = r
