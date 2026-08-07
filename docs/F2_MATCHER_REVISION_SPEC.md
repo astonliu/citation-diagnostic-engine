@@ -4,6 +4,17 @@
 
 **Revision:** 5.2 (supersedes revisions 1–5.1)
 
+**Amendment 2026-08-07 (frame-scoping remediation; docs-only, no normative rule
+change):** (Item 1) §20 corrected — the reband FRAME is defined by a hash-pinned
+`--selection-manifest`, never by `--xml-dir` stems (the CLI enforces it; the
+prior stem-derived sentence was the endorsement that let out-of-seed papers
+contaminate the frame). (Item 5) the `overwhelming_bibliographic_anchor`
+"null result — do not re-litigate" listing (in `F2_PREFREEZE_SPEC.md`) is
+withdrawn; its sibling-work exposure is recorded in the NEW §24 limitations
+register alongside the two Item-4 record corrections. Items 1–3 also landed as
+code (CLI manifest scoping; deterministic surname dedup; corporate identity vs
+containment). No `route_reason`/rule logic changed; the seed-37 band is unchanged.
+
 **Amendments in 5.2 (2026-07-27) — intended as the last F2 spec change before the
 freeze; documentation and manifest only, no normative rule change, no behavior
 change, seed-37 band byte-identical:** (A) NEW §5.6 enumerates the `route_reason`
@@ -1428,12 +1439,20 @@ runnable; `reband_from_cache` was a Python-only function and no CLI existed):
 cd /Users/kamachi/citation-repair-engine/citation_repair_F1_handoff
 ../.venv_cre/bin/python -m cre.f1.f2_run_v3 --reband-from-cache \
   --resolved-cache <resolved-cache.jsonl> --xml-dir <source-xml-dir> \
-  --seed 37 --version candidate_02 --out-dir <out-dir>
+  --selection-manifest <seed-selection-manifest.json> \
+  --seed 37 --version candidate_03 --out-dir <out-dir>
 ```
 
-The resolved cache is keyed by PMID and carries no source PMCID, so the
-`--xml-dir` file stems define the source-PMCID frame; the **real pinned source-XML
-corpus must therefore be present**. The command FAILS LOUD when it is not, rather
+The evaluation FRAME is defined by the hash-pinned `--selection-manifest`
+allow-list, NEVER by `--xml-dir` contents (amended 2026-08-07, Item 1): the
+resolved cache is keyed by PMID and carries no source PMCID, and a shared XML
+directory holds papers from other seeds, so deriving the frame from directory
+stems let out-of-seed papers contaminate the denominator. `--xml-dir` is only the
+corpus location and MAY be a superset; stems outside the manifest are counted
+(`n_ignored_stems`) and ignored, a manifest PMCID with no XML exits 2 (missing
+corpus), and the manifest path + SHA-256 and realized `n_src_pmcids` are recorded
+and asserted against the manifest size. The **real pinned source-XML corpus must
+be present**. The command FAILS LOUD when it is not, rather
 than emitting an all-zeros summary at exit 0 (which would read as a pass): no
 `.xml`/`.nxml` files at all → argparse error, exit 2; a frame that comes back
 empty → **exit 3, diagnostic on stderr, nothing on stdout**. Critically, the
@@ -1538,3 +1557,47 @@ Revision 5 is complete only when all of the following are true:
 
 These links are operational references, not substitutes for pinned run-time snapshots and
 manifests.
+
+---
+
+## 24. Limitations register (added 2026-08-07)
+
+Numbered, measured limitations. Each records a mechanism and its known size; a
+code change to any is a separately-measured revision, not this pass.
+
+**LR-1 — `overwhelming_bibliographic_anchor` trusts the identifier to decide
+whether the identifier is wrong (Item 5).** The rule is physically sufficient
+*only if the identifiers are correctly attached* — but a wrongly-attached
+identifier is exactly the F2 fault class the detector exists to find, so exact
+DOI ∧ year ∧ journal ∧ volume ∧ first page ∧ `title_sim ≥ 0.85` can be satisfied
+by a mixed-identity citation (one work's title+author with another's
+identifier+coordinates). The exposure is concentrated in the sibling-work regime
+— guideline reissued for a different population, multi-part series,
+annually-updated standard — and there **a high `title_sim` is not protective**:
+sibling works have near-identical titles *because* they are siblings, so the 0.85
+conjunct is satisfied by the very condition that makes the confusion possible.
+Three executed counterexamples (Item 3): `American Academy of Pediatrics` infant-
+vs child-guidance (shared DOI, `title_sim` 0.9229); `International` vs
+`Interventional Cardiology Society`; `Group A` vs `Group AB`. Item 3 now routes
+those to `review_wrong_paper` via the corporate-conflict path, but the anchor
+rule's own conjunct set is unchanged and its measured firing size on the seed-37
+frame **is not yet known** (needs the frame-wide reband). The
+"null result — do not re-litigate" listing in `F2_PREFREEZE_SPEC.md` is
+**withdrawn**. Deferred (own measurement): changing the conjunct set, or adding a
+sibling-detection guard.
+
+**LR-2 — `conference_abstract_publication` is the wrong reason for
+`PMC11156236:R49` (Item 4).** The rule requires a supplement/`S`-page locator AND
+four further conjuncts (distinctive-token count, roster containment,
+abstract-content coverage, title similarity) — so it is not "any `S`/`P` locator".
+But an ADA *Standards of Care* supplement article is not a conference abstract:
+the destination may be defensible, the **reason label is false**, and false reason
+codes pollute rule-level reporting. Recorded, not fixed this pass.
+
+**LR-3 — `PMC12168542:B1` production route corrected (Item 4).** Production routes
+B1 to `unscoreable` / `single_word_title` via the `classify_unscoreable` gate in
+`eval_report.py` that runs BEFORE `flag_verdict`. Earlier sessions reported it as
+`review_wrong_paper` — which only occurs when `flag_verdict` is called directly,
+bypassing that gate (the project's own key-learnings name this exact failure:
+"calling `flag_verdict` directly on `unscoreable` rows that production never
+routes there"). The record is corrected here: B1 is `unscoreable`, not HIGH.
