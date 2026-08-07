@@ -271,7 +271,8 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
                       src_pmcid_key: str = "src_pmcid",
                       pmid_key: str = "pmid", seed: int = 7,
                       src_pmcids: Optional[Iterable[str]] = None,
-                      refuse_empty: bool = True) -> dict:
+                      refuse_empty: bool = True,
+                      extra_manifest: Optional[dict] = None) -> dict:
     """Rebuild the F2 frame from the two Drive caches and re-band it with the
     CURRENTLY-LOADED fixes -- NO NCBI/Crossref call. Writes
     ``<prefix>_seed<seed>_<version>.*`` (default ``seed=7``, ``version="v3_1"``).
@@ -479,6 +480,11 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
         "n_proof_rule_quarantined_below_gate":
             len(proof_rule_quarantined_below_gate),
     }
+    # Frame-provenance metadata from the caller (e.g. the selection-manifest path
+    # and hash). Recorded in the summary + artifact so a reader can see WHICH
+    # allow-list defined the frame; does not touch scoping semantics.
+    if extra_manifest:
+        diag.update(extra_manifest)
     return _write_run(records, out_dir=out_dir, out_prefix=out_prefix,
                       version=version, extra=diag, seed=seed,
                       refuse_empty=refuse_empty)
@@ -487,22 +493,60 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
 # =====================================================================
 # CLI entry point for the offline reband (spec §20 verification step)
 # =====================================================================
+def _parse_selection_ids(raw: bytes) -> list:
+    """Source-PMCID allow-list from a selection manifest: a JSON object with
+    ``selected_pmcids`` (the seed-37 selection manifest), a JSON list, or a plain
+    one-ID-per-line file (``#`` comments allowed). Returns the ids in file order."""
+    text = raw.decode("utf-8", "replace")
+    head = text.lstrip()[:1]
+    if head in ("{", "["):
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            ids = (obj.get("selected_pmcids") or obj.get("src_pmcids")
+                   or obj.get("pmcids") or [])
+        elif isinstance(obj, list):
+            ids = obj
+        else:
+            ids = []
+    else:
+        ids = [ln.split("#", 1)[0].strip() for ln in text.splitlines()]
+    return [str(i).strip() for i in ids if str(i).strip()]
+
+
+def _glob_xml_stems(xml_dir: str) -> list:
+    """File stems of every ``*.xml`` / ``*.nxml`` under ``xml_dir`` (the corpus,
+    which MAY be a superset of the frame)."""
+    import glob
+    return [os.path.splitext(os.path.basename(x))[0]
+            for x in (glob.glob(os.path.join(xml_dir, "*.xml"))
+                      + glob.glob(os.path.join(xml_dir, "*.nxml")))]
+
+
 def _cli(argv: "Optional[list[str]]" = None) -> int:
     """``python -m cre.f1.f2_run_v3 --reband-from-cache ...`` -- the runnable form
     of §20's "reband the frozen seed-37 frame offline" step. Wraps
-    ``reband_from_cache`` (previously a Python-only function, so the documented
-    command had never been executable).
+    ``reband_from_cache``.
 
-    The resolved cache is keyed by PMID and does NOT carry a source PMCID, so the
-    source-PMCID frame is derived from the ``--xml-dir`` file stems. A real reband
-    REQUIRES the pinned source-XML corpus present, and this command FAILS LOUD when
-    it is not: no XML files -> argparse error (exit 2); a frame that comes back
-    empty (``n_records == 0`` -- 0-byte stubs, an empty cache, or files with no
-    PMID-bearing refs) -> a diagnostic on stderr and exit 3, with the misleading
-    all-zeros summary kept OFF stdout so it can never read as a pass. Frame-wide
-    verification therefore only closes where the real corpus is readable -- §2.2."""
+    The evaluation FRAME is defined by a HASH-PINNED selection manifest
+    (``--selection-manifest``), NEVER by ``--xml-dir`` contents. ``--xml-dir`` is
+    only the corpus location and MAY be a superset of the frame (a shared XML dir);
+    stems outside the manifest are ignored and counted, not admitted. This closes
+    the frame-scoping defect where directory contents silently defined the frame
+    and let out-of-seed papers contaminate the denominator.
+
+    Fails loud rather than produce a misleading run:
+      * ``--selection-manifest`` / ``--xml-dir`` / ``--resolved-cache`` are all
+        required (argparse exit 2 if any is absent);
+      * no ``.xml``/``.nxml`` in ``--xml-dir`` at all, or any manifest PMCID with
+        NO XML present -> **exit 2** (absent / missing corpus; a silently smaller
+        frame is the same defect in the other direction);
+      * an empty frame (``n_records == 0``) -> **exit 3**, no artifact written;
+      * a realized ``n_src_pmcids`` != the manifest size -> **exit 4** (frame
+        integrity; should be unreachable, kept as a control).
+    The manifest path + SHA-256, ``n_src_pmcids``, and the ignored-stem count are
+    recorded in the summary and the written artifact."""
     import argparse
-    import glob
+    import hashlib
     import sys
 
     p = argparse.ArgumentParser(
@@ -514,36 +558,71 @@ def _cli(argv: "Optional[list[str]]" = None) -> int:
     p.add_argument("--resolved-cache", required=True,
                    help="path to the resolved-record cache JSONL.")
     p.add_argument("--xml-dir", required=True,
-                   help="directory of source PMC XML (its file stems define the "
-                        "source-PMCID frame).")
+                   help="directory of source PMC XML (the CORPUS location; MAY be "
+                        "a superset of the frame -- it does NOT define the frame).")
+    p.add_argument("--selection-manifest", required=True,
+                   help="hash-pinned allow-list of source PMCIDs that DEFINE the "
+                        "frame (the seed selection manifest with 'selected_pmcids', "
+                        "a JSON list, or one PMCID per line). The frame comes from "
+                        "THIS, never from --xml-dir contents.")
     p.add_argument("--out-dir", default=".")
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--version", default="v3_1")
     args = p.parse_args(argv)
 
-    stems = [os.path.splitext(os.path.basename(x))[0]
-             for x in sorted(glob.glob(os.path.join(args.xml_dir, "*.xml"))
-                             + glob.glob(os.path.join(args.xml_dir, "*.nxml")))]
-    # Refuse an ABSENT corpus up front: no XML files at all is never a valid
-    # reband (a missing/wrong --xml-dir), so fail loud before pretending to run.
+    # Frame = the hash-pinned manifest allow-list (never the directory contents).
+    try:
+        manifest_raw = open(args.selection_manifest, "rb").read()
+    except OSError as e:
+        p.error(f"--selection-manifest {args.selection_manifest!r}: {e}")
+    manifest_sha = hashlib.sha256(manifest_raw).hexdigest()
+    frame = sorted(set(_parse_selection_ids(manifest_raw)))
+    if not frame:
+        p.error(f"--selection-manifest {args.selection_manifest!r} lists no source "
+                f"PMCIDs (expected 'selected_pmcids', a JSON list, or one per line).")
+
+    stems = set(_glob_xml_stems(args.xml_dir))
     if not stems:
         p.error(f"--xml-dir {args.xml_dir!r} contains no .xml/.nxml files; the "
                 f"pinned source corpus must be present for a reband.")
+    # A manifest PMCID with no XML is a MISSING corpus -- a silently smaller frame
+    # is the same defect as a contaminated one; refuse (exit 2).
+    missing = [pid for pid in frame if pid not in stems]
+    if missing:
+        print(f"ERROR: {len(missing)} of {len(frame)} manifest source PMCIDs have "
+              f"NO XML in --xml-dir {args.xml_dir!r} -- missing corpus; a silently "
+              f"smaller frame is refused. examples: {missing[:5]}", file=sys.stderr)
+        return 2
+    n_ignored = len(stems - set(frame))      # superset is normal; count, don't admit
+
+    manifest_meta = {
+        "selection_manifest": args.selection_manifest,
+        "selection_manifest_sha256": manifest_sha,
+        "n_manifest_src_pmcids": len(frame),
+        "n_xml_dir_stems": len(stems),
+        "n_ignored_stems": n_ignored,
+    }
 
     # An EMPTY frame is fatal and is refused INSIDE reband_from_cache (refuse_empty
-    # defaults on), so NO zero-row artifact is written -- protecting a later glob /
-    # hash-pin, not just the terminal. Turn that into a clean exit 3 with the
-    # diagnostic FIRST on stderr and nothing on stdout (so it can never read as a
-    # pass).
+    # defaults on), so NO zero-row artifact is written. Turn it into a clean exit 3.
     try:
         summary = reband_from_cache(
             xml_dir=args.xml_dir, resolved_cache_path=args.resolved_cache,
             out_dir=args.out_dir, version=args.version, seed=args.seed,
-            src_pmcids=stems)
+            src_pmcids=frame, extra_manifest=manifest_meta)
     except EmptyFrameError as e:
         print(f"ERROR: {e} This is NOT a valid verification; no artifact written.",
               file=sys.stderr)
         return 3
+
+    # Assert the realized frame IS the manifest -- a control, not a mere report
+    # (the audit field n_src_pmcids was printed and never checked on the
+    # contaminated run). Unreachable in normal operation; kept as a tripwire.
+    if summary.get("n_src_pmcids") != len(frame):
+        print(f"ERROR: realized n_src_pmcids={summary.get('n_src_pmcids')} != "
+              f"manifest size {len(frame)}; frame scoping is not what the manifest "
+              f"specifies.", file=sys.stderr)
+        return 4
 
     scalar = {k: v for k, v in summary.items() if not isinstance(v, list)}
     print(json.dumps(scalar, indent=2))
