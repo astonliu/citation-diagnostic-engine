@@ -241,11 +241,11 @@ def test_zero_claim_item_routes_full_coverage_and_queue_is_blind(tmp_path, monke
     assert _records(out / "judgment_band_annotation_queue.jsonl")[0]["atomic_claims"] == []
 
 
-@pytest.mark.xfail(strict=True, reason="checkpoint is written only after a whole document")
 def test_resume_after_mid_document_interrupt_does_not_duplicate_prior_rows(
         tmp_path, monkeypatch):
     """A process stop after the first row but before the document checkpoint
-    currently replays that row.  This is a durable-output idempotency defect."""
+    must not replay that row.  The document is the unit of durability: its rows
+    are buffered and written only once it completes, just before its checkpoint."""
     _patch_pubtypes(monkeypatch)
     xml = _XML.replace(
         "</p></body>",

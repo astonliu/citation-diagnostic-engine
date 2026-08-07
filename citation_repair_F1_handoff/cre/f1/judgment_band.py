@@ -395,6 +395,12 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
     evidence -> coverage verdicts -> route. Drive-first, checkpoint-and-resume
     (same pattern as the collector), with live progress prints on the doc loop.
 
+    The DOCUMENT is the unit of durability: a doc's rows are buffered in memory
+    and written only once the whole doc is through, immediately before its
+    checkpoint line. The checkpoint is per document, so anything written before
+    it is replayed on resume; buffering keeps a mid-document stop from leaving
+    half a doc's rows behind for the next run to append a second time.
+
     Writes three files in ``out_dir``:
       * ``judgment_band_items.jsonl``            -- one item record per unit,
         carrying the system's proposed_route / proposed_verdict (item record ONLY).
@@ -467,6 +473,10 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                 done.add(pmcid)
                 continue
 
+            # Rows for THIS doc, held until it completes (see the docstring).
+            doc_items: list = []
+            doc_queue: list = []
+
             for ref in refs:
                 counts["refs_seen"] += 1
                 reason = exclusion_reason(ref)
@@ -524,7 +534,7 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                           f"{item['citation_id']}: {e}")
                     # Durable record for later inspection/retry; not added to the
                     # blind annotation queue (no coverage verdicts to annotate).
-                    _append_jsonl(items_fh, item)
+                    doc_items.append(item)
                     continue
                 r = route(item["coverage_verdicts"])
                 item["proposed_route"] = r
@@ -547,9 +557,15 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                 item["ts"] = int(time.time())
 
                 counts["items_built"] += 1
-                _append_jsonl(items_fh, item)
-                _append_jsonl(queue_fh, annotation_payload(item))
+                doc_items.append(item)
+                doc_queue.append(annotation_payload(item))
 
+            # Doc is through: publish its rows, THEN checkpoint it. An interrupt
+            # anywhere above leaves nothing durable for the resume to duplicate.
+            for row in doc_items:
+                _append_jsonl(items_fh, row)
+            for row in doc_queue:
+                _append_jsonl(queue_fh, row)
             _append_jsonl(ckpt_fh, {"pmcid": pmcid})
             done.add(pmcid)
     finally:
