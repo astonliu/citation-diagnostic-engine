@@ -155,10 +155,32 @@ inert (§13), so no row leaves `unscoreable` and the denominator is unchanged fr
 Activating F2-I later reclaims ~34 rows and **changes a published number**; it must be a
 separately measured, separately reported revision and must never be bundled with a
 fresh-seed run. `unscoreable` is 778 rows, all resolved on the PMID side: 752
-`no_claimed_title`, 24 `resolved_book_container`, 2 `resolved_no_title`. Of the 752, **345
-have no journal, no authors and no title — the parser extracted nothing at all** (1.5% of
-the frame). That is a disclosed exclusion, not a defect under repair; parser title recall
-sets this denominator.
+`no_claimed_title`, 24 `resolved_book_container`, 2 `resolved_no_title`.
+
+**Unscoreable composition — recounted 2026-08-06 (rev 5.2).** The previous wording
+("of the 752, 345 have no journal, no authors and no title — the parser extracted
+nothing at all") tested **three fields only**, and its inference is wrong. The 345
+figure itself is reproducible — 345 of the 752 carry no title, no authors and no
+journal — but of those 345, only **15 carry nothing at all**: the other **330 carry a
+DOI**. The parser did not extract nothing; it extracted an identifier and no
+descriptive metadata.
+
+Partitioning the full artifact by which of the seven written bibliographic fields
+(title, authors, journal, year, volume, pages, DOI) the parser recovered —
+denominator **778**, measured from
+`f2_prospective_seed37_a0c1060_unscoreable.jsonl`:
+
+| rows | composition |
+|---|---|
+| 26 | no field at all |
+| 351 | every field **except** the title |
+| 399 | some but not all |
+| 2 | every field **including** a title (both `resolved_no_title` — unscoreable on the resolved side, not the written side) |
+| **778** | total |
+
+726 of the 778 (93.3%) carry a DOI. The dominant shape is therefore a citation whose
+title alone failed to parse, not an empty reference. That is a disclosed exclusion,
+not a defect under repair; parser title recall sets this denominator.
 
 ### 2.3 Reproducibility manifest
 
@@ -220,11 +242,11 @@ The prototype is **not accepted** merely because its tests pass. Its status is:
 |---|---|---|
 | F2-A page canonicalization | implemented, but lacks rev-5 prefix and rollover cases | harden |
 | F2-B preprint discrimination | implemented | retain with routing changes |
-| F2-C physical-location rule | implemented with some vetoes, but no title floor or authoritative-journal method | harden |
+| F2-C physical-location rule | implemented with some vetoes, but no title floor or authoritative-journal method | harden; the authoritative-journal conjunct is **retained as the activation gate, not enforced** while F2-G is frozen inert (§8, §10) — the title floor is not added this revision |
 | F2-D strict-prefix rule | implemented | disable; deferred |
 | F2-E title-furniture excision | partly implemented | harden and complete provenance/author recovery |
 | F2-F A-side resolver | prototype implemented | redesign before any live batch |
-| F2-G journal authority | absent | implement before F2-C is accepted |
+| F2-G journal authority | implemented, **frozen inert** (snapshot pinned, not loaded) | retained as the activation gate before F2-C is accepted; **not enforced** while inert, so F2-C is not re-gated on it this revision (§8, §10) |
 | F2-H broad collective-author matching | absent | deferred |
 | F2-I transposition recovery | absent | implement only as a non-destructive search hypothesis |
 
@@ -559,7 +581,11 @@ and NOT loaded, satisfying §16.3's precondition that authority snapshots be fro
 
 Rationale for freezing inert (ZD, 2026-07-27; recorded so it is not relitigated): F2-G's
 measured precision contribution on the audited band is **zero** (the five journal-comparator
-rows already exit HIGH via the score path; the band is 33/11/7 either way); activating a
+rows already exit HIGH via the score path, so the band is identical with F2-G on or off —
+the 33/11/7 figure recorded here on 2026-07-27 is superseded by the corporate-author
+conflict fix and, per the frame-wide verification status above, no replacement band figure
+is quoted until the Colab reband runs; the on/off invariance is what this rationale
+rests on, and it is unaffected); activating a
 code path hours before a single-use held-out draw (§16.3) would measure something switched
 on too late; and the activation baseline below **was measured with ad-hoc normalizations,
 not the shipped `canonical_title`**, so it must be re-measured before activation. Nothing is
@@ -687,7 +713,8 @@ It may fire only when:
 ```text
 pages_match is True
 volume_match is True
-journal_match_authoritative is True
+journal_match_authoritative is True   # RETAINED as the activation gate;
+                                      # NOT enforced while F2-G is frozen inert
 doi_match is not False
 first_author_match is not False
 year_match is not False
@@ -695,6 +722,27 @@ title_sim >= COORDINATE_REVIEW_TITLE_MIN
 no mixed-identity signal
 no explicit inter-work relation
 ```
+
+**Journal-authority conjunct — retained, not enforced (rev 5.2).** F2-C is **not**
+re-gated on `journal_match_authoritative` in this revision, matching §8: F2-G is
+frozen inert, `JOURNAL_AUTHORITY.is_empty()` is `True`, and the flag is `False` on
+100% of rows, so enforcing the conjunct would disable F2-C entirely rather than
+strengthen it. The conjunct stays written above as the gate F2-G activation must
+satisfy; the shipped rule reaches its journal evidence through the unchanged
+containment comparator.
+
+**Known exposure carried into the freeze (rev 5.2).** Because that comparator is
+what actually runs, F2-C's journal evidence inherits the containment fallback's
+false matches. `journal_equivalent` returns `True` on `('Blood', 'Blood Adv')` —
+this spec's own named false match — and on other single-token / containment pairs
+such as `('Life', 'Life (Basel)')`, because the `token_match` fallback iterates the
+SMALLER token list, so every token of a one-token masthead can be satisfied by a
+longer, different masthead. This is a **documented limitation carried into the
+freeze, not a silent gap**: `journal_equivalent` is deliberately unchanged in this
+revision, since the same containment path is what makes the required aliases match
+(`Antioxidants`/`Antioxidants (Basel)`, `Agric. Food Chem.`/`J Agric Food Chem`,
+`Angew. Chem. Int. Ed.`/`Angew Chem Int Ed Engl`, all verified `True`). Narrowing it
+is an F2-G activation task with its own measurement, not a pre-freeze edit.
 
 Additional requirements:
 
