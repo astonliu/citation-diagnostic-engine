@@ -81,21 +81,35 @@ def _surnames_under(el) -> list[str]:
     that use <string-name><surname> would otherwise lose their author entirely
     (author_match -> None -> a genuine wrong-paper mis-bands, e.g. 31665581).
 
-    De-duped by the <surname> element's identity so a contributor wrapped as
-    <string-name><name><surname> (rare/malformed nesting) is counted once; order
-    follows the surname's document position. For a pure <name><surname> ref this
-    yields exactly the previous result (same surnames, same order)."""
+    De-duped by the <surname> element's STABLE document path so a contributor
+    wrapped as <string-name><name><surname> (rare/malformed nesting) is counted
+    once; order follows the surname's document position. For a pure <name><surname>
+    ref this yields the correct previous result (same surnames, same order).
+
+    The key is the element's ``getpath`` under lxml (a canonical, GC-stable XPath),
+    NOT ``id()``: an lxml proxy is created on demand and garbage-collected, so a
+    released proxy's address can be reused by a LATER, different element within the
+    same iteration and silently drop a real surname as a "duplicate" it never was
+    (observed: an author array flickering 4<->3 across identical parses). Under the
+    stdlib ElementTree fallback there are no on-demand proxies -- elements live as
+    long as the tree -- so ``id()`` is stable there and is the fallback key."""
+    tree = el.getroottree() if hasattr(el, "getroottree") else None
+    getpath = getattr(tree, "getpath", None)
+
+    def _key(node):
+        return getpath(node) if getpath is not None else id(node)
+
     out: list[str] = []
-    seen: set[int] = set()
+    seen: set = set()
     for node in el.iter():
         if _localname(node.tag) not in ("name", "string-name"):
             continue
         sn = node.find("surname")           # direct-child surname only
-        if sn is None or id(sn) in seen:
+        if sn is None or _key(sn) in seen:
             continue
         txt = _text(sn)
         if txt:
-            seen.add(id(sn))
+            seen.add(_key(sn))
             out.append(txt)
     return out
 
