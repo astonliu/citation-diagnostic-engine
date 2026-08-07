@@ -192,7 +192,6 @@ def test_corrupt_abstract_cache_refetches_instead_of_crashing(tmp_path):
     assert sess.calls == 1
 
 
-@pytest.mark.xfail(strict=True, reason="annotation_payload forwards a contaminated evidence dict")
 def test_annotation_payload_never_leaks_proposed_fields_under_any_input():
     item = {"item_key": "k", "citing_sentence": "s", "cited_pmid": "1",
             "atomic_claims": ["c"], "evidence": {"proposed_route": "leak"},

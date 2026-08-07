@@ -319,6 +319,16 @@ def coverage_bucket(verdict: dict) -> "str | None":
 # ==========================================================================
 # 5. Annotation payload -- identical across strata, BLIND to the proposed verdict
 # ==========================================================================
+# The ONLY evidence keys an annotator may see: exactly what assemble_evidence
+# produces. Blindness is enforced by whitelist, not by trusting the item to be
+# clean -- the evidence dict is built from injected fetchers and model-adjacent
+# data, so a rationale, an evidence_span, or a nested proposed_route can end up
+# in it. Anything not named here is dropped from the payload (the item record
+# keeps it; only the annotator's view is narrowed).
+ANNOTATION_EVIDENCE_KEYS = ("cited_pmid", "cited_abstract", "cited_is_review",
+                            "review_reflist", "review_fulltext_available")
+
+
 def _new_worksheet() -> dict:
     """The annotator's Phase-2 worksheet, all null until they commit. Six-key
     shape reused verbatim from the two F3 tools so downstream tooling is shared.
@@ -340,13 +350,22 @@ def annotation_payload(item: dict) -> dict:
     IDENTICAL fields for every stratum, and BLIND: it carries the unit, the
     atomic claims, the evidence, the label space, and an empty worksheet -- but
     NEVER ``proposed_route`` / ``proposed_verdict`` (revealed only after the
-    annotator commits, for disagreement analysis)."""
+    annotator commits, for disagreement analysis).
+
+    Blindness is a WHITELIST at both levels: these seven keys, and within
+    ``evidence`` only :data:`ANNOTATION_EVIDENCE_KEYS`. A contaminated evidence
+    dict is silently narrowed rather than rejected -- a stray key is not worth
+    aborting a batch over, and dropping it costs the annotator nothing."""
+    evidence = item.get("evidence")
+    if not isinstance(evidence, dict):
+        evidence = {}
     return {
         "item_key": item["item_key"],
         "citing_sentence": item["citing_sentence"],
         "cited_pmid": item["cited_pmid"],
         "atomic_claims": item.get("atomic_claims", []),
-        "evidence": item.get("evidence", {}),
+        "evidence": {k: v for k, v in evidence.items()
+                     if k in ANNOTATION_EVIDENCE_KEYS},
         "label_space": list(LABEL_SPACE_F3),
         "worksheet": _new_worksheet(),
     }
