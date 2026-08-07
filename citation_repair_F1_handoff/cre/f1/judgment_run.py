@@ -6,9 +6,10 @@ adds NO new discriminator and invents NO advisor-locked semantics. The single
 LIVE semantic discriminator is coverage -> F6; F4 (strength, generator +
 independent verifier) and F3 (provenance) run only when the discriminator LLM is
 wired; F5 (temporal supersession) runs only when its offline seams +
-evidence-builder are wired (fail-closed to UNJUDGEABLE otherwise); F7 is unbuilt.
-Unwired discriminators are never asserted (neither positively nor as confident
-negatives).
+evidence-builder are wired (fail-closed to UNJUDGEABLE otherwise); F7 (entity)
+runs only when its offline seams + evidence-builder are supplied, otherwise the
+entity seam stays empty. Unwired discriminators are never asserted (neither
+positively nor as confident negatives).
 
 Pipeline per parsed ref:
   1. exclusion_reason        (no citance / no cited pmid)         -> EXCLUDED
@@ -18,9 +19,9 @@ Pipeline per parsed ref:
   4. assemble_evidence       (cited abstract; review reflist opt)
   5. extract_atomic_claims + coverage_verdicts (injected LLM)     -> QUARANTINE on ValueError
   6. type through judgment_engine (from_legacy_coverage -> decide_judgment) with
-     entity=() (F7 unbuilt); provenance from F3 when wired; temporal from F5 when
-     its seams are wired, else UNJUDGEABLE (unwired seams never emit a confident
-     negative)
+     entity from F7 when its seams are wired, else the empty seam; provenance from
+     F3 when wired; temporal from F5 when its seams are wired, else UNJUDGEABLE
+     (unwired seams never emit a confident negative)
   7. derive the durable disposition from route(verdicts), cross-checked against the
      engine's findings, and emit exactly one per-pair record.
 
@@ -96,6 +97,7 @@ from .f3_provenance import (
     make_provenance_assessor,
 )
 from .f5_supersession import F5Policy, decide_f5
+from .f7_entity import F7Policy, make_entity_assessor
 
 # --- dispositions (every pair lands in exactly one) -----------------------
 DISP_EXCLUDED_NO_CITANCE = "excluded_no_citance"
@@ -107,7 +109,7 @@ DISP_HELD_NO_CLAIMS = "held_no_atomic_claims"
 DISP_PREDICTED = "predicted"                        # label == F6
 DISP_HELD_FULL_COVERAGE = "held_full_coverage_pending_F3_F5_F7"  # legacy (discriminators unwired)
 DISP_HELD_INSUFFICIENT = "held_insufficient_evidence"
-# Wired-path holds (F4 + F3 live; F5/F7 still unbuilt).
+# Wired-path holds (F4 + F3 live; F5/F7 live only when their seams are supplied).
 DISP_HELD_PENDING_F5_F7 = "held_pending_F5_F7"            # full coverage, not overstated, proper origin
 DISP_HELD_PROVENANCE_UNJUDGEABLE = "held_provenance_unjudgeable"
 DISP_HELD_STRENGTH_UNJUDGEABLE = "held_strength_unjudgeable"
@@ -369,7 +371,8 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
                f4_verifier_call_llm=None,
                f3_fetch_reflist=None, f3_resolve_pmcid=None,
                f4_policy=None, f3_policy=None,
-               f5_seams=None, f5_evidence_builder=None, f5_policy=None) -> dict:
+               f5_seams=None, f5_evidence_builder=None, f5_policy=None,
+               f7_seams=None, f7_evidence_builder=None, f7_policy=None) -> dict:
     """Type a single PRE-BAND-CLEARED item through coverage + the engine.
 
     Mutates and returns a durable record. Raises ValueError (propagated from the
@@ -384,6 +387,16 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
     F5 records; otherwise the temporal seam holds ``UNJUDGEABLE`` (unevaluated,
     an honest hold -- never a fabricated confident negative). ``f5_policy`` runs
     development-mode (``deploy_path_a=False``, non-reportable) by default.
+
+    F7 (wrong entity) is wired the same way: when BOTH ``f7_seams`` (a dict of the
+    five ``make_entity_assessor`` seam callables) and ``f7_evidence_builder``
+    (``item -> EvidenceContext``) are supplied, the assessor produces the
+    per-claim ``EntityAssessment`` rows and the durable F7 records; otherwise the
+    entity seam stays empty and F7 is never asserted either way. F7 is
+    deliberately NOT gated on support state -- it may coexist with F6/F4, so
+    support is context, not a veto. ``make_entity_assessor`` raises ValueError on
+    a configuration or provenance defect, which the caller quarantines exactly
+    like the other strict discriminators.
     """
     rec = _new_record(item)
     rec["preband_cleared"] = True
@@ -406,9 +419,10 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
         rec["hold_reasons"] = ["no atomic claims"]
         return rec
 
-    # Coverage -> typed support. entity=() always (F7 unbuilt -- never handed a
-    # confident negative). F4/F3/F5 run only when their seams are wired; otherwise
-    # this reproduces the legacy path exactly.
+    # Coverage -> typed support. The entity seam stays empty unless the F7 seams
+    # are supplied (an unwired F7 is never handed a confident negative). F4/F3/F5/F7
+    # run only when their seams are wired; otherwise this reproduces the legacy
+    # path exactly.
     coverage_support = from_legacy_coverage(claims, verdicts)
     support = coverage_support
 
@@ -464,9 +478,23 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
             **f5_seams)
         rec["f5_records"] = list(f5_records)
 
+    # F7 (wrong entity): wired through injected seams like F3/F5. Deliberately NOT
+    # gated on support state -- an entity mismatch may coexist with F6/F4, so
+    # support is context, not a veto. make_entity_assessor raises ValueError on a
+    # configuration or provenance defect; that propagates to the caller's
+    # quarantine rather than being swallowed into a fabricated negative.
+    entities: tuple = ()
+    if f7_seams is not None and f7_evidence_builder is not None:
+        entity_assessor = make_entity_assessor(
+            **f7_seams,
+            evidence_context=f7_evidence_builder(item),
+            policy=f7_policy if f7_policy is not None else F7Policy())
+        entities = tuple(entity_assessor(claims))
+        rec["f7_records"] = list(entity_assessor.records)
+
     decision = decide_judgment(
         preband_cleared=True, claims=claims, claim_support=support,
-        entity_assessments=(), provenance=provenance,
+        entity_assessments=entities, provenance=provenance,
         temporal=temporal)
     rec["findings"] = list(decision.findings)
     rec["hold_reasons"] = list(decision.hold_reasons)
@@ -488,12 +516,14 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
             rec["disposition"] = DISP_HELD_INSUFFICIENT
         return rec
 
-    # Wired path: F6 / F4 / F3 live; F5 (temporal) live when its seams are wired;
-    # F7 (entity) still unbuilt. Precedence follows the engine ordering
-    # (F7, F6, F4, F3, F5): F5 rides lowest and only owns the label when it is the
-    # sole fault.
+    # Wired path: F6 / F4 / F3 live; F5 (temporal) and F7 (entity) live when their
+    # seams are wired. Precedence follows the engine ordering (F7, F6, F4, F3, F5):
+    # F7 rides highest, F5 lowest and only owns the label when it is the sole fault.
     findings = decision.findings
-    if "F6" in findings:
+    if "F7" in findings:
+        rec["disposition"] = DISP_PREDICTED
+        rec["label"] = "F7"
+    elif "F6" in findings:
         if r != jb.ROUTE_F6_FLAGGED:
             raise DiscriminatorContractError("F6 finding without an F6 coverage route")
         rec["disposition"] = DISP_PREDICTED
@@ -514,8 +544,8 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
         else:
             rec["disposition"] = DISP_HELD_STRENGTH_UNJUDGEABLE
     elif provenance is not None and provenance.state is ProvenanceState.PROPER_ORIGIN:
-        # Full coverage, not overstated, rightful origin: accurate on every BUILT
-        # gate; held only for the still-unbuilt F5/F7.
+        # Full coverage, not overstated, rightful origin: accurate on every gate
+        # that ran; held for F5/F7, which are asserted only when wired.
         rec["disposition"] = DISP_HELD_PENDING_F5_F7
     else:
         rec["disposition"] = DISP_HELD_PROVENANCE_UNJUDGEABLE
@@ -531,6 +561,7 @@ def run_natural_judgment(
     f3_fetch_reflist=None, f3_resolve_pmcid=None,
     f4_policy=None, f3_policy=None,
     f5_seams=None, f5_evidence_builder=None, f5_policy=None,
+    f7_seams=None, f7_evidence_builder=None, f7_policy=None,
     model: str = "", email: str = DEFAULT_EMAIL, api_key: str = "",
     max_docs: "int | None" = None, session=None,
     chain_genesis: str = "",
@@ -719,7 +750,10 @@ def run_natural_judgment(
                                      f4_policy=eff_f4_policy, f3_policy=f3_policy,
                                      f5_seams=f5_seams,
                                      f5_evidence_builder=f5_evidence_builder,
-                                     f5_policy=f5_policy)
+                                     f5_policy=f5_policy,
+                                     f7_seams=f7_seams,
+                                     f7_evidence_builder=f7_evidence_builder,
+                                     f7_policy=f7_policy)
                 except ValueError as e:                   # strict-parser failure -> quarantine
                     rec = _new_record(item)
                     rec["preband_cleared"] = True
@@ -790,8 +824,10 @@ def run_natural_judgment(
             "coverage->F6 always live; F4 (strength) + F3 (provenance) live only when "
             "discriminator_call_llm is wired; F5 (temporal supersession) is live only "
             "when both f5_seams and f5_evidence_builder are supplied, otherwise it holds "
-            "UNJUDGEABLE; F7 (entity) remains unbuilt and is never asserted. Nothing is "
-            "declared ACCURATE while F5 is unwired/held or F7 is unbuilt. "
+            "UNJUDGEABLE; F7 (entity) is asserted only when both f7_seams and "
+            "f7_evidence_builder are supplied, otherwise its seam stays empty and F7 is "
+            "never asserted either way. Nothing is declared ACCURATE while any gate is "
+            "unwired or held. "
             "F4 results are reportable ONLY in formal mode (distinct verifier). "
             "No machine label here is ground truth; precision is measured later by "
             "human review."

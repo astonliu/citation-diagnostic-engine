@@ -259,20 +259,20 @@ def test_manifest_pins_versions_hashes_and_prompts(tmp_path, monkeypatch):
 
 def test_source_never_asserts_confident_negatives_for_unbuilt_gates():
     """The orchestrator stays a THIN wiring layer: it must never inline-construct a
-    temporal/entity verdict. F5 is now delegated to ``decide_f5`` (a built leaf) and
-    F7 is still unbuilt -- in neither case does this module itself name a confident
-    verdict enum. Its only inline temporal seam is the not-evaluated UNJUDGEABLE
-    default; F3/F4 states are read from their leaves, as before."""
+    temporal/entity verdict. F5 is delegated to ``decide_f5`` and F7 to
+    ``make_entity_assessor`` (both built leaves) -- in neither case does this module
+    itself name a confident verdict enum. Its only inline temporal seam is the
+    not-evaluated UNJUDGEABLE default; F3/F4 states are read from their leaves."""
     import inspect
     src = inspect.getsource(jr)
     for forbidden in ("NO_QUALIFYING_CONTRADICTION", "QUALIFYING_CONTRADICTION",
                       "SAME_ENTITY", "DIFFERENT_ENTITY_SUPPORTED"):
         assert forbidden not in src, f"module must not inline-assert {forbidden}"
-    # The only inline temporal seam is the not-evaluated UNJUDGEABLE default; F7 is
-    # still the empty entity seam. F5 verdicts arrive via decide_f5, not inline.
+    # The only inline temporal seam is the not-evaluated UNJUDGEABLE default. F5 and
+    # F7 verdicts arrive via their leaves, not inline.
     assert "TemporalState.UNJUDGEABLE" in src
-    assert "entity_assessments=()" in src
-    assert "decide_f5" in src   # F5 is wired (delegated), not hardcoded
+    assert "decide_f5" in src              # F5 is wired (delegated), not hardcoded
+    assert "make_entity_assessor" in src   # F7 is wired (delegated), not hardcoded
 
 
 def test_f5_wired_through_runner_emits_temporal_finding(tmp_path, monkeypatch):
