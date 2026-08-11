@@ -43,6 +43,10 @@ _CORPORATE_RE = re.compile(
 _LIVING_SOURCES = ("statpearls", "ncbi bookshelf", "bookshelf")
 _AUTHOR_SUFFIX_ONLY = {"jr", "junior", "sr", "senior", "filho", "neto"}
 _ROMAN_RE = re.compile(r"\b(?:i|ii|iii|iv|v|vi|vii|viii|ix|x)\b", re.I)
+# Dotted ``i.v.`` / ``v.i.`` is a route abbreviation, not two series ordinals.
+# Mask only that abbreviation before extracting Roman tokens: ``I.`` and ``II.``
+# section labels (including the AM1-BCC guard) remain visible to the rule.
+_DOTTED_IV_ABBREVIATION_RE = re.compile(r"\b(?:i\s*\.\s*v|v\s*\.\s*i)\s*\.", re.I)
 # A 4-digit publication/edition year embedded in a title -- used to detect serial
 # annual editions (e.g. "...Statistics-2017 Update" vs "...-2019 Update").
 _TITLE_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
@@ -498,9 +502,14 @@ def _edition_ordinals(title: str) -> set[int]:
     return out
 
 
+def _roman_series_ordinals(title: str) -> set[str]:
+    title_without_dotted_iv = _DOTTED_IV_ABBREVIATION_RE.sub(" ", title or "")
+    return {token.lower() for token in _ROMAN_RE.findall(title_without_dotted_iv)}
+
+
 def _series_conflict(claimed_title: str, resolved_title: str) -> bool:
-    a = {x.lower() for x in _ROMAN_RE.findall(claimed_title or "")}
-    b = {x.lower() for x in _ROMAN_RE.findall(resolved_title or "")}
+    a = _roman_series_ordinals(claimed_title)
+    b = _roman_series_ordinals(resolved_title)
     if a and b and a != b:
         return True
     # Serial annual/periodic editions differ only by an embedded 4-digit year

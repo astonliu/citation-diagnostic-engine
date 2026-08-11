@@ -169,6 +169,22 @@ def _direct_text(node, *tags: str) -> str:
     return ""
 
 
+def _reference_title(node) -> str:
+    """Best direct JATS title, preserving the existing title-tag priority.
+
+    Malformed publisher citations can contain multiple ``article-title``
+    siblings, with a short collaborator label before the substantive title.
+    Within the first title tag that is present, prefer the longest non-empty
+    value; a normal single-title citation behaves exactly as before.
+    """
+    for tag in ("article-title", "part-title", "chapter-title"):
+        candidates = [_text(el) for el in node.findall(tag)]
+        candidates = [value for value in candidates if value]
+        if candidates:
+            return max(candidates, key=len)
+    return ""
+
+
 def _pages_from(node) -> str:
     """JATS page range/eLocator without dropping alphabetic article locators."""
     explicit = _direct_text(node, "page-range")
@@ -293,7 +309,7 @@ def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:
         cit = _citation_node(ref)
         if cit is None:
             continue
-        raw_title = _text(_first(cit, "article-title", "part-title", "chapter-title"))
+        raw_title = _reference_title(cit)
         clean_title, excised = excise_leading_furniture(raw_title)
         claimed = ClaimedRef(
             title=clean_title,

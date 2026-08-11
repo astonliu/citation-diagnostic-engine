@@ -12,7 +12,7 @@ from cre.f1.biblio_match import (
 )
 from cre.f1.eval_report import build_f2_record, high_band_rate_of_scoreable
 from cre.f1.schema import ClaimedRef, RetrievedRecord
-from cre.f1.work_identity import DOI_BIBLIOGRAPHIC_ANCHOR_TITLE_MIN
+from cre.f1.work_identity import DOI_BIBLIOGRAPHIC_ANCHOR_TITLE_MIN, _series_conflict
 
 
 def _c(**kw):
@@ -64,6 +64,58 @@ def test_corporate_formatting_is_exact_but_different_groups_stay_high():
     assert flag_verdict(c, r)[0] != VERDICT_WRONG_PAPER
     other = _r(title=r.title, authors=["International Committee For Pediatric Care"], year=2020, journal=r.journal, doi=r.doi)
     assert flag_verdict(c, other)[0] == VERDICT_WRONG_PAPER
+
+
+_IV_TITLE_ROWS = [
+    ("3377942",
+     "Postoperative analgesia with fentanyl: Pharmacokinetics and pharmacodynamics of constant-rate iv and transdermal delivery",
+     "Postoperative analgesia with fentanyl: pharmacokinetics and pharmacodynamics of  constant-rate i.v. and transdermal delivery.",
+     ["Holley", "Van Steennis"], ["Holley", "van Steennis"], 1988,
+     "BJA Br. J. Anaesth.", "Br J Anaesth", "60", "60", "608-613", "608-13",
+     "10.1093/bja/60.6.608"),
+    ("3756054",
+     "Pharmacokinetics of fentanyl during constant rate iv infusion for the relief of pain after surgery",
+     "Pharmacokinetics of fentanyl during constant rate i.v. infusion for the relief of  pain after surgery.",
+     ["Duthie", "McLaren", "Nimmo"], ["Duthie", "McLaren", "Nimmo"], 1986,
+     "BJA Br. J. Anaesth.", "Br J Anaesth", "58", "58", "950-956", "950-6",
+     "10.1093/bja/58.9.950"),
+    ("8329252",
+     "Plasma concentrations of midazolam after iv, nasal or rectal administration in children",
+     "Plasma concentrations of midazolam after i.v., nasal or rectal administration in  children.",
+     ["Malinovsky", "Lejus", "Servin", "Lepage", "Normand", "Testa", "Cozian", "Pinaud"],
+     ["Malinovsky", "Lejus", "Servin", "Lepage", "Le Normand", "Testa", "Cozian", "Pinaud"], 1993,
+     "BJA Br. J. Anaesth.", "Br J Anaesth", "70", "70", "617-620", "617-20",
+     "10.1093/bja/70.6.617"),
+    ("9496205", "Iv fentanyl decreases the clearance of midazolam",
+     "I.v. fentanyl decreases the clearance of midazolam.",
+     ["Hase", "Oda", "Tanaka", "Mizutani", "Nakamoto", "Asada"],
+     ["Hase", "Oda", "Tanaka", "Mizutani", "Nakamoto", "Asada"], 1997,
+     "Br. J. Anaesth.", "Br J Anaesth", "79", "79", "740-743", "740-3",
+     "10.1093/bja/79.6.740"),
+]
+
+
+@pytest.mark.parametrize(
+    "pmid,ct,rt,ca,ra,year,cj,rj,cv,rv,cp,rp,doi", _IV_TITLE_ROWS,
+    ids=[row[0] for row in _IV_TITLE_ROWS])
+def test_iv_punctuation_variants_are_not_series_conflicts(
+        pmid, ct, rt, ca, ra, year, cj, rj, cv, rv, cp, rp, doi):
+    c = _c(title=ct, authors=ca, year=year, journal=cj, volume=cv,
+           pages=cp, claimed_doi=doi)
+    r = _r(title=rt, authors=ra, year=year, journal=rj, volume=rv,
+           pages=rp, doi=doi)
+    assert _series_conflict(c.title, r.title) is False, pmid
+    verdict, match = flag_verdict(c, r)
+    assert verdict == VERDICT_MATCH, (pmid, verdict, match.title_sim)
+
+
+def test_am1_bcc_method_ordinals_stay_wrong_paper():
+    c = _c(title="AM1-BCC model: I. Method", authors=["Dewar"], year=1985,
+           journal="J Comput Chem", claimed_doi="10.1000/am1-bcc")
+    r = _r(title="AM1-BCC model: II. Method", authors=["Dewar"], year=1985,
+           journal="J Comput Chem", doi="10.1000/am1-bcc")
+    assert _series_conflict(c.title, r.title) is True
+    assert flag_verdict(c, r)[0] == VERDICT_WRONG_PAPER
 
 
 @pytest.mark.parametrize("left,right", [
