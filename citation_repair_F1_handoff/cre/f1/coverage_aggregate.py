@@ -171,25 +171,33 @@ def fulltext_judge_dict(verdict: bp.CoverageVerdict, retrieval_complete) -> dict
 
 
 def fulltext_judge_dict_v3(verdict, retrieval_complete) -> dict:
-    """:func:`fulltext_judge_dict` for a SIX-KEY ``CoverageVerdictV3``.
+    """:func:`fulltext_judge_dict` for a SPAN-LIST ``CoverageVerdictV3``.
 
     ``verdict`` is duck-typed rather than annotated, to avoid importing
     ``coverage_prompts_v3`` -- which imports this module -- back into it.
 
-    The one shape difference: ``evidence_span`` is GONE, replaced by
-    ``evidence_span_label`` + ``evidence_span_text``. Gone rather than kept
-    alongside, because item 6's requirement is that a label/text mismatch be
-    STRUCTURALLY IMPOSSIBLE, and a composed ``"label: text"`` string riding along
-    would keep that mismatch representable -- and would keep every downstream
-    reader on the ambiguous field. Consumers of the v3 path read the two fields.
+    The one shape difference: ``evidence_span`` is GONE, and so are the
+    ``evidence_span_label`` / ``evidence_span_text`` pair that briefly replaced it.
+    All three are superseded by ONE ``evidence_spans`` list of ``{label, text}``
+    entries, one per contiguous passage (ZD 2026-08-11, run 3 item 2).
 
-    ``aggregate_fulltext_coverage`` is reused UNCHANGED: the DEC-032 truth table
-    reads only the three structured fields, so the span split does not touch it."""
+    Superseded rather than kept alongside, and both times for the same reason. The
+    pair existed so a label could not contradict its own text; the LIST exists so a
+    verdict resting on two non-contiguous passages can record both without stitching
+    them with an ellipsis, which is what broke the audit in run 3. Keeping any older
+    field alongside would keep every downstream reader on a shape that cannot hold
+    the second passage.
+
+    Entries are COPIED, not aliased: the record is durable JSONL and must not share
+    mutable state with the parsed verdict.
+
+    ``aggregate_fulltext_coverage`` is reused UNCHANGED across all three shapes: the
+    DEC-032 truth table reads only ``engages_subject`` / ``contradicts`` /
+    ``unconfirmed_specifics``, so no span reshape has ever touched it."""
     return {
         "established": aggregate_fulltext_coverage(verdict, retrieval_complete),
         "rationale": verdict.rationale,
-        "evidence_span_label": verdict.evidence_span_label,
-        "evidence_span_text": verdict.evidence_span_text,
+        "evidence_spans": [dict(entry) for entry in verdict.evidence_spans],
         "engages_subject": verdict.engages_subject,
         "contradicts": verdict.contradicts,
         "unconfirmed_specifics": list(verdict.unconfirmed_specifics),
@@ -203,13 +211,13 @@ def no_usable_fulltext_dict() -> dict:
     structured fields so ``coverage_bucket`` leaves it out of the tally: an
     unretrieved body is not a coverage judgment and must not be counted as one.
 
-    Carries the SPLIT span fields, because this dict only ever appears on the v3
-    path and one record shape per path is what makes the path readable."""
+    Carries an EMPTY ``evidence_spans`` list, because this dict only ever appears on
+    the v3 path and one record shape per path is what makes the path readable. Empty
+    is the honest value: nothing was retrieved, so nothing can be cited."""
     return {
         "established": None,
         "rationale": "no usable full text (retrieval incomplete; deterministic gate)",
-        "evidence_span_label": "",
-        "evidence_span_text": "",
+        "evidence_spans": [],
         "engages_subject": None,
         "contradicts": None,
         "unconfirmed_specifics": [],

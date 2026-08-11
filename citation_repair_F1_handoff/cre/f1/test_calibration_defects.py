@@ -321,13 +321,17 @@ def test_the_prompt_requires_the_span_to_be_the_complete_basis():
     reasoned from -- makes the audit STRUCTURALLY unable to detect a false
     ``established``, which is the one failure mode it exists to catch. In run 2
     it passed both of CR4's rows as verbatim while both verdicts are wrong."""
-    assert "IS THE COMPLETE EVIDENCE for what you report" in PROMPT
-    assert "it must be sufficient on its own" in PROMPT
-    # A finding whose justification needs text outside the span is not established.
-    assert ("A finding whose justification needs text outside the span is not "
-            "established") in PROMPT
-    # It is the basis reasoned from, not the most quotable line.
-    assert "It is not a sample, an illustration, or the most quotable line" in PROMPT
+    # RESTATED for the span LIST (run 3 item 2). The RULE is unchanged -- the span
+    # is the complete basis -- but it now names evidence_spans, because a single
+    # string could not hold two non-contiguous passages and the judge stitched them.
+    assert "evidence_spans IS THE COMPLETE EVIDENCE for what you report" in PROMPT
+    assert "must justify your findings ON THEIR OWN" in PROMPT
+    # A finding whose justification needs text outside the spans is not established.
+    assert ("A finding whose justification needs text outside the listed spans is "
+            "not established") in PROMPT
+    # They are the basis reasoned from, not the most quotable lines.
+    assert ("They are not samples, illustrations, or the most quotable lines"
+            in PROMPT)
 
 
 def test_the_rationale_field_is_told_it_may_only_use_the_span():
@@ -335,27 +339,31 @@ def test_the_rationale_field_is_told_it_may_only_use_the_span():
     description, not only in a rule the model may skim. CR4's rationale quoted two
     passages it never put in its span; had the field said what it may rely on, the
     reply would have been self-contradictory rather than merely wrong."""
-    assert "It may rely ONLY on text you put in evidence_span_text." in PROMPT
-    # ...and the escape hatch is named, so "shorten the quote" is not the way out.
-    assert "the honest answer is an unconfirmed specific, not a shorter quote" in PROMPT
+    assert "It may rely ONLY on text you put in evidence_spans." in PROMPT
+    # ...and the escape hatch is named, so "thin the quote" is not the way out.
+    assert "the honest answer is an unconfirmed specific, not a thinner quote" in PROMPT
 
 
 def test_multiple_load_bearing_passages_are_all_carried():
-    """Item 4's second half: the field carries ALL load-bearing passages, and the
-    audit still works because every elided segment is checked verbatim and in
-    order. The worked example is CR4's own two passages."""
-    assert "the field carries ALL of them" in PROMPT
-    assert v3.ELISION_MARKER.strip() in PROMPT
-    body = ("N-containing molecules are shielded by recalcitrant substrates such "
-            "as lignin. Some intervening sentence. This slows SOM decomposition.")
+    """Item 4's second half, REWRITTEN for the span list (run 3 item 2).
+
+    The requirement is the same and the MECHANISM changed. Under the ``_v2``
+    contract this test asserted the passages were joined by an elision marker and
+    the audit split on it -- which is exactly what run 3 showed to be a dead end:
+    the judge reached for a bare ``...`` instead, the audit could not match it, and
+    a span audit that mismatches on format is not checking anything. Two contiguous
+    entries now, each independently verbatim, and no marker to split on."""
+    assert "List EVERY load-bearing passage, however many that is." in PROMPT
+    assert "a gap means TWO entries, never an ellipsis" in PROMPT
+    lead = "N-containing molecules are shielded by recalcitrant substrates"
+    tail = "This slows SOM decomposition"
+    body = f"{lead} such as lignin. Some intervening sentence. {tail}."
     sections = [{"label": "discussion", "text": body}]
-    two = ("N-containing molecules are shielded" + v3.ELISION_MARKER
-           + "This slows SOM decomposition")
-    assert v3.span_is_verbatim("discussion", two, sections) is True
-    # Order matters: the same two segments reversed are not a quote of this text.
-    reversed_pair = ("This slows SOM decomposition" + v3.ELISION_MARKER
-                     + "N-containing molecules are shielded")
-    assert v3.span_is_verbatim("discussion", reversed_pair, sections) is False
+    spans = [{"label": "discussion", "text": lead},
+             {"label": "discussion", "text": tail}]
+    assert v3.spans_are_verbatim(spans, sections) is True
+    # The stitched form the _v2 contract forced is now malformed at the parser.
+    assert any(marker in " [...] " for marker in v3.FORBIDDEN_ELLIPSES)
 
 
 # ==========================================================================
@@ -390,19 +398,27 @@ def test_the_absent_genus_pair_is_the_worked_example_and_answers_alike():
                   "Mycena species are primary colonisers of wood."):
         block = text.split(f'Claim: "{genus}"')[1].split("\n\n")[0]
         assert '"engages_subject": false' in block
-        assert '"evidence_span_label": ""' in block
-        assert '"evidence_span_text": ""' in block
+        assert '"evidence_spans": []' in block
 
 
 # ==========================================================================
-# ITEM 6 -- label and text are two fields, and the label is validated
+# ITEM 6 -- the span carries its own label, and the label is validated
+#
+# SUPERSEDED IN SHAPE, NOT IN PURPOSE (run 3 item 2). Item 6 split the packed
+# "label: text" string into two fields so a label could not contradict its own
+# text. Run 3 replaced that pair with an evidence_spans LIST for a different
+# reason -- one string cannot hold two non-contiguous passages. Every property
+# item 6 won is re-asserted below against the list shape, because the defect it
+# closed (a label that names a section the text did not come from) is still live.
 # ==========================================================================
 def _reply_v3(*, engages=True, contradicts=False, specifics=(), rationale="r",
-              label="results", text="Drug X reduced infarct size."):
+              label="results", text="Drug X reduced infarct size.", spans=None):
+    if spans is None:
+        spans = [{"label": label, "text": text}] if engages and text else []
     return json.dumps({
         "engages_subject": engages, "contradicts": contradicts,
         "unconfirmed_specifics": list(specifics), "rationale": rationale,
-        "evidence_span_label": label, "evidence_span_text": text,
+        "evidence_spans": spans,
     }, ensure_ascii=False)
 
 
@@ -417,14 +433,16 @@ def _reader_result(sections=None):
             "sanitized_paths": [], "source": "live"}
 
 
-def test_the_span_is_two_fields_and_the_old_packed_field_is_gone():
-    """Acceptance row 18, first half. A single ``"label: text"`` string could
-    represent a label its own text contradicted; two fields cannot."""
+def test_each_span_carries_its_own_label_and_the_packed_field_is_gone():
+    """Acceptance row 18, first half, re-asserted on the list. A single
+    ``"label: text"`` string could represent a label its own text contradicted; an
+    entry whose label and text are separate keys cannot."""
     judge = v3.make_coverage_judge_v3(lambda prompt: _reply_v3())
     out = judge(["claim"], {"cited_fulltext": _reader_result()})[0]
-    assert out["evidence_span_label"] == "results"
-    assert out["evidence_span_text"] == "Drug X reduced infarct size."
-    assert "evidence_span" not in out          # the ambiguous field is retired
+    assert out["evidence_spans"] == [
+        {"label": "results", "text": "Drug X reduced infarct size."}]
+    for retired in ("evidence_span", "evidence_span_label", "evidence_span_text"):
+        assert retired not in out
 
 
 def test_a_label_outside_the_supplied_set_is_rejected():
@@ -438,6 +456,13 @@ def test_a_label_outside_the_supplied_set_is_rejected():
     judge = v3.make_coverage_judge_v3(lambda prompt: _reply_v3(label="intro"))
     with pytest.raises(ValueError, match="not one of the labels supplied"):
         judge(["claim"], {"cited_fulltext": _reader_result()})
+    # Every entry is checked, not just the first: a valid lead span must not smuggle
+    # a bad one in behind it.
+    judge = v3.make_coverage_judge_v3(lambda prompt: _reply_v3(spans=[
+        {"label": "results", "text": "Drug X reduced infarct size."},
+        {"label": "intro", "text": "smuggled"}]))
+    with pytest.raises(ValueError, match="not one of the labels supplied"):
+        judge(["claim"], {"cited_fulltext": _reader_result()})
 
 
 def test_a_table_label_is_accepted_when_the_reader_emitted_one():
@@ -449,17 +474,21 @@ def test_a_table_label_is_accepted_when_the_reader_emitted_one():
     judge = v3.make_coverage_judge_v3(
         lambda prompt: _reply_v3(label="table", text=row))
     out = judge(["claim"], {"cited_fulltext": _reader_result(sections)})[0]
-    assert out["evidence_span_label"] == "table"
-    assert v3.span_is_verbatim("table", row, sections) is True
+    assert out["evidence_spans"] == [{"label": "table", "text": row}]
+    assert v3.spans_are_verbatim(out["evidence_spans"], sections) is True
 
 
-def test_an_unpaired_span_half_is_malformed():
-    """Splitting the field creates one new failure mode, and it fails closed: a
-    label with no text, or text with no label, is exactly the half-state the packed
-    string used to be able to hide."""
-    for kwargs in ({"label": "results", "text": ""}, {"label": "", "text": "x"}):
-        with pytest.raises(ValueError, match="must both be present"):
-            v3.parse_coverage_v3(_reply_v3(**kwargs))
+def test_an_unpaired_span_half_is_still_malformed_inside_an_entry():
+    """Item 6's new failure mode survives the reshape, moved DOWN one level: it was
+    "a label field with an empty text field", and it is now "an entry missing one of
+    its two keys, or carrying a blank one". Still fails closed -- a half-entry is
+    exactly the state the packed string could hide."""
+    for bad in ([{"label": "results", "text": ""}],
+                [{"label": "", "text": "x"}],
+                [{"label": "results"}],
+                [{"text": "x"}]):
+        with pytest.raises(ValueError):
+            v3.parse_coverage_v3(_reply_v3(spans=bad))
 
 
 def test_the_parser_version_moved_and_is_stamped_on_every_verdict(
@@ -469,7 +498,8 @@ def test_the_parser_version_moved_and_is_stamped_on_every_verdict(
     existed and was written nowhere. Both the model-judged and the deterministic
     HELD rows carry it: it names the reply contract the row was produced under, so
     a file missing it on some rows could not be read at all."""
-    assert v3.RESPONSE_PARSER_VERSION == "strict_coverage_6key_v2"
+    # Bumped again by run 3 item 2 -- the span pair became a list.
+    assert v3.RESPONSE_PARSER_VERSION == "strict_coverage_spanlist_v3"
     _patch_not_review(monkeypatch)
     out_dir = tmp_path / "out"
     for complete in (True, False):
@@ -489,7 +519,7 @@ def test_the_parser_version_moved_and_is_stamped_on_every_verdict(
             session=object())
         row = _rows(target / "judgment_band_items.jsonl")[0]
         stamped = row["coverage_verdicts"][0]
-        assert stamped["response_parser_version"] == "strict_coverage_6key_v2"
+        assert stamped["response_parser_version"] == v3.RESPONSE_PARSER_VERSION
         assert stamped["prompt_version"] == "coverage_v3"      # unchanged in name
         assert "evidence_span" not in stamped
 
@@ -503,7 +533,7 @@ def test_the_default_path_verdict_record_keeps_the_frozen_five_key_shape(
     row = _rows(out_dir / "judgment_band_items.jsonl")[0]
     stamped = row["coverage_verdicts"][0]
     assert "evidence_span" in stamped
-    assert "evidence_span_label" not in stamped
+    assert "evidence_spans" not in stamped
     assert "response_parser_version" not in stamped
 
 

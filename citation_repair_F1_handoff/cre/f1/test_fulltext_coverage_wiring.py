@@ -69,24 +69,35 @@ def reader_result(*, complete=True, sections=None, reasons=None, **extra):
 
 def coverage_reply(*, engages=True, contradicts=False, specifics=(),
                    rationale="r", span_label="results",
-                   span_text="Drug X reduced infarct size"):
-    """A SIX-KEY coverage_v3 reply. The span is two fields as of 2026-08-11 (ZD
-    calibration item 6): a single ``"label: text"`` string let the judge write a
-    label its own text contradicted, and nothing could catch it."""
+                   span_text="Drug X reduced infarct size", spans=None):
+    """A coverage_v3 reply under the SPAN-LIST contract.
+
+    The span has been reshaped twice. It was one ``"label: text"`` string until
+    2026-08-11, which let the judge write a label its own text contradicted; then a
+    ``label``/``text`` PAIR, which could hold only one passage; and now a LIST of
+    ``{label, text}`` entries, because run 3's CR4 rested on two non-contiguous
+    passages and the pair left the judge no way to record both except stitching them
+    with ``[...]`` -- which broke the audit (ZD 2026-08-11, run 3 item 2).
+
+    ``span_label`` / ``span_text`` are kept as the one-entry shorthand most rows
+    here want; pass ``spans`` for the multi-entry cases."""
+    if spans is None:
+        spans = ([{"label": span_label, "text": span_text}]
+                 if engages and span_text else [])
     return json.dumps({
         "engages_subject": engages, "contradicts": contradicts,
         "unconfirmed_specifics": list(specifics),
         "rationale": rationale,
-        "evidence_span_label": span_label, "evidence_span_text": span_text,
+        "evidence_spans": spans,
     }, ensure_ascii=False)
 
 
 def verdict(*, engages=True, contradicts=False, specifics=()):
-    """A parsed v3 verdict. ``engages=False`` carries no span, which
-    ``parse_coverage_v3`` enforces as a PAIR invariant."""
-    kwargs = {} if engages else {"span_label": "", "span_text": ""}
+    """A parsed v3 verdict. ``engages=False`` carries no spans, which
+    ``parse_coverage_v3`` enforces in BOTH directions -- an off-topic verdict cites
+    nothing, and an engaged one must cite at least one passage."""
     return v3.parse_coverage_v3(coverage_reply(
-        engages=engages, contradicts=contradicts, specifics=specifics, **kwargs))
+        engages=engages, contradicts=contradicts, specifics=specifics))
 
 
 def run(tmp_path, monkeypatch, *, fulltext=None, reply=None, extractor=None,
@@ -190,15 +201,16 @@ def test_the_abstract_scoped_aggregate_is_untouched():
 # C1 -- the v3 prompt, renderer and judge
 # ==========================================================================
 def test_prompt_and_parser_versions_move_independently():
-    """DEC-022, now demonstrated in BOTH directions.
+    """DEC-022, now demonstrated in both directions and THREE contract versions.
 
-    At the v3 introduction the scope moved and the five-key contract did not, so
-    the prompt version moved alone. On 2026-08-11 the opposite happened: the
-    evidence scope did NOT move -- ``coverage_v3`` still means full-text sections
-    -- while the output contract went five keys to six (the span split, item 6),
-    so the PARSER version moved alone. Two axes, moving one at a time, twice."""
+    At the v3 introduction the SCOPE moved and the five-key contract did not, so the
+    prompt version moved alone. Twice since, the opposite: the scope has NOT moved --
+    ``coverage_v3`` still means full-text sections -- while the output contract
+    changed shape, first splitting the span into a label/text pair (runs 1-2 item 6,
+    ``_6key_v2``) and then replacing that pair with a span LIST (run 3 item 2,
+    ``_spanlist_v3``). Each time the PARSER version moved alone."""
     assert v3.COVERAGE_PROMPT_VERSION_V3 == "coverage_v3"    # scope, unmoved
-    assert v3.RESPONSE_PARSER_VERSION == "strict_coverage_6key_v2"
+    assert v3.RESPONSE_PARSER_VERSION == "strict_coverage_spanlist_v3"
     assert bp.COVERAGE_PROMPT_VERSION == "coverage_v2"       # frozen, unmoved
     # The frozen five-key parser stays exactly where it was: the v3 path no longer
     # calls it, and band_prompts.py is not touched (blob OID fa01126e...).
@@ -294,7 +306,7 @@ def test_complete_with_no_sections_fails_closed():
 
     def call_llm(prompt):
         calls.append(prompt)
-        return coverage_reply(engages=False, specifics=(), span="")
+        return coverage_reply(engages=False, specifics=())
 
     judge = v3.make_coverage_judge_v3(call_llm)
     out = judge(["claim"], {"cited_fulltext": reader_result(
@@ -316,16 +328,25 @@ def test_sections_that_are_all_blank_also_fail_closed():
 # ==========================================================================
 # Sol flag 4 -- the strict parser, exercised THROUGH v3
 # ==========================================================================
+_SPANS = '"evidence_spans":[{"label":"results","text":"s"}]'
+
+
 @pytest.mark.parametrize("reply", [
     '{"engages_subject":true,"contradicts":false,"unconfirmed_specifics":[],'
-    '"rationale":"r","evidence_span":"s","established":true}',          # extra key
+    '"rationale":"r",' + _SPANS + ',"established":true}',               # extra key
     '{"engages_subject":true,"contradicts":false,"unconfirmed_specifics":[],'
-    '"evidence_span":"s"}',                                             # missing rationale
+    + _SPANS + '}',                                                     # missing rationale
     '```json\n{"engages_subject":true,"contradicts":false,'
-    '"unconfirmed_specifics":[],"rationale":"r","evidence_span":"s"}\n```',  # fenced
+    '"unconfirmed_specifics":[],"rationale":"r",' + _SPANS + '}\n```',  # fenced
     '',                                                                 # empty
     '{"engages_subject":"true","contradicts":false,"unconfirmed_specifics":[],'
-    '"rationale":"r","evidence_span":"s"}',                             # string bool
+    '"rationale":"r",' + _SPANS + '}',                                  # string bool
+    # Added for run 3 item 1: two concatenated objects. Quarantine is the SAFETY
+    # PROPERTY and the parser is not being relaxed to accept them.
+    '{"engages_subject":true,"contradicts":false,"unconfirmed_specifics":[],'
+    '"rationale":"r",' + _SPANS + '}\n'
+    '{"engages_subject":true,"contradicts":false,"unconfirmed_specifics":[],'
+    '"rationale":"second",' + _SPANS + '}',
 ])
 def test_v3_replies_go_through_the_unchanged_strict_parser(reply):
     judge = v3.make_coverage_judge_v3(lambda prompt: reply)
@@ -338,7 +359,7 @@ def test_null_rationale_normalizes_to_empty_string_through_v3():
     valid coverage decision -- but a MISSING key still fails closed (above)."""
     reply = ('{"engages_subject":true,"contradicts":false,'
              '"unconfirmed_specifics":[],"rationale":null,'
-             '"evidence_span_label":"results","evidence_span_text":"s"}')
+             '"evidence_spans":[{"label":"results","text":"s"}]}')
     judge = v3.make_coverage_judge_v3(lambda prompt: reply)
     out = judge(["claim"], {"cited_fulltext": reader_result()})
     assert out[0]["rationale"] == ""
@@ -696,25 +717,26 @@ def test_resuming_in_the_same_mode_is_allowed(tmp_path, monkeypatch):
 # ==========================================================================
 # Q1 disposition: span verification stays prompt-only (no runtime binding)
 # ==========================================================================
-def test_evidence_span_text_is_not_bound_at_runtime_and_payload_stays_blind():
-    """Adjudicated Q1=(a), and it SURVIVES item 6: the span TEXT is still not
-    verified against the section at runtime. It is required by the prompt (rules
-    8-9) and audited offline via ``v3.span_is_verbatim``, because quarantining on
-    a non-verbatim span would silently drop exactly the rows the audit exists to
-    surface. Only the LABEL is checked in code (next test) -- a label outside the
-    supplied set cannot be audited at all, so it fails closed.
+def test_span_text_is_not_bound_at_runtime_and_payload_stays_blind():
+    """Adjudicated Q1=(a), and it survives BOTH span reshapes: span TEXT is still
+    not verified against the section at runtime. It is required by the prompt
+    (rules 8-9) and audited offline via ``v3.span_is_verbatim`` /
+    ``v3.spans_are_verbatim``, because quarantining on a non-verbatim span would
+    silently drop exactly the rows the audit exists to surface. Only the LABEL is
+    checked in code -- a label outside the supplied set cannot be audited at all,
+    so it fails closed.
 
-    What must hold regardless is that the span -- fabricated or not -- never
-    reaches the annotator: rationale and span live on the item record only."""
+    What must hold regardless is that the spans -- fabricated or not -- never reach
+    the annotator: rationale and spans live on the item record only."""
     judge = v3.make_coverage_judge_v3(
         lambda prompt: coverage_reply(span_text="never in any section"))
     out = judge(["claim"], {"cited_fulltext": reader_result()})
-    assert out[0]["evidence_span_label"] == "results"
-    assert out[0]["evidence_span_text"] == "never in any section"
+    assert out[0]["evidence_spans"] == [
+        {"label": "results", "text": "never in any section"}]
     assert out[0]["established"] is True          # accepted, by design
     # ...and the audit is what catches it, offline.
-    assert v3.span_is_verbatim("results", "never in any section",
-                               reader_result()["sections"]) is False
+    assert v3.spans_are_verbatim(out[0]["evidence_spans"],
+                                 reader_result()["sections"]) is False
 
     payload = jb.annotation_payload({
         "item_key": "k", "citing_sentence": "S", "cited_pmid": "1",
@@ -724,5 +746,5 @@ def test_evidence_span_text_is_not_bound_at_runtime_and_payload_stays_blind():
     })
     flat = json.dumps(payload, ensure_ascii=False)
     assert "never in any section" not in flat
-    assert "evidence_span" not in set(_walk_keys(payload))
+    assert "evidence_spans" not in set(_walk_keys(payload))
     assert "coverage_verdicts" not in payload

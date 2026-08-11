@@ -277,15 +277,19 @@ def coverage_verdicts(claims: list, evidence: dict, *,
     distribution; they default to None/[] on a judge (e.g. the no-usable-abstract
     path) that does not supply them. Item-record fields only -- never blind.
 
-    THE SPAN SHAPE FOLLOWS ``parser_version`` (ZD 2026-08-11 item 6). Empty --
-    the default -- means the frozen five-key contract: one ``evidence_span``
-    string, and no ``response_parser_version`` key, so a default run's records are
-    byte-identical to what they were. Non-empty means the six-key contract: the
-    split ``evidence_span_label`` / ``evidence_span_text``, and the parser version
-    stamped on EVERY verdict of that path -- including the deterministic holds,
-    which never went through a parser. That stamp names the REPLY CONTRACT the row
-    was produced under, not a claim that a reply was parsed; without it on every
-    row, a mixed file could not be read at all."""
+    THE SPAN SHAPE FOLLOWS ``parser_version``. Empty -- the default -- means the
+    frozen five-key ABSTRACT contract: one ``evidence_span`` string, and no
+    ``response_parser_version`` key, so a default run's records are byte-identical
+    to what they have always been. Non-empty means the current FULL-TEXT contract:
+    one ``evidence_spans`` LIST of ``{label, text}`` entries, one per contiguous
+    passage (ZD 2026-08-11, run 3 item 2, superseding the ``_v2`` label/text pair).
+
+    The parser version is stamped on EVERY verdict of the full-text path --
+    including the deterministic holds, which never went through a parser. That stamp
+    names the REPLY CONTRACT the row was produced under, not a claim that a reply
+    was parsed. It is what lets a reader tell a ``_v2`` row from a span-list row,
+    and without it on every row a file spanning a contract change could not be read
+    at all."""
     if not claims:
         return []
     raw = judge(claims, evidence) or []
@@ -299,8 +303,7 @@ def coverage_verdicts(claims: list, evidence: dict, *,
             "rationale": v.get("rationale", ""),
         }
         if parser_version:
-            record["evidence_span_label"] = v.get("evidence_span_label", "")
-            record["evidence_span_text"] = v.get("evidence_span_text", "")
+            record["evidence_spans"] = list(v.get("evidence_spans") or [])
         else:
             record["evidence_span"] = v.get("evidence_span", "")
         record.update({
