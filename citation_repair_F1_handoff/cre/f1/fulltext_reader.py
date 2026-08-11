@@ -27,6 +27,8 @@ PMID) -- it is not a failure channel. Every attemptable PMID returns a dict:
       "resolved": bool,             # PMCID found AND EFetch db=pmc returned a
                                     #   parseable document
       "sections": [ {"label", "title", "text", "content_sha256"}, ... ],
+      "sections_present": [str],    # sorted distinct labels emitted; reported,
+                                    #   never gated on (DEC-041)
       "retrieval_complete": bool,   # the DEC-032 predicate
       "incomplete_reasons": [str],  # nonempty EXACTLY when complete is False
       "sanitized_paths": [str],     # see UNICODE below; normally empty
@@ -40,16 +42,25 @@ sanitize and RECORD it" needs somewhere to record, and it cannot be
 It follows the ``judgment_band._safe_json`` ``touched`` convention: one path per
 rewrite, so a reader never has to guess which text is verbatim and which is ours.
 
-COMPLETENESS -- FAIL-CLOSED. ``retrieval_complete`` is True only when ALL hold:
+COMPLETENESS -- FAIL-CLOSED. It answers "did we get the paper's BODY", not "is
+this paper shaped like a trial report" (DEC-041). ``retrieval_complete`` is True
+only when ALL hold:
   * ``resolved`` is True;
   * the JATS ``<body>`` element was present and parsed;
-  * at least one section is labelled ``results`` or ``methods``;
+  * at least one section was emitted, and their combined text clears
+    ``NONTRIVIAL_BODY_CHARS``;
   * no parse error was swallowed -- a ``ParseError`` (including the DOCTYPE-level
     "undefined entity" that JATS's external DTD provokes) yields NO sections and
     ``body_unparseable``, never a silently truncated section list.
 Anything else is False with a named reason (``no_pmcid``, ``no_body``,
-``body_unparseable``, ``no_results_or_methods``). When in doubt, False: DEC-032
-makes False the safe direction, because it HOLDS an item instead of flagging it.
+``body_unparseable``, ``body_too_small``). When in doubt, False: DEC-032 makes
+False the safe direction, because it HOLDS an item instead of flagging it.
+
+An earlier rule also required a ``results`` or ``methods`` section. That made
+completeness STRUCTURALLY UNREACHABLE for every non-IMRAD paper -- reviews and
+perspectives included -- so under DEC-032 every claim judged against a review
+would hold forever, and reviews are F3's central case. What sections a document
+actually yielded is now REPORTED, in ``sections_present``, and gates nothing.
 
 Content that can never be retrieved -- supplementary files, results that exist
 only inside a figure image -- is NOT a completeness failure. Counting it as one
@@ -73,13 +84,14 @@ its own is not emitted at all (a pure container ``<sec>`` contributes only
 through its children). No sentinel strings, ever.
 
 CACHE. One JSON file per PMID under ``cache_dir``, read before any HTTP request
-and written ONLY when ``resolved`` is True. ``no_body`` and
-``no_results_or_methods`` are cached: they are stable properties of the fetched
-document, not transient failures. ``no_pmcid`` and ``body_unparseable`` are NOT
-cached, so a later run can succeed. A cache entry that is corrupt, malformed, or
-whose section hashes no longer match its text is ignored and refetched -- F7
+and written ONLY when ``resolved`` is True. ``no_body`` and ``body_too_small``
+are cached: they are stable properties of the fetched document, not transient
+failures. ``no_pmcid`` and ``body_unparseable`` are NOT cached, so a later run
+can succeed. A cache entry that is corrupt, malformed, missing a required key,
+or whose section hashes no longer match its text is ignored and refetched -- F7
 checks ``content_sha256`` at construction, so a cache that violates the
-invariant must never be handed to it.
+invariant must never be handed to it. Requiring ``sections_present`` is what
+retires every entry written under the pre-DEC-041 completeness rule.
 
 UNICODE. Fetched XML can carry a lone surrogate, which UTF-8 cannot encode.
 ``ET.fromstring`` raises ``UnicodeEncodeError`` (not ``ParseError``) on one, and
@@ -125,17 +137,21 @@ SECTION_LABELS = frozenset({
     LABEL_DISCUSSION, LABEL_INTRO, LABEL_OTHER,
 })
 
-#: The labels whose presence a complete retrieval requires.
-COMPLETENESS_LABELS = frozenset({LABEL_RESULTS, LABEL_METHODS})
+#: Minimum combined section text, in characters, for a parsed body to count as
+#: retrieved. A CHOSEN FLOOR, not a derived one: it separates a real body from a
+#: stub or a front-matter-only record, and nothing about 1000 is principled.
+#: Tunable -- raise it if stubs slip through, lower it if short correspondence
+#: and letters are being held. Tests that are not about the floor override it.
+NONTRIVIAL_BODY_CHARS = 1000
 
 REASON_NO_PMCID = "no_pmcid"
 REASON_NO_BODY = "no_body"
 REASON_BODY_UNPARSEABLE = "body_unparseable"
-REASON_NO_RESULTS_OR_METHODS = "no_results_or_methods"
+REASON_BODY_TOO_SMALL = "body_too_small"
 
 INCOMPLETE_REASONS = frozenset({
     REASON_NO_PMCID, REASON_NO_BODY, REASON_BODY_UNPARSEABLE,
-    REASON_NO_RESULTS_OR_METHODS,
+    REASON_BODY_TOO_SMALL,
 })
 
 SOURCE_CACHE = "cache"
@@ -308,6 +324,13 @@ _HEADING_LABELS = (
     ("discussion", LABEL_DISCUSSION),
     ("introduction", LABEL_INTRO),
     ("background", LABEL_INTRO),
+    # Essay-shaped papers close with these instead of Discussion. Without them a
+    # review's closing argument lands in ``other``, which was invisible while
+    # completeness gated on results/methods and is merely wrong now.
+    ("concluding remarks", LABEL_DISCUSSION),
+    ("conclusions", LABEL_DISCUSSION),
+    ("conclusion", LABEL_DISCUSSION),
+    ("summary", LABEL_DISCUSSION),
 )
 
 # JATS sec-type is a controlled-ish vocabulary of pipe-joined tokens
@@ -357,11 +380,15 @@ def _label_from_sec_type(sec_type: str) -> "str | None":
 def _label_for_sec(sec, title: str, inherited: "str | None") -> str:
     """``sec-type`` first, then the heading, then the enclosing section's label.
 
-    Inheritance is what makes the completeness gate usable on real papers: JATS
-    routinely nests "Primary outcome" under ``<sec sec-type="results">``, and
-    without inheritance every such subsection would land in ``other`` and a
-    perfectly complete retrieval would report ``no_results_or_methods``. A
-    subsection of Results IS results."""
+    Inheritance is what keeps nested sections usefully labelled: JATS routinely
+    nests "Primary outcome" under ``<sec sec-type="results">``, and without it
+    every such subsection would land in ``other``, hiding real results from the
+    F7 evidence filter. A subsection of Results IS results.
+
+    The child's OWN evidence wins when it has any -- ``sec-type`` then heading --
+    and the parent's label applies only to a subsection that names nothing. So a
+    Discussion-titled subsection inside Results is ``discussion``, and cannot
+    inherit its way into evidence F7 should not see."""
     label = _label_from_sec_type(sec.get("sec-type") or "")
     if label is None:
         label = _label_from_heading(title)
@@ -495,18 +522,43 @@ def _find_body(root):
 # ==========================================================================
 # 6. Result construction -- the completeness invariant lives here
 # ==========================================================================
+def _completeness_reasons(sections: list) -> list:
+    """Why a parsed body still is not a retrieved body -- or ``[]`` if it is.
+
+    Completeness answers "did we get the paper's body", NOT "is this paper shaped
+    like a trial report". The former rule required a ``results`` or ``methods``
+    section, which made completeness STRUCTURALLY UNREACHABLE for every
+    non-IMRAD paper -- reviews and perspectives included. Reviews are F3's
+    central case, so under DEC-032 every claim judged against one would have
+    held forever. Recorded as DEC-041.
+
+    A body is retrieved when it yielded at least one section and their combined
+    text clears :data:`NONTRIVIAL_BODY_CHARS`. The section check is not redundant
+    with the character check: a caller that lowers the floor to zero must still
+    not get "complete" out of a body that produced nothing."""
+    total = sum(len(section["text"]) for section in sections)
+    if sections and total >= NONTRIVIAL_BODY_CHARS:
+        return []
+    return [REASON_BODY_TOO_SMALL]
+
+
 def _finalize(pmid: str, pmcid: "str | None", resolved: bool, sections: list,
               reasons: list, sanitized: list, source: str) -> dict:
     """Build the result and enforce the ``incomplete_reasons`` invariant.
 
     ``retrieval_complete`` is derived, never passed in, so there is no path that
-    can report complete-with-a-reason or incomplete-with-none."""
+    can report complete-with-a-reason or incomplete-with-none. ``sections_present``
+    reports what WAS retrieved rather than gating on it: downstream code that
+    genuinely needs results or methods (F7's evidence builder, via
+    ``SectionText``'s own label filter) reads this field or filters the sections
+    itself. The reader no longer decides that on anyone's behalf."""
     complete = resolved is True and not reasons
     return {
         "pmid": pmid,
         "pmcid": pmcid,
         "resolved": resolved is True,
         "sections": sections,
+        "sections_present": sorted({s["label"] for s in sections}),
         "retrieval_complete": complete,
         "incomplete_reasons": [] if complete else list(reasons),
         "sanitized_paths": list(sanitized),
@@ -539,8 +591,16 @@ def _cache_path(cache_dir: str, pmid: str) -> str:
     return os.path.join(cache_dir, f"fulltext_pmid_{pmid}.json")
 
 
-_REQUIRED_KEYS = ("pmid", "pmcid", "resolved", "sections", "retrieval_complete",
-                  "incomplete_reasons", "sanitized_paths")
+# ``sections_present`` is load-bearing here beyond its own contract: no entry
+# written before DEC-041 has it, so requiring it invalidates every cache entry
+# whose ``retrieval_complete`` was computed under the results-or-methods rule.
+# Without that, a cache hit would keep serving the old False -- on exactly the
+# non-IMRAD papers this change exists to unblock -- and the reasons it carries
+# (``no_results_or_methods``) are no longer members of INCOMPLETE_REASONS. This
+# reuses the module's existing "unusable entry is ignored and refetched" rule
+# rather than adding a versioning mechanism.
+_REQUIRED_KEYS = ("pmid", "pmcid", "resolved", "sections", "sections_present",
+                  "retrieval_complete", "incomplete_reasons", "sanitized_paths")
 
 
 def _cache_is_usable(data, pmid: str) -> bool:
@@ -701,8 +761,7 @@ def fetch_fulltext(pmid, *, api_key: str = "", email: str = DEFAULT_EMAIL,
         return result
 
     sections = _emit_sections(_extract_sections(body), sanitized)
-    reasons = ([] if any(s["label"] in COMPLETENESS_LABELS for s in sections)
-               else [REASON_NO_RESULTS_OR_METHODS])
+    reasons = _completeness_reasons(sections)
     result = _finalize(pmid, pmcid, True, sections, reasons, sanitized,
                        SOURCE_LIVE)
     if cache_dir:

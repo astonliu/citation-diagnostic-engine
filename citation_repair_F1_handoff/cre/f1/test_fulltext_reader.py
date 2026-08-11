@@ -197,10 +197,21 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr(time, "sleep", lambda *a, **k: None)
 
 
+@pytest.fixture
+def no_size_floor(monkeypatch):
+    """Neutralize NONTRIVIAL_BODY_CHARS for rows that are not about it.
+
+    These fixtures run a few dozen to a few hundred characters: they exist to pin
+    labelling, namespaces, hashing, sanitization and cache behaviour, and padding
+    each past a 1000-character floor would bury what they actually test. Opt-in,
+    never autouse -- the floor has its own rows, which must see the real value."""
+    monkeypatch.setattr(fr, "NONTRIVIAL_BODY_CHARS", 1)
+
+
 # --------------------------------------------------------------------------
 # Row 1 -- namespaced JATS with results + methods + 2 tables
 # --------------------------------------------------------------------------
-def test_namespaced_jats_results_methods_and_tables_is_complete():
+def test_namespaced_jats_results_methods_and_tables_is_complete(no_size_floor):
     resolve, fetch, _ = _seams(FULL_JATS_NS)
     out = fr.fetch_fulltext("111", resolve_pmcid=resolve, fetch_xml=fetch)
 
@@ -245,7 +256,7 @@ def test_namespaced_jats_results_methods_and_tables_is_complete():
 # --------------------------------------------------------------------------
 # Row 2 -- same content, no namespace: identical output
 # --------------------------------------------------------------------------
-def test_unnamespaced_jats_output_is_identical_to_namespaced():
+def test_unnamespaced_jats_output_is_identical_to_namespaced(no_size_floor):
     """The parser.py defect, not reproduced: a default namespace must change
     nothing about what is extracted."""
     resolve_a, fetch_a, _ = _seams(FULL_JATS_NS)
@@ -297,16 +308,23 @@ def test_no_body_is_cached_because_it_is_a_property_of_the_document(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Row 5 -- body present, no results/methods
+# Row 5 -- body present, no results/methods. AMENDED (DEC-041): completeness
+# asks whether the body was retrieved, not whether the paper is IMRAD, so a
+# discussion-and-intro body is COMPLETE. The old expectation --
+# False / no_results_or_methods -- made completeness structurally unreachable
+# for every non-IMRAD paper, holding reviews forever under DEC-032.
 # --------------------------------------------------------------------------
-def test_discussion_and_intro_only_is_incomplete_but_returns_sections():
+def test_discussion_and_intro_only_is_complete_and_records_its_sections(
+        no_size_floor):
     resolve, fetch, _ = _seams(DISCUSSION_ONLY_JATS)
     out = fr.fetch_fulltext("444", resolve_pmcid=resolve, fetch_xml=fetch)
     assert out["resolved"] is True
-    assert out["retrieval_complete"] is False
-    assert out["incomplete_reasons"] == ["no_results_or_methods"]
+    assert out["retrieval_complete"] is True
+    assert out["incomplete_reasons"] == []
     assert [s["label"] for s in out["sections"]] == ["intro", "discussion"]
     assert out["sections"][0]["text"] == "Prior work."
+    # What was present is REPORTED, and gates nothing.
+    assert out["sections_present"] == ["discussion", "intro"]
 
 
 # --------------------------------------------------------------------------
@@ -360,7 +378,7 @@ def test_undefined_entity_parse_error_yields_no_sections():
 # --------------------------------------------------------------------------
 # Row 8 -- lone surrogate
 # --------------------------------------------------------------------------
-def test_lone_surrogate_is_escaped_at_the_boundary_and_recorded():
+def test_lone_surrogate_is_escaped_at_the_boundary_and_recorded(no_size_floor):
     """A lone surrogate makes ET.fromstring raise UnicodeEncodeError, and would
     kill a later JSONL write. It is escaped before parsing, and recorded."""
     resolve, fetch, _ = _seams(
@@ -426,7 +444,7 @@ def test_cache_round_trip_is_identical_and_makes_no_request(tmp_path):
 # --------------------------------------------------------------------------
 # Row 10 -- corrupt cache
 # --------------------------------------------------------------------------
-def test_corrupt_cache_is_ignored_refetched_and_rewritten(tmp_path):
+def test_corrupt_cache_is_ignored_refetched_and_rewritten(tmp_path, no_size_floor):
     cache_dir = str(tmp_path / "fulltext")
     os.makedirs(cache_dir, exist_ok=True)
     path = os.path.join(cache_dir, "fulltext_pmid_999.json")
@@ -565,7 +583,7 @@ def test_completeness_requires_resolution_even_with_a_pmcid_shaped_string():
     assert out["retrieval_complete"] is False
 
 
-def test_pure_container_sec_emits_no_blank_section():
+def test_pure_container_sec_emits_no_blank_section(no_size_floor):
     resolve, fetch, _ = _seams(
         '<?xml version="1.0"?><article><body>'
         '<sec sec-type="results"><title>Results</title>'
@@ -662,7 +680,7 @@ def test_sec_type_wins_over_a_misleading_heading():
 # --------------------------------------------------------------------------
 # The LIVE seams, exercised offline through an injected session
 # --------------------------------------------------------------------------
-def test_live_default_seams_resolve_then_efetch_with_no_injection():
+def test_live_default_seams_resolve_then_efetch_with_no_injection(no_size_floor):
     session = _RoutedSession({ELINK: _elink_ok("7654321"),
                               EFETCH: _Resp(text=FULL_JATS)})
     out = fr.fetch_fulltext("1919", session=session, api_key="KEY")
@@ -702,8 +720,140 @@ def test_live_omits_api_key_when_absent():
     assert "api_key" not in session.calls[1][1]
 
 
-def test_injected_seams_mean_no_session_is_ever_used():
+def test_injected_seams_mean_no_session_is_ever_used(no_size_floor):
     resolve, fetch, _ = _seams(FULL_JATS)
     out = fr.fetch_fulltext("2323", session=_BoomSession(),
                             resolve_pmcid=resolve, fetch_xml=fetch)
     assert out["retrieval_complete"] is True
+
+
+# ==========================================================================
+# DEC-041 -- completeness means the body was retrieved, not that the paper
+# is IMRAD. These rows see the REAL NONTRIVIAL_BODY_CHARS, never no_size_floor.
+# ==========================================================================
+def _essay_jats(paragraph_chars=400, paragraphs=4):
+    """An essay-shaped paper: a real body, zero results and zero methods.
+
+    This is the live-run shape that motivated DEC-041 -- both PMIDs that
+    resolved were non-IMRAD, so the old rule reported no_results_or_methods on
+    every one and the happy path never fired on real data."""
+    filler = "This review argues the point at some length. " * 40
+    body = "".join(
+        f"<sec><title>{title}</title><p>{filler[:paragraph_chars]}</p></sec>"
+        for title in ("Overview", "The argument", "Counterpoints",
+                      "Conclusion")[:paragraphs])
+    return ('<?xml version="1.0"?><pmc-articleset><article><body>'
+            + body + "</body></article></pmc-articleset>")
+
+
+def test_essay_style_paper_with_no_results_or_methods_is_complete():
+    """The whole point: a review with a real body is a COMPLETE retrieval."""
+    resolve, fetch, _ = _seams(_essay_jats())
+    out = fr.fetch_fulltext("901", resolve_pmcid=resolve, fetch_xml=fetch)
+
+    assert out["resolved"] is True
+    assert out["retrieval_complete"] is True
+    assert out["incomplete_reasons"] == []
+    # Genuinely clears the real floor -- not an artefact of a lowered one.
+    assert sum(len(s["text"]) for s in out["sections"]) >= fr.NONTRIVIAL_BODY_CHARS
+    # Zero results, zero methods, and complete anyway.
+    assert "results" not in out["sections_present"]
+    assert "methods" not in out["sections_present"]
+
+
+def test_a_stub_body_below_the_floor_is_incomplete():
+    resolve, fetch, _ = _seams(
+        MINIMAL_RESULTS_JATS.format(body="Too short to be a paper."))
+    out = fr.fetch_fulltext("902", resolve_pmcid=resolve, fetch_xml=fetch)
+
+    assert out["resolved"] is True
+    assert out["retrieval_complete"] is False
+    assert out["incomplete_reasons"] == ["body_too_small"]
+    # Incomplete, yet the sections it DID find are still returned, never dropped.
+    assert [s["label"] for s in out["sections"]] == ["results"]
+    assert out["sections_present"] == ["results"]
+
+
+def test_the_floor_is_a_named_tunable_constant():
+    """A chosen floor, not a derived one; pinned so a silent edit is visible."""
+    assert fr.NONTRIVIAL_BODY_CHARS == 1000
+
+
+def test_a_body_that_only_just_clears_the_floor_is_complete():
+    """Boundary: >= the floor, not > it."""
+    exact = "x" * fr.NONTRIVIAL_BODY_CHARS
+    resolve, fetch, _ = _seams(MINIMAL_RESULTS_JATS.format(body=exact))
+    out = fr.fetch_fulltext("903", resolve_pmcid=resolve, fetch_xml=fetch)
+    assert sum(len(s["text"]) for s in out["sections"]) == fr.NONTRIVIAL_BODY_CHARS
+    assert out["retrieval_complete"] is True
+
+
+def test_no_results_or_methods_is_no_longer_a_reason_at_all():
+    assert not hasattr(fr, "REASON_NO_RESULTS_OR_METHODS")
+    assert "no_results_or_methods" not in fr.INCOMPLETE_REASONS
+    assert fr.INCOMPLETE_REASONS == {
+        "no_pmcid", "no_body", "body_unparseable", "body_too_small"}
+
+
+@pytest.mark.parametrize("heading", [
+    "Conclusion", "Conclusions", "CONCLUSION", "Concluding remarks",
+    "Summary", "4. Conclusion",
+])
+def test_closing_headings_are_discussion_not_other(heading):
+    assert fr._label_from_heading(heading) == fr.LABEL_DISCUSSION
+
+
+@pytest.mark.parametrize("heading,expected", [
+    ("Introduction", fr.LABEL_INTRO),
+    ("Results", fr.LABEL_RESULTS),
+    ("Materials and Methods", fr.LABEL_METHODS),
+    ("Discussion", fr.LABEL_DISCUSSION),
+    ("A heading naming no canonical section", None),
+])
+def test_widening_the_label_map_moved_nothing_else(heading, expected):
+    assert fr._label_from_heading(heading) == expected
+
+
+def test_sections_present_matches_the_emitted_labels_exactly(no_size_floor):
+    resolve, fetch, _ = _seams(FULL_JATS)
+    out = fr.fetch_fulltext("904", resolve_pmcid=resolve, fetch_xml=fetch)
+    assert out["sections_present"] == sorted({s["label"] for s in out["sections"]})
+    assert out["sections_present"] == [
+        "discussion", "figure", "intro", "methods", "results", "table"]
+
+
+def test_sections_present_is_empty_when_nothing_was_emitted():
+    resolve, fetch, _ = _seams(NO_BODY_JATS)
+    out = fr.fetch_fulltext("905", resolve_pmcid=resolve, fetch_xml=fetch)
+    assert out["sections_present"] == []
+    assert out["incomplete_reasons"] == ["no_body"]
+
+
+def test_a_pre_dec041_cache_entry_is_refetched_not_served(tmp_path):
+    """A cache written under the old rule holds a False computed by the old
+    predicate, and a reason that is no longer a member of INCOMPLETE_REASONS.
+    Requiring sections_present retires those entries instead of serving them --
+    otherwise the stale answer would survive on exactly the non-IMRAD papers
+    this change exists to unblock."""
+    cache_dir = tmp_path / "fulltext"
+    cache_dir.mkdir()
+    stale = {
+        "pmid": "906", "pmcid": "PMC7654321", "resolved": True,
+        "sections": [{"label": "discussion", "title": "Discussion",
+                      "text": "We speculate.",
+                      "content_sha256": _sha("We speculate.")}],
+        "retrieval_complete": False,
+        "incomplete_reasons": ["no_results_or_methods"],
+        "sanitized_paths": [],
+    }                                    # note: no sections_present
+    (cache_dir / "fulltext_pmid_906.json").write_text(
+        json.dumps(stale), encoding="utf-8")
+
+    resolve, fetch, calls = _seams(_essay_jats())
+    out = fr.fetch_fulltext("906", cache_dir=str(cache_dir),
+                            resolve_pmcid=resolve, fetch_xml=fetch)
+
+    assert calls["fetch"] == 1, "the stale entry was served instead of refetched"
+    assert out["source"] == "live"
+    assert out["retrieval_complete"] is True
+    assert out["incomplete_reasons"] == []
