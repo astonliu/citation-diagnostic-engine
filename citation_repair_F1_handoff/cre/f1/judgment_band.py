@@ -72,6 +72,11 @@ from .ncbi_meta import ncbi_pubtypes, is_review, DEFAULT_EMAIL
 # --------------------------------------------------------------------------
 from .band_prompts import (
     CLAIM_EXTRACT_PROMPT_VERSION, COVERAGE_PROMPT_VERSION, evidence_is_usable)
+# The opt-in full-text path (DEC-030/032). Both modules live OUTSIDE the frozen
+# substrate for the same reason coverage_aggregate does: band_prompts.py cannot
+# be edited without drifting its pinned blob OID.
+from .coverage_aggregate import no_usable_fulltext_dict
+from .coverage_prompts_v3 import COVERAGE_PROMPT_VERSION_V3
 
 # Label space for the F3 slice of the band (the annotator's terminal choices).
 # Coverage-gap -> F6, misattribution -> F3, otherwise ACCURATE.
@@ -180,14 +185,26 @@ def extract_atomic_claims(sentence: str, *, extractor: Extractor) -> list:
 # 3. Evidence assembly (cited abstract always; review reflist when applicable)
 # ==========================================================================
 def assemble_evidence(item: dict, *, fetch_abstract: FetchAbstract,
-                      fetch_reflist: "FetchReflist | None" = None) -> dict:
+                      fetch_reflist: "FetchReflist | None" = None,
+                      fetch_fulltext=None) -> dict:
     """Assemble the evidence a judge needs to check the claims.
 
     Always fetches the cited paper's abstract. When the cited work is a review
     (``item["cited_is_review"] is True``) and ``fetch_reflist`` is supplied, also
     fetches the review's own reference list (via ``ncbi_pmc_reflist``) -- the
     F3-V3 rightful-primary candidate pool that a downstream provenance
-    discriminator and the annotator draw on."""
+    discriminator and the annotator draw on.
+
+    ``fetch_fulltext`` (``pmid -> fulltext_reader.fetch_fulltext`` dict) is the
+    OPT-IN full-text seam (DEC-030). Supplied, it adds ``cited_fulltext`` carrying
+    the reader's result whole -- resolved, retrieval_complete, incomplete_reasons,
+    sections_present, sections, sanitized_paths -- so the completeness signal the
+    DEC-032 aggregate needs travels with the evidence. Absent, the key is not
+    added at all and this returns byte-identical evidence to before.
+
+    The abstract fields are assembled unconditionally either way: during
+    calibration the two scopes COEXIST, and retiring the abstract path happens at
+    freeze time, not here."""
     cited_pmid = item.get("cited_pmid", "")
     evidence = {
         "cited_pmid": cited_pmid,
@@ -200,6 +217,8 @@ def assemble_evidence(item: dict, *, fetch_abstract: FetchAbstract,
         prov, avail = fetch_reflist(cited_pmid)
         evidence["review_reflist"] = prov or []
         evidence["review_fulltext_available"] = avail
+    if fetch_fulltext is not None:
+        evidence["cited_fulltext"] = fetch_fulltext(cited_pmid)
     return evidence
 
 
@@ -217,7 +236,8 @@ def _tristate(value) -> "bool | None":
 
 
 def coverage_verdicts(claims: list, evidence: dict, *,
-                      judge: CoverageJudge) -> list:
+                      judge: CoverageJudge,
+                      prompt_version: str = COVERAGE_PROMPT_VERSION) -> list:
     """Per-claim coverage verdict from the injected ``judge``.
 
     ``established`` is abstract-scoped and tri-state: True means the abstract
@@ -247,7 +267,9 @@ def coverage_verdicts(claims: list, evidence: dict, *,
             "engages_subject": v.get("engages_subject"),
             "contradicts": v.get("contradicts"),
             "unconfirmed_specifics": v.get("unconfirmed_specifics", []),
-            "prompt_version": COVERAGE_PROMPT_VERSION,
+            # Defaults to the abstract-scoped version, so the default path stamps
+            # exactly what it stamped before; the full-text path passes v3.
+            "prompt_version": prompt_version,
         })
     return out
 
@@ -326,7 +348,13 @@ def coverage_bucket(verdict: dict) -> "str | None":
 # in it. Anything not named here is dropped from the payload (the item record
 # keeps it; only the annotator's view is narrowed).
 ANNOTATION_EVIDENCE_KEYS = ("cited_pmid", "cited_abstract", "cited_is_review",
-                            "review_reflist", "review_fulltext_available")
+                            "review_reflist", "review_fulltext_available",
+                            # The retrieved body the annotator judges against at
+                            # full-text scope. It is nested and reader-built, so
+                            # the RECURSIVE scrub is what keeps it blind -- the
+                            # outer whitelist alone would let a contaminated
+                            # section carry proposed_route in with it.
+                            "cited_fulltext")
 _ANNOTATION_BLIND_KEYS = frozenset({
     "proposed_route", "proposed_verdict", "rationale",
 })
@@ -494,6 +522,14 @@ class UnencodableRecord(ValueError):
 def _reject_unencodable(obj, what: str) -> None:
     """Raise UnencodableRecord (a ValueError) if obj cannot survive the round trip.
 
+    BACKLOG (deferred, deliberately out of the full-text wiring scope): this guard
+    covers the row-level quarantine guarantees that spec requires -- a lone
+    surrogate or a non-serializable value anywhere in the item record. NaN /
+    Infinity (which json.dumps accepts and emits as invalid JSON), cyclic records,
+    tuple dict keys, and unencodable values reaching the MANIFEST rather than a
+    row are known gaps, none of them reachable from the seams wired here. They are
+    a separate hardening pass, not a silent widening of this one.
+
     json.loads accepts a lone surrogate; UTF-8 cannot encode one. So strict schema
     validation passes, the record is built, and the write blows up later in
     _append_jsonl -- past the per-reference guard, aborting the batch after the
@@ -522,6 +558,38 @@ def _pmcid_from_filename(fn: str) -> str:
     return re.sub(r"\.n?xml$", "", fn)
 
 
+#: Mode marker, written to the checkpoint ONLY on the opt-in full-text path. An
+#: abstract-path run writes no marker at all, so its checkpoint file stays
+#: byte-identical; absence of a marker IS the abstract mode.
+BAND_MODE_FULLTEXT = "fulltext_coverage_v3"
+_MODE_KEY = "band_mode"
+
+
+def _checkpoint_mode(path: str) -> "tuple[bool, str | None]":
+    """``(has_prior_work, mode)`` for an existing checkpoint file.
+
+    ``mode`` is None for an abstract-path checkpoint, which carries no marker.
+    ``_load_checkpoint`` ignores any line without a ``pmcid``, so the marker line
+    is inert to the resume set."""
+    if not os.path.exists(path):
+        return False, None
+    has_work = False
+    mode = None
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            has_work = True
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and rec.get(_MODE_KEY):
+                mode = rec[_MODE_KEY]
+    return has_work, mode
+
+
 def _load_checkpoint(path: str) -> set:
     done: set = set()
     if not os.path.exists(path):
@@ -544,6 +612,7 @@ def _load_checkpoint(path: str) -> set:
 def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
              coverage_judge: CoverageJudge, fetch_abstract: FetchAbstract,
              fetch_reflist: "FetchReflist | None" = None,
+             fetch_fulltext=None, coverage_judge_v3: "CoverageJudge | None" = None,
              max_docs: "int | None" = None, email: str = DEFAULT_EMAIL,
              api_key: str = "", session=None) -> dict:
     """Run the judgment-band front-end over a directory of PMC-OA citing papers.
@@ -574,12 +643,49 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
     Every helper (extractor, coverage_judge, fetch_abstract, fetch_reflist) is
     injected, so this is fully offline-testable. The cited-work review check uses
     the module-global ``ncbi_pubtypes`` / ``is_review`` (monkeypatched in tests,
-    wired live in the notebook)."""
+    wired live in the notebook).
+
+    FULL-TEXT PATH (opt-in, DEC-030/032). Supplying BOTH ``fetch_fulltext`` and
+    ``coverage_judge_v3`` moves coverage from the cited abstract to the retrieved
+    body: evidence gains ``cited_fulltext``, and a reference whose retrieval is
+    complete is judged by the v3 judge over its sections. A reference whose
+    retrieval is NOT complete is held without a model call, counted under
+    ``no_usable_fulltext``, exactly mirroring the no-usable-abstract gate.
+    Supplying neither leaves every byte of this function's output unchanged --
+    that is the point of the opt-in, and it holds until calibration (DEC-040)
+    says v3 is ready to freeze. Supplying only one is a configuration error and
+    raises, rather than half-enabling a scope change."""
+    if (fetch_fulltext is None) != (coverage_judge_v3 is None):
+        raise ValueError(
+            "the full-text path needs BOTH fetch_fulltext and coverage_judge_v3; "
+            "supplying one alone would silently judge full text with the "
+            "abstract-scoped prompt, or fetch a body nothing reads")
+    fulltext_path = fetch_fulltext is not None
+    # Provenance must state the scope a row was ACTUALLY judged at. Defaults to
+    # the frozen abstract version, so a default run stamps exactly what it
+    # stamped before.
+    coverage_version = (COVERAGE_PROMPT_VERSION_V3 if fulltext_path
+                        else COVERAGE_PROMPT_VERSION)
     os.makedirs(out_dir, exist_ok=True)
     items_path = os.path.join(out_dir, "judgment_band_items.jsonl")
     queue_path = os.path.join(out_dir, "judgment_band_annotation_queue.jsonl")
     manifest_path = os.path.join(out_dir, "judgment_band_manifest.json")
     checkpoint_path = os.path.join(out_dir, "judgment_band_checkpoint.jsonl")
+
+    # Resume gate: an out_dir belongs to ONE coverage mode. The checkpoint keys
+    # on pmcid alone, so resuming across a mode switch would skip already-done
+    # documents and leave one output set holding rows judged at two different
+    # evidence scopes -- undetectable afterwards. Mismatch raises in EITHER
+    # direction; the abstract path has no marker, so its files never move.
+    _prior_work, _prior_mode = _checkpoint_mode(checkpoint_path)
+    _wanted_mode = BAND_MODE_FULLTEXT if fulltext_path else None
+    if _prior_work and _prior_mode != _wanted_mode:
+        raise ValueError(
+            f"judgment_band: this out_dir holds a run in mode "
+            f"{_prior_mode or 'abstract (coverage_v2)'!r}, but this run is mode "
+            f"{_wanted_mode or 'abstract (coverage_v2)'!r}. Resuming across a "
+            "coverage-scope change would mix evidence scopes in one output set. "
+            "Start a fresh out_dir.")
 
     done = _load_checkpoint(checkpoint_path)
     if session is None:
@@ -612,6 +718,11 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
         COVERAGE_UNCONFIRMED_SPECIFIC: 0,
         COVERAGE_OFF_TOPIC: 0,
     }
+    # Added ONLY on the opt-in full-text path. An unconditional key would change
+    # the manifest of every default run, and the default path is required to be
+    # byte-identical until calibration says v3 is ready to freeze.
+    if fulltext_path:
+        counts["no_usable_fulltext"] = 0
     pubtype_cache: dict = {}
 
     files = sorted(fn for fn in os.listdir(xml_dir)
@@ -620,6 +731,9 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
     items_fh = open(items_path, "a", encoding="utf-8")
     queue_fh = open(queue_path, "a", encoding="utf-8")
     ckpt_fh = open(checkpoint_path, "a", encoding="utf-8")
+    if fulltext_path and _prior_mode is None:
+        # Written once, before any document. The abstract path writes nothing.
+        _append_jsonl(ckpt_fh, {_MODE_KEY: BAND_MODE_FULLTEXT})
     try:
         scanned = 0
         for fn in files:
@@ -681,7 +795,8 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                 # Evidence, claims, coverage, route.
                 item["evidence"] = assemble_evidence(
                     item, fetch_abstract=fetch_abstract,
-                    fetch_reflist=fetch_reflist)
+                    fetch_reflist=fetch_reflist,
+                    fetch_fulltext=fetch_fulltext)
                 # A sentinel / missing / empty abstract is NOT necessarily a fetch
                 # failure and the row is NOT excluded -- it is simply not scoreable
                 # by the coverage judge, which routes it HELD without an LLM call.
@@ -708,9 +823,42 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                     # Copy: the cached list is shared by every reference on this
                     # citance, and each item record owns its own claims.
                     item["atomic_claims"] = list(claims_cache[sentence])
-                    item["coverage_verdicts"] = coverage_verdicts(
-                        item["atomic_claims"], item["evidence"],
-                        judge=coverage_judge)
+                    held_for_incomplete_fulltext = False
+                    # MODE COMES FROM CONFIGURATION, never from the fetched value.
+                    # Inferring it from the presence of cited_fulltext would let a
+                    # failed fetch (the reader returns None on an unresolvable
+                    # PMID) silently drop an opted-in run back to abstract scope
+                    # and judge it with v2 -- a scope change nothing in the output
+                    # would record.
+                    fulltext = item["evidence"].get("cited_fulltext")
+                    complete = (isinstance(fulltext, dict)
+                                and fulltext.get("retrieval_complete") is True)
+                    if not fulltext_path:
+                        # Default path, untouched: abstract scope, v2 prompt.
+                        item["coverage_verdicts"] = coverage_verdicts(
+                            item["atomic_claims"], item["evidence"],
+                            judge=coverage_judge)
+                    elif complete:
+                        item["coverage_verdicts"] = coverage_verdicts(
+                            item["atomic_claims"], item["evidence"],
+                            judge=coverage_judge_v3,
+                            prompt_version=COVERAGE_PROMPT_VERSION_V3)
+                    else:
+                        # Mirrors the no-usable-abstract gate: deterministic HELD,
+                        # no model call of EITHER version. Reached by an
+                        # incomplete retrieval and equally by a reader result that
+                        # is None or not a dict at all -- a fetch failure is an
+                        # unretrieved body, which is exactly what this branch is
+                        # for. An incomplete body cannot support an argument from
+                        # silence, and DEC-032 holds rather than flags when it
+                        # cannot.
+                        counts["no_usable_fulltext"] += 1
+                        held_for_incomplete_fulltext = True
+                        item["coverage_verdicts"] = coverage_verdicts(
+                            item["atomic_claims"], item["evidence"],
+                            judge=lambda claims, _evidence: [
+                                no_usable_fulltext_dict() for _ in claims],
+                            prompt_version=COVERAGE_PROMPT_VERSION_V3)
                     # Strict schema validation passes text that JSONL cannot
                     # encode (a lone surrogate parses as a perfectly good string).
                     # Check BOTH durable artifacts here, inside the guard, so the
@@ -736,7 +884,7 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                     item["parse_error"] = safe_error
                     item["parse_quarantine_cause"] = cause
                     item["claim_extract_prompt_version"] = CLAIM_EXTRACT_PROMPT_VERSION
-                    item["coverage_prompt_version"] = COVERAGE_PROMPT_VERSION
+                    item["coverage_prompt_version"] = coverage_version
                     item["ts"] = int(time.time())
                     counts[ROUTE_PARSE_QUARANTINE] += 1
                     if cause is not None:
@@ -775,12 +923,18 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
 
                 # Stamp pinned prompt versions on the item record.
                 item["claim_extract_prompt_version"] = CLAIM_EXTRACT_PROMPT_VERSION
-                item["coverage_prompt_version"] = COVERAGE_PROMPT_VERSION
+                item["coverage_prompt_version"] = coverage_version
                 item["ts"] = int(time.time())
 
                 counts["items_built"] += 1
                 doc_items.append(item)
-                doc_queue.append(annotation_payload(item))
+                if not held_for_incomplete_fulltext:
+                    # An item held because the body was never retrieved carries no
+                    # coverage judgment and no body for the annotator to judge
+                    # against, so it is recorded durably but NOT queued for blind
+                    # annotation. It is not lost -- it is in the items file, with
+                    # its incomplete_reasons -- it is simply not answerable yet.
+                    doc_queue.append(annotation_payload(item))
 
             # Doc is through: publish its rows, THEN checkpoint it. An interrupt
             # anywhere above leaves nothing durable for the resume to duplicate.
@@ -806,7 +960,7 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
         ),
         "detector_independent_annotation": True,
         "claim_extract_prompt_version": CLAIM_EXTRACT_PROMPT_VERSION,
-        "coverage_prompt_version": COVERAGE_PROMPT_VERSION,
+        "coverage_prompt_version": coverage_version,
         "label_space": list(LABEL_SPACE_F3),
         "params": {
             "xml_dir": xml_dir,
@@ -815,6 +969,9 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
             "email": email,
             "api_key_present": bool(api_key),
             "fetch_reflist_wired": fetch_reflist is not None,
+            **({"fetch_fulltext_wired": True,
+                "band_mode": BAND_MODE_FULLTEXT,
+                "evidence_scope": "fulltext_sections"} if fulltext_path else {}),
         },
         "counts": counts,
         "coverage_distribution": {
@@ -823,6 +980,13 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
             COVERAGE_UNCONFIRMED_SPECIFIC: counts[COVERAGE_UNCONFIRMED_SPECIFIC],
             COVERAGE_OFF_TOPIC: counts[COVERAGE_OFF_TOPIC],
             "note": (
+                "Per atomic claim, FULL-TEXT scoped (coverage_v3, DEC-030/032). "
+                "coverage_contradicted routes F6_FLAGGED. Silence against a "
+                "COMPLETE retrieval is absence and also routes F6_FLAGGED; "
+                "against an incomplete one it holds. References whose body was "
+                "not retrieved are excluded here and counted under "
+                "counts.no_usable_fulltext."
+            ) if fulltext_path else (
                 "Per atomic claim, abstract-scoped. coverage_contradicted is the "
                 "ONLY abstract-scoped evidence of a fault (routes F6_FLAGGED); "
                 "coverage_unconfirmed_specific and coverage_off_topic are the "

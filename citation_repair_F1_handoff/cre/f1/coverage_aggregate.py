@@ -101,6 +101,85 @@ def tristate_judge_dict(verdict: bp.CoverageVerdict) -> dict:
     }
 
 
+def aggregate_fulltext_coverage(
+    verdict: bp.CoverageVerdict, retrieval_complete
+) -> Optional[bool]:
+    """The DEC-032 truth table, at FULL-TEXT scope. Leaves the abstract-scoped
+    :func:`aggregate_coverage` above untouched -- that stays the default path.
+
+    What changes at full-text scope is what SILENCE means. In an abstract,
+    absence is unknown: a finding can be in the Results and simply not summarized.
+    In a COMPLETE full text, absence is absence, and that is the whole point of
+    retrieving the body.
+
+    So the table splits on whether a conclusion rests on evidence PRESENT or on
+    evidence MISSING:
+
+      * a contradiction is present evidence -> ``False`` whether or not retrieval
+        was complete. A contradiction in a partial text is still a contradiction.
+      * engaged, uncontradicted, nothing left unconfirmed -> ``True``, likewise
+        regardless of completeness. What we retrieved established the claim; the
+        pages we did not retrieve cannot un-establish it.
+      * everything else is an argument from silence -- the text is off-topic, or a
+        load-bearing specific never appears. That argument is only valid against a
+        COMPLETE retrieval: complete -> ``False``, incomplete -> ``None`` (hold).
+
+    ``retrieval_complete`` is tri-state-safe: anything that is not exactly True is
+    treated as not-complete, so an absent or unknown signal holds rather than
+    flags. Fail-closed, matching DEC-032's direction.
+    """
+    engages_subject = verdict.engages_subject
+    contradicts = verdict.contradicts
+    unconfirmed_specifics = list(verdict.unconfirmed_specifics)
+    if type(engages_subject) is not bool:
+        raise ValueError("engages_subject must be an actual JSON boolean")
+    if type(contradicts) is not bool:
+        raise ValueError("contradicts must be an actual JSON boolean")
+    if not engages_subject and (contradicts or unconfirmed_specifics):
+        raise ValueError(
+            "engages_subject=false requires contradicts=false and "
+            "unconfirmed_specifics=[]"
+        )
+    if contradicts:
+        return False                       # present evidence, incompatible
+    if engages_subject and not unconfirmed_specifics:
+        return True                        # present evidence, established
+    # From here the conclusion rests on something NOT being there.
+    if retrieval_complete is True:
+        return False                       # absence in a complete text is absence
+    return None                            # incomplete: unknown, hold
+
+
+def fulltext_judge_dict(verdict: bp.CoverageVerdict, retrieval_complete) -> dict:
+    """:func:`tristate_judge_dict`'s full-text twin: same dict shape, same raw
+    fields for the coverage_distribution tally, ``established`` re-derived through
+    :func:`aggregate_fulltext_coverage` instead of the abstract-scoped table."""
+    return {
+        "established": aggregate_fulltext_coverage(verdict, retrieval_complete),
+        "rationale": verdict.rationale,
+        "evidence_span": verdict.evidence_span,
+        "engages_subject": verdict.engages_subject,
+        "contradicts": verdict.contradicts,
+        "unconfirmed_specifics": list(verdict.unconfirmed_specifics),
+    }
+
+
+def no_usable_fulltext_dict() -> dict:
+    """The deterministic HELD verdict when the body was not retrievable.
+
+    Mirrors :func:`_no_usable_abstract_dict` exactly, including carrying no
+    structured fields so ``coverage_bucket`` leaves it out of the tally: an
+    unretrieved body is not a coverage judgment and must not be counted as one."""
+    return {
+        "established": None,
+        "rationale": "no usable full text (retrieval incomplete; deterministic gate)",
+        "evidence_span": "",
+        "engages_subject": None,
+        "contradicts": None,
+        "unconfirmed_specifics": [],
+    }
+
+
 def _no_usable_abstract_dict() -> dict:
     """The deterministic HELD verdict for the no-usable-abstract path: tri-state
     None, no structured fields (so coverage_bucket leaves it out of the tally)."""
