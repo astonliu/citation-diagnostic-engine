@@ -2,7 +2,7 @@
 
 **Spec date:** 2026-07-26
 
-**Revision:** 5.2 (supersedes revisions 1–5.1)
+**Revision:** 5.3 (supersedes revisions 1–5.2)
 
 **Amendment 2026-08-07 (frame-scoping remediation; docs-only, no normative rule
 change):** (Item 1) §20 corrected — the reband FRAME is defined by a hash-pinned
@@ -224,7 +224,7 @@ The journal-authority and feature-flag fields (added rev 5.2, enforced by
   "journal_match_authoritative_rate": 0.0,
   "f2i_field_transposition_active": false,
   "f2d_strict_prefix_active": false,
-  "reason_registry_version": "5.2"
+  "reason_registry_version": "5.3"
 }
 ```
 
@@ -388,8 +388,9 @@ copy, or older comment with another value is not authoritative.
 ### 5.6 Reason-code registry (added rev 5.2)
 
 `route_reason` (§19.1) is a controlled vocabulary and MUST be enumerated like every
-other. This is that enumeration — a **closed** registry of the 37 reason codes the
-detector can emit. The machine-readable source of truth is
+other. This is that enumeration — a **closed** registry of the 38 reason codes the
+detector can emit (25 + 2 + 11 across A.1–A.3; 37 until `version_chain_same_work`
+was added in rev 5.3). The machine-readable source of truth is
 `cre/f1/reason_registry.py`; `test_reason_registry.py` statically scans the three
 emitter modules and asserts the emitted literals equal the registry EXACTLY, so the
 spec cannot drift behind the code (that test already caught
@@ -1136,16 +1137,19 @@ widening it in place was measured to stop `overwhelming_bibliographic_anchor`
 firing on 4 seed-37 rows (LR-1). `PMC8097933:CR9` needed only this fix and routes
 under `conference_abstract_publication`, whose guards it satisfies in full.
 
-**Not closed — `PMC12733676:B29` (arXiv/ICCV → IEEE TPAMI).** The fourth required
-fixture is still `review_wrong_paper` / `preprint_shape_unconfirmed`. Its shape is
-pinned by committed `test_item1_preprint_shape_with_disagreeing_dois_is_not_same_work`,
-which encodes the §14.3 rule that a confident DOI disagreement refutes a version
-relation (LR-4). That rule and this policy give opposite answers on the same row:
-§14.3 reads the changed DOI as refutation, §15.2 reads it as the expected property
-of a lineage. Reversing §14.3 was held out of scope for this change, so B29 is
-recorded here as an **open conflict for the taxonomy policy to settle**, not as a
-defect of this rule. The refutation is otherwise untouched and still governs every
-row this rule does not claim.
+**Acceptance for this change set:** landing `PMC8097933:CR9`, `PMC9829249:R20` and
+`PMC12864399:B12` — 3 of the 4 named rows — is a **PASS**.
+`PMC12733676:B29-jimaging-11-00445` is deliberately **NOT** routed. Routing it
+requires reversing §14.3's rule that a confident DOI disagreement refutes a version
+relation, and amending the committed test
+`test_item1_preprint_shape_with_disagreeing_dois_is_not_same_work`. That is a policy
+reversal, not a fix; it was placed out of scope for this commit and remains ZD's
+decision (open, recorded 2026-08-11). B29 stays `review_wrong_paper` /
+`preprint_shape_unconfirmed` and is carried in the limitations register as **LR-4**.
+
+§14.3 and §15.2 give opposite answers on that row — §14.3 reads the changed DOI as
+refutation, §15.2 reads it as the expected property of a lineage. The refutation is
+otherwise untouched and still governs every row this rule does not claim.
 
 ### 15.3 Cochrane volume/issue representation
 
@@ -1643,3 +1647,20 @@ B1 to `unscoreable` / `single_word_title` via the `classify_unscoreable` gate in
 bypassing that gate (the project's own key-learnings name this exact failure:
 "calling `flag_verdict` directly on `unscoreable` rows that production never
 routes there"). The record is corrected here: B1 is `unscoreable`, not HIGH.
+
+**LR-4 — `PMC12733676:B29-jimaging-11-00445`: §14.3 and §15.2 conflict on one row
+(open, recorded 2026-08-11).** §14.3 holds that a confident DOI disagreement
+refutes a preprint↔published version relation; §15.2's version-chain policy holds
+that identifiers legitimately change between lineage nodes, so a changed DOI is the
+expected property of a lineage rather than evidence against it. B29 (arXiv/ICCV
+`10.48550/arXiv.1611.04076` → IEEE TPAMI `10.1109/TPAMI.2018.2872043`, one author
+team, the resolved title extending the claimed one) satisfies §15.2 and is refuted
+by §14.3. The row's exact shape is pinned by the committed test
+`test_item1_preprint_shape_with_disagreeing_dois_is_not_same_work`, so **any** rule
+that routes the real row also routes that fixture — the two cannot be separated by
+tightening evidence, only by deciding which section governs. Routing B29 was
+therefore held OUT OF SCOPE of the §15.2 implementation (`f620efc`): the refutation
+in `_version_relation_evidence` is untouched, B29 stays `review_wrong_paper` /
+`preprint_shape_unconfirmed`, and 3-of-4 named rows is the accepted PASS. Resolving
+which section wins is ZD's decision and is **not** a defect of the version-chain
+rule. Deferred, not closed.

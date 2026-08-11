@@ -21,10 +21,11 @@ from __future__ import annotations
 REASON_REGISTRY_VERSION = "5.3"
 
 # --- §5.6 A.1: same-work reasons -> route review_same_work_variant ------------
-# 20 from work_identity.py + 4 from biblio_match.py = 24. (Rev 5.2 registry adds
+# 20 from work_identity.py + 5 from biblio_match.py = 25. (Rev 5.2 registry added
 # ``translated_title_missing_volume_anchors``, which the code emits from
 # work_identity RULE F but the rev-5.2 draft's A.1 table omitted -- caught by the
-# equality test below.)
+# equality test below. Rev 5.3 added ``version_chain_same_work``, the fifth
+# biblio_match code, taking this group from 24 to 25.)
 SAME_WORK_REASONS = frozenset({
     # work_identity.py
     "mixed_identity_citation",
