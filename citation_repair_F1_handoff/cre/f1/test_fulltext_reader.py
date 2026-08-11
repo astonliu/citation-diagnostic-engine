@@ -20,7 +20,7 @@ import pytest
 
 from cre.f1 import f7_entity as f7
 from cre.f1 import fulltext_reader as fr
-from cre.f1.ncbi_meta import EFETCH, ELINK
+from cre.f1.ncbi_meta import EFETCH, ELINK, IDCONV
 
 
 # --------------------------------------------------------------------------
@@ -213,8 +213,18 @@ class _BoomSession:
 
 
 def _elink_ok(pmcid_digits="7654321"):
+    """A healthy ELink self-link response. RETAINED but no longer the resolver's
+    wire format -- resolution moved to the PMC ID Converter on 2026-08-11."""
     return _Resp(payload={"linksets": [{"linksetdbs": [
         {"linkname": "pubmed_pmc", "links": [pmcid_digits]}]}]})
+
+
+def _idconv_ok(pmid="1919", pmcid_digits="7654321"):
+    """A healthy PMC ID Converter response: keyed on the REQUESTED id, with no
+    citing-articles group to mistake for the article's own full text."""
+    return _Resp(payload={"status": "ok", "records": [
+        {"requested-id": str(pmid), "pmid": int(pmid),
+         "pmcid": "PMC" + pmcid_digits}]})
 
 
 @pytest.fixture(autouse=True)
@@ -716,32 +726,44 @@ def test_sec_type_wins_over_a_misleading_heading():
 # The LIVE seams, exercised offline through an injected session
 # --------------------------------------------------------------------------
 def test_live_default_seams_resolve_then_efetch_with_no_injection():
-    session = _RoutedSession({ELINK: _elink_ok("7654321"),
+    session = _RoutedSession({IDCONV: _idconv_ok("1919", "7654321"),
                               EFETCH: _Resp(text=FULL_JATS)})
     out = fr.fetch_fulltext("1919", session=session, api_key="KEY")
     assert out["pmcid"] == "PMC7654321"
 
     urls = [url for url, _ in session.calls]
-    assert urls == [ELINK, EFETCH]
-    elink_params, efetch_params = session.calls[0][1], session.calls[1][1]
-    assert elink_params["dbfrom"] == "pubmed" and elink_params["db"] == "pmc"
+    assert urls == [IDCONV, EFETCH]
+    idconv_params, efetch_params = session.calls[0][1], session.calls[1][1]
+    assert idconv_params["ids"] == "1919" and idconv_params["format"] == "json"
+    assert idconv_params["tool"] and idconv_params["email"]
     assert efetch_params["db"] == "pmc"
     assert efetch_params["id"] == "7654321"          # digits, not "PMC7654321"
     assert efetch_params["api_key"] == "KEY"
     assert efetch_params["tool"] and efetch_params["email"]
 
 
-def test_live_resolver_without_a_self_link_reports_no_pmcid():
-    """ncbi_meta honors only pubmed_pmc; a refs-only linkset is not a PMCID."""
-    session = _RoutedSession({ELINK: _Resp(payload={"linksets": [{"linksetdbs": [
-        {"linkname": "pubmed_pmc_refs", "links": ["999999"]}]}]})})
+def test_live_resolver_that_answers_not_in_pmc_reports_no_pmcid():
+    """The converter's PER-RECORD error is the resolver ANSWERING "no PMC full
+    text" inside a healthy status:"ok" payload -- so it is no_pmcid, not
+    resolver_error. Confusing the two would turn every non-OA article into an
+    outage and nothing would ever route (ZD 2026-08-11 item 2)."""
+    session = _RoutedSession({IDCONV: _Resp(payload={"status": "ok", "records": [
+        {"requested-id": "2020", "pmid": 2020, "status": "error",
+         "errmsg": "Identifier not found in PMC"}]})})
     out = fr.fetch_fulltext("2020", session=session)
     assert out["incomplete_reasons"] == ["no_pmcid"]
-    assert [url for url, _ in session.calls] == [ELINK]
+    assert [url for url, _ in session.calls] == [IDCONV]
+
+
+def test_live_resolver_transport_and_server_failures_report_resolver_error():
+    """The other half of the same boundary: the resolver did not answer at all."""
+    session = _RoutedSession({IDCONV: _Resp(status_code=500, text="")})
+    out = fr.fetch_fulltext("2020", session=session)
+    assert out["incomplete_reasons"] == ["resolver_error"]
 
 
 def test_live_efetch_http_error_is_unparseable_not_a_crash():
-    session = _RoutedSession({ELINK: _elink_ok(),
+    session = _RoutedSession({IDCONV: _idconv_ok("2121"),
                               EFETCH: _Resp(status_code=500, text="")})
     out = fr.fetch_fulltext("2121", session=session)
     assert out["resolved"] is False
@@ -749,7 +771,8 @@ def test_live_efetch_http_error_is_unparseable_not_a_crash():
 
 
 def test_live_omits_api_key_when_absent():
-    session = _RoutedSession({ELINK: _elink_ok(), EFETCH: _Resp(text=FULL_JATS)})
+    session = _RoutedSession({IDCONV: _idconv_ok("2222"),
+                              EFETCH: _Resp(text=FULL_JATS)})
     fr.fetch_fulltext("2222", session=session)
     assert "api_key" not in session.calls[1][1]
 
@@ -827,8 +850,12 @@ def test_a_body_that_only_just_clears_the_floor_is_complete():
 def test_no_results_or_methods_is_no_longer_a_reason_at_all():
     assert not hasattr(fr, "REASON_NO_RESULTS_OR_METHODS")
     assert "no_results_or_methods" not in fr.INCOMPLETE_REASONS
+    # resolver_error added 2026-08-11 (ZD calibration item 2): a resolver that did
+    # not answer is not an article without a PMCID. The pinned set is exhaustive on
+    # purpose -- a new reason nothing documents is a reason nobody reads.
     assert fr.INCOMPLETE_REASONS == {
-        "no_pmcid", "no_body", "body_unparseable", "body_too_small"}
+        "no_pmcid", "resolver_error", "no_body", "body_unparseable",
+        "body_too_small"}
 
 
 @pytest.mark.parametrize("heading", [

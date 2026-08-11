@@ -12,6 +12,23 @@ scaled run that mixes the collector and the band still respects one per-IP
 budget. Every helper returns a safe can't-judge value (``None`` / ``""``) on any
 failure rather than raising, so callers can treat the network as best-effort.
 
+ONE EXCEPTION TO THAT, AND IT IS DELIBERATE (ZD 2026-08-11).
+:func:`ncbi_pmids_to_pmcids` RAISES :class:`ResolverError` instead of swallowing.
+Swallowing collapses "the resolver did not answer" into "this article has no PMC
+full text", and those two are not the same fact about the world. Measured live on
+2026-08-11: ELink ``pubmed_pmc`` answered ``HTTP 200`` with
+``{"header":{...},"linksets":[],"ERROR":"NCBI C++ Exception:\\n Error:
+TXCLIENT(CException::eUnknown) ..."}``. The ``ERROR`` value carries a RAW
+NEWLINE, so the body is not valid JSON, ``r.json()`` raised, the ``except
+ValueError`` below returned ``""``, and ``fulltext_reader`` reported
+``no_pmcid``. ALL 25 distinct cited PMIDs in calibration run 1 came back
+``no_pmcid`` that way -- including three whose PMCIDs were confirmed
+independently through the PMC ID Converter (``30140736`` -> ``PMC6105232``,
+``32382079`` -> ``PMC7206102``, ``26372954`` -> ``PMC4586821``). The run produced
+zero coverage judgments and it READ AS AN OA-SUBSET CEILING. An outage must never
+again be readable as an absence of full text, so the failure propagates and the
+caller names it (``fulltext_reader.REASON_RESOLVER_ERROR``).
+
 Some sandboxes cannot reach NCBI: build/unit-test offline with these helpers
 monkeypatched on the *consumer* module's namespace (the consumer imports them as
 module globals), run live in Colab with ``NCBI_API_KEY`` in Secrets.
@@ -29,12 +46,31 @@ from .ratelimit import NCBI, request_with_retry
 from .lookup import EFETCH   # reuse the EFetch endpoint constant
 
 # ELink lives on the same eutils host, so it shares the NCBI per-IP budget and
-# the shared limiter. (The PMC idconv API would be an acceptable alternative but
-# adds a second host to throttle.)
+# the shared limiter. RETAINED for reference and for any caller that still wants
+# the link graph; it is NO LONGER the PMID -> PMCID resolver (see IDCONV).
 ELINK = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi"
+
+#: The PMC ID Converter -- the PMID -> PMCID resolver as of 2026-08-11. A second
+#: host to throttle, which is why ELink was chosen first; the shared limiter is
+#: still applied to it, so the per-IP budget is if anything over-respected.
+IDCONV = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
+
+#: Ids per converter request. The API's documented ceiling. Batching is why COST
+#: MUST BE ESTIMATED ON REQUEST COUNT, NOT PMID COUNT: 200 PMIDs is one request,
+#: and 201 is two. :func:`idconv_request_count` is that estimate.
+IDCONV_BATCH_MAX = 200
 
 TOOL = "cre-ncbi-meta"
 DEFAULT_EMAIL = "aston.hliu@gmail.com"
+
+
+class ResolverError(RuntimeError):
+    """The PMID -> PMCID resolver did not answer.
+
+    Transport failure, non-200, an unparseable body, or a payload whose top-level
+    ``status`` is neither absent nor ``"ok"``. Raised rather than swallowed so a
+    caller can distinguish it from the resolver ANSWERING that an article has no
+    PMC full text -- see the module docstring for what conflating the two cost."""
 
 # Review-family PubMed publication types (lowercased for compare).
 REVIEW_PUBTYPES = {
@@ -42,9 +78,15 @@ REVIEW_PUBTYPES = {
     "narrative review", "review literature as topic",
 }
 
-# The canonical "this PMID's own PMC full text" link. NOT pubmed_pmc_refs
+# ELink's canonical "this PMID's own PMC full text" linkname. NOT pubmed_pmc_refs
 # (PMC articles that CITE this PMID) nor pubmed_pmc_citedin -- those resolve to
 # unrelated papers and would pre-stage a wrong reference list for the human.
+#
+# NO LONGER USED: resolution moved to the ID Converter, which is keyed on the
+# requested id and has no citing-articles group, so there is no linkname to
+# check. Kept as the record of WHY the old code looked the way it did -- see
+# ncbi_pmids_to_pmcids -- so the guard is not reintroduced as a mystery, and so
+# anyone who reaches for ELINK again knows what it costs.
 _PMC_SELF_LINKNAME = "pubmed_pmc"
 
 
@@ -86,39 +128,108 @@ def is_review(pubtypes: "list[str] | None") -> "bool | None":
     return any(pt.lower() in REVIEW_PUBTYPES for pt in pubtypes)
 
 
+def idconv_request_count(n_ids: int) -> int:
+    """HTTP requests :func:`ncbi_pmids_to_pmcids` will spend on ``n_ids`` PMIDs.
+
+    The cost estimate for a scaled run. NCBI meters REQUESTS, so estimating on
+    PMID count over-states a batched resolve by up to 200x and would size a run's
+    budget against a number that is not what gets metered."""
+    n = max(0, int(n_ids))
+    return -(-n // IDCONV_BATCH_MAX)          # ceil, without importing math
+
+
+def ncbi_pmids_to_pmcids(pmids, api_key: str = "", email: str = "",
+                         session=None) -> "dict[str, str]":
+    """Resolve many PMIDs to their OWN PMCIDs via the PMC ID Converter.
+
+    Returns ``{pmid: "PMC"+digits}``, with ``""`` for a PMID the converter
+    ANSWERED has no PMC full text. Batches at :data:`IDCONV_BATCH_MAX` ids per
+    request; :func:`idconv_request_count` is the cost.
+
+    RAISES :class:`ResolverError` -- it does not swallow -- on a transport
+    failure, a non-200 (what ``raise_for_status`` would have raised), a body that
+    is not JSON, or a payload whose TOP-LEVEL ``status`` is neither absent nor
+    ``"ok"``. ``fulltext_reader.fetch_fulltext`` turns that into
+    ``resolver_error``, which is a different fact from ``no_pmcid``.
+
+    TOP-LEVEL vs PER-RECORD ``status``, and the distinction is load-bearing. A
+    PMID with no PMC full text comes back inside a perfectly healthy ``status:
+    "ok"`` payload as a per-record ``{"status": "error", "errmsg": "Identifier not
+    found in PMC"}``. That is the resolver ANSWERING, so it maps to ``""``.
+    Treating a per-record error as a ResolverError would turn every non-OA article
+    into a resolver outage and nothing would ever route.
+
+    THE ``pubmed_pmc_refs`` HAZARD DOES NOT EXIST HERE, and that is worth stating
+    so the guard is not reintroduced as a mystery. ELink returns the citing
+    articles (``pubmed_pmc_refs``) alongside the article's own full text
+    (``pubmed_pmc``) in one response, so taking the "first link" without checking
+    the linkname yields a completely unrelated paper -- which is what
+    :data:`_PMC_SELF_LINKNAME` existed to prevent. The converter is keyed on the
+    REQUESTED ID and returns that article's own PMCID; there is no citing-articles
+    group to confuse it with, so there is no linkname to check."""
+    wanted = [str(p).strip() for p in (pmids or []) if str(p).strip()]
+    out: dict = {p: "" for p in wanted}
+    for start in range(0, len(wanted), IDCONV_BATCH_MAX):
+        batch = wanted[start:start + IDCONV_BATCH_MAX]
+        params = _ncbi_params({"ids": ",".join(batch), "format": "json"},
+                              api_key, email)
+        try:
+            r = request_with_retry(session, IDCONV, params, limiter=NCBI,
+                                   timeout=30)
+        except requests.RequestException as exc:
+            raise ResolverError(f"id converter transport failure: {exc}") from exc
+        if r is None or r.status_code != 200:
+            code = "no response" if r is None else r.status_code
+            raise ResolverError(f"id converter returned {code}")
+        try:
+            data = r.json()
+        except ValueError as exc:
+            # The exact shape of the 2026-08-11 ELink outage: HTTP 200, body not
+            # JSON. Silence here is what made an outage look like an absence.
+            raise ResolverError(f"id converter body is not JSON: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ResolverError(
+                f"id converter payload is not an object: {type(data).__name__}")
+        status = data.get("status")
+        if status is not None and status != "ok":
+            raise ResolverError(f"id converter reported status {status!r}")
+        for record in data.get("records") or []:
+            if not isinstance(record, dict):
+                continue
+            requested = str(record.get("requested-id")
+                            or record.get("pmid") or "").strip()
+            if requested not in out:
+                continue
+            # A per-record error is the resolver ANSWERING "not in PMC".
+            if record.get("status") == "error":
+                continue
+            digits = re.sub(r"\D", "", str(record.get("pmcid") or ""))
+            if digits:
+                out[requested] = "PMC" + digits
+    return out
+
+
 def ncbi_pmid_to_pmcid(pmid: str, api_key: str = "", email: str = "",
                        session=None) -> str:
-    """Resolve a PMID to the PMCID of its OWN PMC full text via ELink
-    (pubmed -> pmc). Returns ``"PMC"+id`` of the ``pubmed_pmc`` self-link, else
-    ``""`` (no PMC full text for this article, or any failure).
+    """Resolve ONE PMID to the PMCID of its own PMC full text. ``""`` when the
+    article has no PMC full text, AND ``""`` on any failure.
 
-    Only the ``pubmed_pmc`` linkname is honored: ELink also returns
-    ``pubmed_pmc_refs`` (articles that cite this PMID), and grabbing the "first
-    link" from that group -- as e.g. PMID 111, which has no self-link -- yields a
-    completely unrelated citing paper. That would mislead the human adjudicator,
-    so a PMID with no self-link resolves to ``""`` (honestly: not OA-reachable)."""
+    Routes through :func:`ncbi_pmids_to_pmcids` but keeps its own
+    swallow-everything contract, because its existing caller
+    (``f3_candidate_collect``) documents "returns a safe can't-judge value on any
+    failure" and has no exception handling of its own -- a raise here would abort
+    a collector run. Only ``fulltext_reader``'s resolver seam propagates, because
+    only ``fetch_fulltext`` has a reason vocabulary to record the difference in.
+
+    So this function CANNOT distinguish an outage from an absence, and a caller
+    that needs to must use the batch helper directly."""
     if not pmid:
         return ""
-    params = _ncbi_params({"dbfrom": "pubmed", "db": "pmc", "id": str(pmid),
-                           "retmode": "json"}, api_key, email)
     try:
-        r = request_with_retry(session, ELINK, params, limiter=NCBI, timeout=20)
-    except requests.RequestException:
+        return ncbi_pmids_to_pmcids([pmid], api_key, email,
+                                    session=session).get(str(pmid).strip(), "")
+    except (ResolverError, requests.RequestException):
         return ""
-    if r is None or r.status_code != 200:
-        return ""
-    try:
-        data = r.json()
-    except ValueError:
-        return ""
-    for linkset in data.get("linksets", []) or []:
-        for ldb in linkset.get("linksetdbs", []) or []:
-            if ldb.get("linkname") != _PMC_SELF_LINKNAME:
-                continue
-            links = ldb.get("links") or []
-            if links:
-                return "PMC" + str(links[0])
-    return ""
 
 
 def ncbi_pmc_reflist(pmcid: str, api_key: str = "", email: str = "",

@@ -151,13 +151,45 @@ def aggregate_fulltext_coverage(
 
 
 def fulltext_judge_dict(verdict: bp.CoverageVerdict, retrieval_complete) -> dict:
-    """:func:`tristate_judge_dict`'s full-text twin: same dict shape, same raw
-    fields for the coverage_distribution tally, ``established`` re-derived through
-    :func:`aggregate_fulltext_coverage` instead of the abstract-scoped table."""
+    """:func:`tristate_judge_dict`'s full-text twin for a FIVE-KEY
+    ``bp.CoverageVerdict``: same dict shape, same raw fields for the
+    coverage_distribution tally, ``established`` re-derived through
+    :func:`aggregate_fulltext_coverage` instead of the abstract-scoped table.
+
+    SUPERSEDED ON THE LIVE v3 PATH by :func:`fulltext_judge_dict_v3`, which
+    carries the split span fields (ZD 2026-08-11 item 6). Kept because the
+    aggregation it wraps is version-agnostic and this remains the correct adapter
+    for a five-key verdict."""
     return {
         "established": aggregate_fulltext_coverage(verdict, retrieval_complete),
         "rationale": verdict.rationale,
         "evidence_span": verdict.evidence_span,
+        "engages_subject": verdict.engages_subject,
+        "contradicts": verdict.contradicts,
+        "unconfirmed_specifics": list(verdict.unconfirmed_specifics),
+    }
+
+
+def fulltext_judge_dict_v3(verdict, retrieval_complete) -> dict:
+    """:func:`fulltext_judge_dict` for a SIX-KEY ``CoverageVerdictV3``.
+
+    ``verdict`` is duck-typed rather than annotated, to avoid importing
+    ``coverage_prompts_v3`` -- which imports this module -- back into it.
+
+    The one shape difference: ``evidence_span`` is GONE, replaced by
+    ``evidence_span_label`` + ``evidence_span_text``. Gone rather than kept
+    alongside, because item 6's requirement is that a label/text mismatch be
+    STRUCTURALLY IMPOSSIBLE, and a composed ``"label: text"`` string riding along
+    would keep that mismatch representable -- and would keep every downstream
+    reader on the ambiguous field. Consumers of the v3 path read the two fields.
+
+    ``aggregate_fulltext_coverage`` is reused UNCHANGED: the DEC-032 truth table
+    reads only the three structured fields, so the span split does not touch it."""
+    return {
+        "established": aggregate_fulltext_coverage(verdict, retrieval_complete),
+        "rationale": verdict.rationale,
+        "evidence_span_label": verdict.evidence_span_label,
+        "evidence_span_text": verdict.evidence_span_text,
         "engages_subject": verdict.engages_subject,
         "contradicts": verdict.contradicts,
         "unconfirmed_specifics": list(verdict.unconfirmed_specifics),
@@ -169,11 +201,15 @@ def no_usable_fulltext_dict() -> dict:
 
     Mirrors :func:`_no_usable_abstract_dict` exactly, including carrying no
     structured fields so ``coverage_bucket`` leaves it out of the tally: an
-    unretrieved body is not a coverage judgment and must not be counted as one."""
+    unretrieved body is not a coverage judgment and must not be counted as one.
+
+    Carries the SPLIT span fields, because this dict only ever appears on the v3
+    path and one record shape per path is what makes the path readable."""
     return {
         "established": None,
         "rationale": "no usable full text (retrieval incomplete; deterministic gate)",
-        "evidence_span": "",
+        "evidence_span_label": "",
+        "evidence_span_text": "",
         "engages_subject": None,
         "contradicts": None,
         "unconfirmed_specifics": [],

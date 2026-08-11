@@ -52,9 +52,24 @@ only when ALL hold:
   * no parse error was swallowed -- a ``ParseError`` (including the DOCTYPE-level
     "undefined entity" that JATS's external DTD provokes) yields NO sections and
     ``body_unparseable``, never a silently truncated section list.
-Anything else is False with a named reason (``no_pmcid``, ``no_body``,
-``body_unparseable``, ``body_too_small``). When in doubt, False: DEC-032 makes
-False the safe direction, because it HOLDS an item instead of flagging it.
+Anything else is False with a named reason (``no_pmcid``, ``resolver_error``,
+``no_body``, ``body_unparseable``, ``body_too_small``). When in doubt, False:
+DEC-032 makes False the safe direction, because it HOLDS an item instead of
+flagging it.
+
+``no_pmcid`` vs ``resolver_error`` -- THE ONE DISTINCTION THAT CORRUPTED A NUMBER.
+``no_pmcid`` means the resolver ANSWERED and this article has no PMC full text.
+``resolver_error`` means the resolver did not answer: transport failure, non-200,
+a body that is not JSON, or a payload whose status is not ``"ok"``. Both hold
+under DEC-032 -- an incomplete retrieval holds rather than flags, and that did not
+change -- but they are not the same fact and must never share a label. Measured
+2026-08-11: an ELink server-side fault returned HTTP 200 with a raw newline inside
+its ``ERROR`` value, every ``r.json()`` raised, and ALL 25 distinct cited PMIDs in
+calibration run 1 came back ``no_pmcid``. Three of them had PMCIDs
+(``30140736`` -> ``PMC6105232``, ``32382079`` -> ``PMC7206102``, ``26372954`` ->
+``PMC4586821``). The run produced zero coverage judgments and the outage was
+indistinguishable from an OA-subset ceiling. This label is what makes it
+distinguishable.
 
 An earlier rule also required a ``results`` or ``methods`` section. That made
 completeness STRUCTURALLY UNREACHABLE for every non-IMRAD paper -- reviews and
@@ -86,8 +101,10 @@ through its children). No sentinel strings, ever.
 CACHE. One JSON file per PMID under ``cache_dir``, read before any HTTP request
 and written ONLY when ``resolved`` is True. ``no_body`` and ``body_too_small``
 are cached: they are stable properties of the fetched document, not transient
-failures. ``no_pmcid`` and ``body_unparseable`` are NOT cached, so a later run
-can succeed. A cache entry that is corrupt, malformed, missing a required key,
+failures. ``no_pmcid``, ``resolver_error`` and ``body_unparseable`` are NOT
+cached, so a later run can succeed -- and ``resolver_error`` least of all, since
+caching an outage would serve it back as a settled fact about the article on every
+later run. A cache entry that is corrupt, malformed, missing a required key,
 or whose section hashes no longer match its text is ignored and refetched -- F7
 checks ``content_sha256`` at construction, so a cache that violates the
 invariant must never be handed to it. Requiring ``sections_present`` is what
@@ -103,8 +120,15 @@ preserved verbatim, since a blanket ASCII fold would silently narrow the corpus
 
 SEAMS. ``resolve_pmcid`` and ``fetch_xml`` are injected callables; this module
 supplies live defaults built on the shared NCBI limiter (``ratelimit.NCBI``, one
-per-IP budget across every caller) and ``ncbi_meta``'s ELink self-link rule. Both
-are injected in tests, so the whole module is exercised offline with no network.
+per-IP budget across every caller) and ``ncbi_meta``'s PMC ID Converter. Both are
+injected in tests, so the whole module is exercised offline with no network.
+
+The resolver seam is the one place in this module that lets an exception THROUGH
+rather than mapping it to a value: a ``ResolverError`` (or a bare
+``RequestException``) out of ``resolve_pmcid`` becomes ``resolver_error``, and an
+empty return becomes ``no_pmcid``. An injected resolver that swallows its own
+failures and returns ``""`` will therefore be reported as ``no_pmcid`` -- it has
+told us nothing else -- so a resolver that wants the distinction must raise.
 """
 from __future__ import annotations
 
@@ -117,8 +141,8 @@ from typing import Callable, Optional
 
 import requests
 
-from .ncbi_meta import (DEFAULT_EMAIL, EFETCH, NCBI, TOOL, ncbi_pmid_to_pmcid,
-                        request_with_retry)
+from .ncbi_meta import (DEFAULT_EMAIL, EFETCH, NCBI, TOOL, ResolverError,
+                        ncbi_pmids_to_pmcids, request_with_retry)
 
 # ==========================================================================
 # 1. Vocabulary -- labels, reasons, sources
@@ -144,14 +168,21 @@ SECTION_LABELS = frozenset({
 #: and letters are being held. Tests that are not about the floor override it.
 NONTRIVIAL_BODY_CHARS = 1000
 
+#: The resolver ANSWERED, and this article has no PMC full text. That is the only
+#: thing it means. See REASON_RESOLVER_ERROR for what used to be folded in here.
 REASON_NO_PMCID = "no_pmcid"
 REASON_NO_BODY = "no_body"
 REASON_BODY_UNPARSEABLE = "body_unparseable"
 REASON_BODY_TOO_SMALL = "body_too_small"
+#: The resolver did not answer at all -- transport failure, non-200, unparseable
+#: body, or a bad payload status. A DIFFERENT FACT from ``no_pmcid``: one is about
+#: the article, the other is about the wire. Conflating them cost calibration run
+#: 1 its entire coverage yield and read as an OA-subset ceiling (ZD 2026-08-11).
+REASON_RESOLVER_ERROR = "resolver_error"
 
 INCOMPLETE_REASONS = frozenset({
     REASON_NO_PMCID, REASON_NO_BODY, REASON_BODY_UNPARSEABLE,
-    REASON_BODY_TOO_SMALL,
+    REASON_BODY_TOO_SMALL, REASON_RESOLVER_ERROR,
 })
 
 SOURCE_CACHE = "cache"
@@ -681,14 +712,21 @@ def _write_cache(cache_dir: str, pmid: str, result: dict) -> None:
 # 8. Live seams
 # ==========================================================================
 def _live_resolve_pmcid(pmid: str, api_key: str, email: str, session) -> str:
-    """ELink pubmed -> pmc, via ncbi_meta's self-link rule (``pubmed_pmc``).
+    """PMID -> PMCID via the PMC ID Converter (``ncbi_meta.ncbi_pmids_to_pmcids``).
 
-    Reusing that helper is deliberate: it is the one place that refuses
-    ``pubmed_pmc_refs``, whose "first link" is an unrelated citing paper."""
+    PROPAGATES ``ResolverError`` rather than returning ``""``. It deliberately
+    does NOT go through ``ncbi_meta.ncbi_pmid_to_pmcid``, whose contract is to
+    swallow: swallowing here is exactly the defect: it makes an outage
+    indistinguishable from "this article has no PMC full text", and
+    :func:`fetch_fulltext` is the one caller that can record the difference.
+
+    A bare ``RequestException`` is normalized to ``ResolverError`` so the seam has
+    ONE failure type to propagate, whatever an injected session raises."""
     try:
-        return ncbi_pmid_to_pmcid(pmid, api_key, email, session=session) or ""
-    except requests.RequestException:
-        return ""
+        return ncbi_pmids_to_pmcids(
+            [pmid], api_key, email, session=session).get(str(pmid).strip(), "")
+    except requests.RequestException as exc:
+        raise ResolverError(f"resolver transport failure: {exc}") from exc
 
 
 def _live_fetch_xml(pmcid: str, api_key: str, email: str,
@@ -738,10 +776,16 @@ def fetch_fulltext(pmid, *, api_key: str = "", email: str = DEFAULT_EMAIL,
 
     sanitized: list = []
 
+    # A resolver that FAILED and a resolver that ANSWERED "no PMC full text" are
+    # two different facts, and they used to share the no_pmcid label -- which is
+    # how an ELink outage read as an OA-subset ceiling across all 25 cited PMIDs
+    # of calibration run 1. Neither result is cached (both return before any
+    # _write_cache below), so a later run can still succeed.
     try:
         raw_pmcid = resolver(pmid)
-    except requests.RequestException:
-        raw_pmcid = ""
+    except (ResolverError, requests.RequestException):
+        return _finalize(pmid, None, False, [], [REASON_RESOLVER_ERROR],
+                         sanitized, SOURCE_LIVE)
     digits = re.sub(r"\D", "", str(raw_pmcid or ""))
     if not digits:
         return _finalize(pmid, None, False, [], [REASON_NO_PMCID],

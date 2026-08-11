@@ -15,6 +15,17 @@ SCOPED COVERAGE GATE, and routes on the three findings an abstract can support:
   * an abstract is silent on a claim, leaves a specificity
     unconfirmed, or could not be judged                    -> ``HELD_LOW_CONFIDENCE``
 
+A fourth, NON-coverage route exists for the case where the gate never ran:
+
+  * the extractor returned no atomic claims at all          -> ``NO_CLAIMS``
+
+``NO_CLAIMS`` is EXCLUDED FROM THE SCOREABLE DENOMINATOR and counted separately
+(its own manifest counter, added only when it fires). It is a structural
+non-judgment, the same kind of thing as ``excluded_no_citance``: nothing was
+judged, so the reference can be neither a numerator nor a denominator member of a
+coverage or precision figure. It is emphatically NOT folded into FULL_COVERAGE,
+which is where the vacuous ``all([])`` used to put it.
+
 ``F6_FLAGGED`` AT THIS STAGE MEANS THE CITED ABSTRACT CONTRADICTS THE CLAIM --
 not that the cited paper fails to support it (ZD 2026-07-27). A coverage gap in
 the taxonomy sense cannot be established from an abstract alone: a claim genuinely
@@ -76,7 +87,9 @@ from .band_prompts import (
 # substrate for the same reason coverage_aggregate does: band_prompts.py cannot
 # be edited without drifting its pinned blob OID.
 from .coverage_aggregate import no_usable_fulltext_dict
-from .coverage_prompts_v3 import COVERAGE_PROMPT_VERSION_V3
+from .coverage_prompts_v3 import (
+    COVERAGE_PROMPT_VERSION_V3,
+    RESPONSE_PARSER_VERSION as RESPONSE_PARSER_VERSION_V3)
 
 # Label space for the F3 slice of the band (the annotator's terminal choices).
 # Coverage-gap -> F6, misattribution -> F3, otherwise ACCURATE.
@@ -86,6 +99,16 @@ LABEL_SPACE_F3 = ["F6", "F3", "ACCURATE"]
 ROUTE_F6_FLAGGED = "F6_FLAGGED"
 ROUTE_FULL_COVERAGE = "FULL_COVERAGE"
 ROUTE_HELD = "HELD_LOW_CONFIDENCE"
+# The extractor returned NO atomic claims for this reference, so there is nothing
+# to judge and no verdict of any kind. Its own terminal route because the vacuous
+# case is NOT a coverage outcome: `all()` over an empty list returns True, so
+# before this route existed a claim-less reference fell out of the FULL_COVERAGE
+# branch -- a false clear entering the F3 discriminator that no downstream counter
+# could tell from a real one. Measured live (calibration runs 1 and 2, 2026-08-11):
+# run 1 reported FULL_COVERAGE 3 with all four coverage counters at 0, and run 2
+# reported FULL_COVERAGE 6 against 6 complete retrievals and 8 non-HELD routes.
+# Both reconcile on exactly 3 claim-less items.
+ROUTE_NO_CLAIMS = "NO_CLAIMS"
 # Malformed model output: the injected extractor / coverage judge raised while
 # parsing a reply (strict-schema failure). The reference is quarantined to a
 # durable row-level record instead of aborting the whole run_band batch.
@@ -237,7 +260,8 @@ def _tristate(value) -> "bool | None":
 
 def coverage_verdicts(claims: list, evidence: dict, *,
                       judge: CoverageJudge,
-                      prompt_version: str = COVERAGE_PROMPT_VERSION) -> list:
+                      prompt_version: str = COVERAGE_PROMPT_VERSION,
+                      parser_version: str = "") -> list:
     """Per-claim coverage verdict from the injected ``judge``.
 
     ``established`` is abstract-scoped and tri-state: True means the abstract
@@ -251,7 +275,17 @@ def coverage_verdicts(claims: list, evidence: dict, *,
     The raw structured fields (``engages_subject``, ``contradicts``,
     ``unconfirmed_specifics``) ride alongside so run_band can tally the coverage
     distribution; they default to None/[] on a judge (e.g. the no-usable-abstract
-    path) that does not supply them. Item-record fields only -- never blind."""
+    path) that does not supply them. Item-record fields only -- never blind.
+
+    THE SPAN SHAPE FOLLOWS ``parser_version`` (ZD 2026-08-11 item 6). Empty --
+    the default -- means the frozen five-key contract: one ``evidence_span``
+    string, and no ``response_parser_version`` key, so a default run's records are
+    byte-identical to what they were. Non-empty means the six-key contract: the
+    split ``evidence_span_label`` / ``evidence_span_text``, and the parser version
+    stamped on EVERY verdict of that path -- including the deterministic holds,
+    which never went through a parser. That stamp names the REPLY CONTRACT the row
+    was produced under, not a claim that a reply was parsed; without it on every
+    row, a mixed file could not be read at all."""
     if not claims:
         return []
     raw = judge(claims, evidence) or []
@@ -259,11 +293,17 @@ def coverage_verdicts(claims: list, evidence: dict, *,
     for i, claim in enumerate(claims):
         v = raw[i] if i < len(raw) else None
         v = v if isinstance(v, dict) else {}
-        out.append({
+        record = {
             "claim": claim,
             "established": _tristate(v.get("established")),
             "rationale": v.get("rationale", ""),
-            "evidence_span": v.get("evidence_span", ""),
+        }
+        if parser_version:
+            record["evidence_span_label"] = v.get("evidence_span_label", "")
+            record["evidence_span_text"] = v.get("evidence_span_text", "")
+        else:
+            record["evidence_span"] = v.get("evidence_span", "")
+        record.update({
             "engages_subject": v.get("engages_subject"),
             "contradicts": v.get("contradicts"),
             "unconfirmed_specifics": v.get("unconfirmed_specifics", []),
@@ -271,6 +311,9 @@ def coverage_verdicts(claims: list, evidence: dict, *,
             # exactly what it stamped before; the full-text path passes v3.
             "prompt_version": prompt_version,
         })
+        if parser_version:
+            record["response_parser_version"] = parser_version
+        out.append(record)
     return out
 
 
@@ -279,10 +322,19 @@ def route(verdicts: list) -> str:
 
     Tri-state discipline: decided with ``is False`` / ``is True``, never a falsy
     check (``None`` is unknown, not a gap).
-      * any ``established is False`` -> ``F6_FLAGGED``
-      * all ``established is True``  -> ``FULL_COVERAGE`` (vacuously true when
-                                        there are no claims)
-      * otherwise (some None, no False) -> ``HELD_LOW_CONFIDENCE``"""
+      * NO verdicts at all             -> ``NO_CLAIMS`` (checked FIRST)
+      * any ``established is False``   -> ``F6_FLAGGED``
+      * all ``established is True``    -> ``FULL_COVERAGE``
+      * otherwise (some None, no False) -> ``HELD_LOW_CONFIDENCE``
+
+    The empty case is checked first and terminates, because both branches below
+    it answer it wrongly: ``all()`` over an empty list is vacuously True, so an
+    empty list used to route FULL_COVERAGE -- "every claim is established" said
+    of no claims. FULL_COVERAGE is the stage that feeds the F3 discriminator, and
+    a claim-less reference entering it is a false clear. Only the VACUOUS case
+    moved; routing for non-empty lists is unchanged."""
+    if not verdicts:
+        return ROUTE_NO_CLAIMS
     established = [v.get("established") for v in verdicts]
     if any(e is False for e in established):
         return ROUTE_F6_FLAGGED
@@ -295,7 +347,8 @@ def _proposed_verdict(route_value: str) -> "str | None":
     """The system's terminal-label GUESS for disagreement analysis (item record
     only, never the annotation payload). Only a refuted claim yields a concrete
     guess (F6); FULL_COVERAGE is staged for the F3 discriminator (undecided
-    here) and HELD carries no guess."""
+    here), HELD carries no guess, and NO_CLAIMS carries none either -- nothing was
+    judged, so there is nothing to guess from."""
     return "F6" if route_value == ROUTE_F6_FLAGGED else None
 
 
@@ -614,7 +667,9 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
              fetch_reflist: "FetchReflist | None" = None,
              fetch_fulltext=None, coverage_judge_v3: "CoverageJudge | None" = None,
              max_docs: "int | None" = None, email: str = DEFAULT_EMAIL,
-             api_key: str = "", session=None) -> dict:
+             api_key: str = "", session=None,
+             model: str = "", assistant_prefill: str = "",
+             stop_sequences: tuple = ()) -> dict:
     """Run the judgment-band front-end over a directory of PMC-OA citing papers.
 
     Pipeline per doc: parse -> build items -> extract claims -> assemble
@@ -654,7 +709,18 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
     Supplying neither leaves every byte of this function's output unchanged --
     that is the point of the opt-in, and it holds until calibration (DEC-040)
     says v3 is ready to freeze. Supplying only one is a configuration error and
-    raises, rather than half-enabling a scope change."""
+    raises, rather than half-enabling a scope change.
+
+    MODEL IDENTITY (``model`` / ``assistant_prefill`` / ``stop_sequences``).
+    Every coverage number is conditional on the adapter that produced it -- the
+    same class of omission as DEC-020's missing ``temperature`` / ``top_p`` -- so
+    these three ride verbatim into ``manifest["params"]``. They are RECORDED, not
+    used: the band makes no model call itself (every one goes through an injected
+    callable), so it cannot observe them and must be told. An unsupplied value is
+    recorded as ABSENT rather than guessed: a defaulted model name would be a
+    fabricated provenance record, and a defaulted key would also change the
+    manifest bytes of every default run. The notebook passes them; the band never
+    infers them."""
     if (fetch_fulltext is None) != (coverage_judge_v3 is None):
         raise ValueError(
             "the full-text path needs BOTH fetch_fulltext and coverage_judge_v3; "
@@ -842,7 +908,8 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                         item["coverage_verdicts"] = coverage_verdicts(
                             item["atomic_claims"], item["evidence"],
                             judge=coverage_judge_v3,
-                            prompt_version=COVERAGE_PROMPT_VERSION_V3)
+                            prompt_version=COVERAGE_PROMPT_VERSION_V3,
+                            parser_version=RESPONSE_PARSER_VERSION_V3)
                     else:
                         # Mirrors the no-usable-abstract gate: deterministic HELD,
                         # no model call of EITHER version. Reached by an
@@ -858,7 +925,8 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                             item["atomic_claims"], item["evidence"],
                             judge=lambda claims, _evidence: [
                                 no_usable_fulltext_dict() for _ in claims],
-                            prompt_version=COVERAGE_PROMPT_VERSION_V3)
+                            prompt_version=COVERAGE_PROMPT_VERSION_V3,
+                            parser_version=RESPONSE_PARSER_VERSION_V3)
                     # Strict schema validation passes text that JSONL cannot
                     # encode (a lone surrogate parses as a perfectly good string).
                     # Check BOTH durable artifacts here, inside the guard, so the
@@ -909,7 +977,15 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                 r = route(item["coverage_verdicts"])
                 item["proposed_route"] = r
                 item["proposed_verdict"] = _proposed_verdict(r)
-                counts[r] += 1
+                # ``.get`` rather than a pre-seeded key, for ROUTE_NO_CLAIMS
+                # alone: seeding it unconditionally would add a zero-valued key to
+                # the manifest of EVERY default run, and byte-identity of the
+                # default path is the opt-in guarantee
+                # (test_default_path_manifest_counter_set_is_unchanged pins the
+                # exact key set). So the counter appears exactly when a claim-less
+                # reference actually occurs -- absent means it never fired, never
+                # "unknown". The four routes above are pre-seeded and unaffected.
+                counts[r] = counts.get(r, 0) + 1
 
                 # Per-atomic-claim coverage tally (calibration): the abstract-
                 # scoped distribution the tri-state gate produces. Verdicts on
@@ -972,6 +1048,14 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
             **({"fetch_fulltext_wired": True,
                 "band_mode": BAND_MODE_FULLTEXT,
                 "evidence_scope": "fulltext_sections"} if fulltext_path else {}),
+            # Adapter identity, verbatim. Absent when not supplied -- see the
+            # MODEL IDENTITY paragraph above: absent is a truthful record, a
+            # default would be a fabricated one.
+            **({"model": model} if model else {}),
+            **({"assistant_prefill": assistant_prefill}
+               if assistant_prefill else {}),
+            **({"stop_sequences": list(stop_sequences)}
+               if stop_sequences else {}),
         },
         "counts": counts,
         "coverage_distribution": {

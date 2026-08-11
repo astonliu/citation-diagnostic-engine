@@ -414,7 +414,11 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
     rec["ts"] = int(time.time())
 
     if not claims:
-        rec["route"] = jb.route(verdicts)          # FULL_COVERAGE (vacuous) upstream
+        # NO_CLAIMS since 2026-08-11 (ZD calibration item 1). This branch always
+        # had the case right -- DISP_HELD_NO_CLAIMS below -- while jb.route
+        # returned FULL_COVERAGE from a vacuous all([]) and disagreed with it on
+        # the same record. The two ends now agree.
+        rec["route"] = jb.route(verdicts)
         rec["disposition"] = DISP_HELD_NO_CLAIMS
         rec["hold_reasons"] = ["no atomic claims"]
         return rec

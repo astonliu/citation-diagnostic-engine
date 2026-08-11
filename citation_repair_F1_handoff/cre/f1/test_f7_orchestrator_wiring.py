@@ -137,9 +137,15 @@ _LEGACY_GOLDEN = [
     ("legacy_insufficient", dict(extractor=extractor_of("Drug X reduces outcome Y"),
                                  coverage_judge=judge_established(None)),
      jr.DISP_HELD_INSUFFICIENT, None, "HELD_LOW_CONFIDENCE", []),
+    # ROUTE DELIBERATELY REPINNED, 2026-08-11 (ZD calibration item 1): this row's
+    # golden route was "FULL_COVERAGE" -- the vacuous all([]) -- and that was the
+    # defect, not the contract. Note what did NOT move: the disposition was
+    # ALREADY DISP_HELD_NO_CLAIMS and the label was already None, so the engine
+    # downstream had the case right all along while the route lied about it. The
+    # repin is the two ends agreeing, not a behavior change here.
     ("legacy_no_claims", dict(extractor=extractor_of(),
                               coverage_judge=judge_established()),
-     jr.DISP_HELD_NO_CLAIMS, None, "FULL_COVERAGE", []),
+     jr.DISP_HELD_NO_CLAIMS, None, "NO_CLAIMS", []),
     ("wired_pending_f5_f7", dict(extractor=extractor_of("Drug X reduces outcome Y"),
                                  coverage_judge=judge_established(True),
                                  discriminator_call_llm=disc_llm(f4=f4_json(),

@@ -230,13 +230,24 @@ def test_run_band_empty_and_unparseable_dirs_write_consistent_empty_outputs(
     assert _records(out_bad / "judgment_band_checkpoint.jsonl")[0]["pmcid"] == "PMCbad"
 
 
-def test_zero_claim_item_routes_full_coverage_and_queue_is_blind(tmp_path, monkeypatch):
+def test_zero_claim_item_routes_no_claims_and_queue_is_blind(tmp_path, monkeypatch):
+    """REPINNED 2026-08-11 (ZD calibration item 1). This test used to assert
+    FULL_COVERAGE for a claim-less reference and thereby pinned the defect as the
+    contract: ``all()`` over an empty list is vacuously True, so a reference with
+    no atomic claims entered the stage that feeds the F3 discriminator as a false
+    clear. It is now its own terminal route, counted separately and EXCLUDED from
+    the scoreable denominator.
+
+    What did NOT change: no model call is made (the judge would fail the test if
+    called), items_built still counts the reference, and the queued payload is
+    still blind with an empty claim list."""
     _patch_pubtypes(monkeypatch)
     out = tmp_path / "out"
     man = jb.run_band(_write_xml(tmp_path), str(out), extractor=lambda _: [],
                       coverage_judge=lambda *_: pytest.fail("no claims to judge"),
                       fetch_abstract=lambda _: "abstract", session=object())
-    assert man["counts"][jb.ROUTE_FULL_COVERAGE] == man["counts"]["items_built"] == 1
+    assert man["counts"][jb.ROUTE_NO_CLAIMS] == man["counts"]["items_built"] == 1
+    assert man["counts"][jb.ROUTE_FULL_COVERAGE] == 0
     assert _records(out / "judgment_band_annotation_queue.jsonl")[0]["atomic_claims"] == []
 
 
@@ -529,14 +540,31 @@ def test_abstract_equal_to_citing_claim_remains_ordinary_usable_evidence():
     assert prompts[0].count(text) == 2
 
 
-@pytest.mark.xfail(strict=True, reason="zero claims route by vacuous all()")
+@pytest.mark.xfail(
+    strict=True,
+    reason="a NO_CLAIMS item is still queued with nothing to annotate")
 def test_zero_claim_item_is_held_out_of_annotation_queue(tmp_path, monkeypatch):
+    """STILL FAILING, and the reason narrowed on 2026-08-11.
+
+    The ROUTE half of this defect is fixed: a claim-less reference no longer routes
+    FULL_COVERAGE. This row's original expectation was ROUTE_HELD, which ZD's
+    calibration spec superseded with a dedicated terminal route -- asserted here so
+    the remaining failure is ONLY the queue half.
+
+    What remains: the reference is still appended to the blind annotation queue
+    with an empty claim list, so the annotator is handed a unit with nothing to
+    judge. The band already has the pattern for this (an item held for an
+    unretrieved body is recorded durably but NOT queued, because it is "not
+    answerable yet"), and a claim-less reference is the same shape of thing. ZD's
+    spec enumerated the route, the counter and the denominator ruling and did NOT
+    include queue membership, so it was left alone rather than changed on the
+    builder's initiative. Backlog, not silence."""
     _patch_pubtypes(monkeypatch)
     out = tmp_path / "out"
     man = jb.run_band(_write_xml(tmp_path), str(out), extractor=lambda _: [],
                       coverage_judge=lambda *_: [], fetch_abstract=lambda _: "abstract",
                       session=object())
-    assert man["counts"][jb.ROUTE_HELD] == 1
+    assert man["counts"][jb.ROUTE_NO_CLAIMS] == 1
     assert _records(out / "judgment_band_annotation_queue.jsonl") == []
 
 
