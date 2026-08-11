@@ -92,7 +92,14 @@ def _frozen_manifest(**overrides):
         "journal_match_authoritative_rate": 0.0,
         "f2i_field_transposition_active": False,
         "f2d_strict_prefix_active": False,
-        "reason_registry_version": "5.2",
+        # Tracks REASON_REGISTRY_VERSION, bumped 5.2 -> 5.3 by the §15.2
+        # version-chain code. This fixture's job is "a manifest AGREEING with the
+        # loaded registry validates", which is version-independent; the STALE
+        # case is asserted explicitly by
+        # test_manifest_stale_registry_version_is_contradiction below (it had no
+        # coverage while this literal was pinned -- the pin only ever proved the
+        # agreeing case, and silently became the stale case on a bump).
+        "reason_registry_version": rr.REASON_REGISTRY_VERSION,
     }
     m.update(overrides)
     return m
@@ -117,6 +124,14 @@ def test_manifest_active_flag_while_gated_off_is_contradiction():
 def test_manifest_loaded_true_while_authority_empty_is_contradiction():
     with pytest.raises(ValueError):
         rr.validate_manifest(_frozen_manifest(journal_authority_loaded=True))
+
+
+def test_manifest_stale_registry_version_is_contradiction():
+    """An artifact written under an OLDER reason vocabulary must not validate
+    against the loaded one -- its rows can carry codes this registry no longer
+    defines, or lack codes it now emits (§5.6 A.4)."""
+    with pytest.raises(ValueError):
+        rr.validate_manifest(_frozen_manifest(reason_registry_version="5.2"))
 
 
 def test_manifest_missing_field_is_error():

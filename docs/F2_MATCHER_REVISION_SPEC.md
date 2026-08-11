@@ -396,7 +396,7 @@ spec cannot drift behind the code (that test already caught
 `translated_title_missing_volume_anchors`, which an earlier draft of this table
 omitted). The schema in §19.1 MUST reject any `route_reason` not in this registry.
 
-**A.1 — same-work reasons → route `review_same_work_variant` (24).** From
+**A.1 — same-work reasons → route `review_same_work_variant` (25).** From
 `work_identity.py`: `mixed_identity_citation`, `overwhelming_bibliographic_anchor`,
 `authoritative_title_alias`, `canonical_title_exact`, `malformed_title_wrapper`,
 `translated_title_metadata`, `translated_title_shared_anchors`,
@@ -408,7 +408,8 @@ omitted). The schema in §19.1 MUST reject any `route_reason` not in this regist
 `single_token_metadata_typo`, `shared_doi_same_work`. From `biblio_match.py`:
 `near_identical_title`, `physical_location_same_work` (F2-C), `preprint_published_version`
 (F2-B, requires version evidence), `strict_prefix_title` (F2-D — gated OFF §11, never
-emitted in the frozen configuration).
+emitted in the frozen configuration), **`version_chain_same_work`** (§15.2 — added in
+rev 5.3, which is why `REASON_REGISTRY_VERSION` moves `5.2` → `5.3`).
 
 **A.2 — non-same-work reasons → route `review_wrong_paper` (2).**
 `preprint_shape_unconfirmed` (preprint shape without version evidence),
@@ -1096,14 +1097,55 @@ These are distinct bibliographic works. If the written citation describes the or
 B is a commentary/reply, an explicit relation may establish a `distinct_record` and supply
 the original as C. Required fixtures include `PMC9252976:CR36` and `PMC9705589:B8`.
 
-### 15.2 Conference abstract versus full paper
+### 15.2 Conference abstract versus full paper — RESOLVED (version-chain policy)
 
-These are treated as `same_study_related_work`, not automatically same record and not
-automatically F2. Required development fixtures include `PMC8097933:CR9`,
-`PMC12864399:B12`, and `PMC9829249:R20`.
+**Policy (ZD, 2026-08-07/08-11).** Two records that are nodes in one publication
+lineage are the **SAME WORK**: preprint ↔ conference paper ↔ extended journal
+version, and conference abstract ↔ full paper. Identifiers legitimately change
+between nodes, so **identifier inequality alone must not route such a pair to
+`review_wrong_paper`.** This supersedes the deferral above; the route is
+`review_same_work_variant` (audited, never `match`), not `review_related_work`,
+and the `review_related_work` route is not added.
 
-The route is `review_related_work` until the taxonomy policy explicitly decides when citing
-one output with the other's identifier is F2.
+**Implementation.** `version_chain_same_work` (§5.6 A.1, rev 5.3), evaluated in
+`flag_verdict` before the preprint branch. Gated first on the claimed side reading
+as a **non-final node** — an abstract locator or a preprint venue — then one of two
+routes must establish the lineage:
+
+- **ROUTE 1 — shared identifier across nodes.** The abstract record carries the
+  full paper's DOI while venue/volume/pages differ (`PMC9829249:R20`: an
+  *Atherosclerosis* abstract at `e46` carrying the *JACC* paper's DOI).
+- **ROUTE 2 — content lineage.** No shared identifier, so RULE B's evidence with
+  its **title and roster floors relaxed** (0.87 → 0.80, 0.75 → 0.60) because a node
+  is routinely retitled and re-rostered between abstract and paper, while RULE B's
+  **distinctive-token (≥6) and content-coverage (≥0.77) guards are kept at full
+  strength** (`PMC12864399:B12`: *Lancet* `S100` → *BMJ Open* `e022455`).
+
+Those two retained guards are load-bearing, not decorative: a first draft that
+relaxed all four floors together swallowed the entire adversarial-hardening
+negative set (the sibling-TRIAL family — DAPA-HF/DELIVER, EMPEROR-Reduced/
+Preserved). Token count excludes a generic abstract title any sibling's full title
+covers; coverage excludes a sibling whose population/endpoint qualifier diverges
+(0.75). Both are measured in `test_f2_wrong_paper_precision.py`.
+
+**Abstract locator.** `_is_supplement_locator` (`^\s*[SP]\d`) saw only a
+supplement page, missing an e-locator (`e46`) and a bare abstract number (`207`).
+A separate, wider `is_abstract_locator` now covers all three; the original stays
+narrow because it is a page-**parity** predicate feeding `_first_pages_agree`, and
+widening it in place was measured to stop `overwhelming_bibliographic_anchor`
+firing on 4 seed-37 rows (LR-1). `PMC8097933:CR9` needed only this fix and routes
+under `conference_abstract_publication`, whose guards it satisfies in full.
+
+**Not closed — `PMC12733676:B29` (arXiv/ICCV → IEEE TPAMI).** The fourth required
+fixture is still `review_wrong_paper` / `preprint_shape_unconfirmed`. Its shape is
+pinned by committed `test_item1_preprint_shape_with_disagreeing_dois_is_not_same_work`,
+which encodes the §14.3 rule that a confident DOI disagreement refutes a version
+relation (LR-4). That rule and this policy give opposite answers on the same row:
+§14.3 reads the changed DOI as refutation, §15.2 reads it as the expected property
+of a lineage. Reversing §14.3 was held out of scope for this change, so B29 is
+recorded here as an **open conflict for the taxonomy policy to settle**, not as a
+defect of this rule. The refutation is otherwise untouched and still governs every
+row this rule does not claim.
 
 ### 15.3 Cochrane volume/issue representation
 

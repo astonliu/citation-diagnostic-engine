@@ -37,7 +37,7 @@ from .ratelimit import CROSSREF, OPENALEX, request_with_retry
 from .textnorm import fold_bibliographic_text, fold_chemical_charges
 from .work_identity import (assess_same_work, first_author_equivalent,
                             doi_equivalent, journal_equivalent,
-                            is_distinctive_title)
+                            is_distinctive_title, version_chain_same_work)
 from .journal_identity import journal_identity
 
 # ``Claimed`` is the handoff's name for the claimed-reference metadata object.
@@ -820,6 +820,24 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # the denominator -- it is a true negative, not an ambiguous same-work row.
     # SAME_WORK_VARIANT is audited (not auto-cleared), so any rare misfire is
     # still seen by a human.
+    # VERSION-CHAIN same-work quarantine (spec §15.2). Two records that are nodes
+    # of ONE publication lineage -- preprint <-> conference paper <-> extended
+    # journal version, and conference abstract <-> full paper -- are the SAME WORK.
+    # Identifiers legitimately change between nodes (the abstract and the paper get
+    # different DOIs, often different venues, and a publication-lag year gap), so
+    # identifier inequality ALONE must not route such a pair to wrong-paper.
+    #
+    # Checked BEFORE the preprint branch on purpose: that branch refutes a version
+    # relation on a confident DOI disagreement (§14.3), which is the correct test
+    # for "is this preprint the same work as this published record" but the WRONG
+    # test for a lineage, where a changed DOI is expected. The refutation itself is
+    # untouched -- it still governs every row this rule does not claim.
+    if version_chain_same_work(claimed, cand, title_similarity=m.title_sim,
+                               preprint_source=is_preprint_source(claimed)):
+        m.same_work_reason = "version_chain_same_work"
+        m.identity_signals = ("non_final_node", "title_sim", "content_coverage",
+                              "roster_containment")
+        return VERDICT_SAME_WORK_VARIANT, m
     first_author_ok = (f.first_author_match is True or
                        (f.first_author_match is None and f.author_match is True))
     if is_preprint_source(claimed) and first_author_ok and has_confident_disagreement:

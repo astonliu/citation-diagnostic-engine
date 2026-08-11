@@ -463,3 +463,118 @@ def test_adversarial_hardening_negatives_stay_wrong_paper(name, c_kw, r_kw):
 
 def test_same_work_title_gate_not_lowered():
     assert SAME_WORK_TITLE_SIM_MIN >= 0.92
+
+
+# ---------------------------------------------------------------------
+# §15.2 version chain (2026-08-11). Two records that are nodes of ONE
+# publication lineage are the SAME WORK; identifiers legitimately change
+# between nodes, so identifier inequality alone must not route to wrong-paper.
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("pages,expected", [
+    ("S100", True),      # supplement page -- the only shape the old regex caught
+    ("P1025", True),     # poster
+    ("e46", True),       # e-locator (PMC9829249:R20)
+    ("e022455", True),   # long e-locator
+    ("207", True),       # bare abstract NUMBER (PMC8097933:CR9)
+    ("207A", True),      # abstract number with a section letter
+    ("548-553", False),  # ordinary page RANGE
+    ("1439-1450", False),
+    ("e171-232", False),  # e-locator RANGE is an ordinary electronic article
+    ("", False),
+])
+def test_abstract_locator_shapes(pages, expected):
+    from cre.f1.work_identity import is_abstract_locator
+    assert is_abstract_locator(pages) is expected
+
+
+def test_page_parity_predicate_is_not_widened():
+    """_is_supplement_locator stays NARROW: it is a page-PARITY predicate feeding
+    _first_pages_agree, and widening it was measured to stop
+    overwhelming_bibliographic_anchor firing on 4 seed-37 rows (LR-1)."""
+    from cre.f1.work_identity import _is_supplement_locator
+    assert _is_supplement_locator("S100") is True
+    assert _is_supplement_locator("e46") is False
+    assert _is_supplement_locator("207") is False
+
+
+def test_version_chain_route1_shared_doi_across_nodes():
+    """ROUTE 1: the abstract record carries the FULL PAPER's DOI. Venue, volume
+    and pages all differ because they are different nodes of one lineage."""
+    c = ClaimedRef(title="Apolipoprotein B and non-HDL-cholesterol better reflect residual "
+                         "risk than LDL-cholesterol in statin-treated patients with "
+                         "atherosclerosis.",
+                   authors=["Johannesen", "Langsted", "Nordestgaard"], year=2021,
+                   journal="Atherosclerosis", volume="331", pages="e46",
+                   claimed_doi="10.1016/j.jacc.2021.01.027")
+    r = RetrievedRecord(resolved=True,
+                        title="Apolipoprotein B and Non-HDL Cholesterol Better Reflect "
+                              "Residual Risk Than LDL  Cholesterol in Statin-Treated Patients.",
+                        authors=["Johannesen", "Mortensen", "Langsted", "Nordestgaard"],
+                        year=2021, journal="J Am Coll Cardiol", volume="77",
+                        pages="1439-1450", doi="10.1016/j.jacc.2021.01.027")
+    verdict, m = flag_verdict(c, r)
+    assert verdict == VERDICT_SAME_WORK_VARIANT
+    assert m.same_work_reason == "version_chain_same_work"
+
+
+def test_version_chain_route2_content_lineage_across_venues():
+    """ROUTE 2: no shared identifier -- a Lancet conference abstract and the full
+    paper in a different journal, with a specific title and high content
+    coverage."""
+    c = ClaimedRef(title="The impact of adverse media reporting on doctor–patient "
+                         "relationships in China: an analysis with propensity-score matching",
+                   authors=["Jing", "Wang", "Liu", "Liu"], year=2017,
+                   journal="Lancet", volume="390", pages="S100",
+                   claimed_doi="10.1016/s0140-6736(17)33238-5")
+    r = RetrievedRecord(resolved=True,
+                        title="Impact of adverse media reporting on public perceptions of "
+                              "the doctor-patient  relationship in China: an analysis with "
+                              "propensity score matching method.",
+                        authors=["Sun", "Liu", "Liu", "Wang", "Wang", "Hu"], year=2018,
+                        journal="BMJ Open", volume="8", pages="e022455",
+                        doi="10.1136/bmjopen-2018-022455")
+    verdict, m = flag_verdict(c, r)
+    assert verdict == VERDICT_SAME_WORK_VARIANT
+    assert m.same_work_reason == "version_chain_same_work"
+
+
+def test_version_chain_requires_a_non_final_node():
+    """The locator/preprint gate is load-bearing: the SAME content evidence
+    between two ordinary page-ranged articles is not a lineage."""
+    c = ClaimedRef(title="The impact of adverse media reporting on doctor–patient "
+                         "relationships in China: an analysis with propensity-score matching",
+                   authors=["Jing", "Wang", "Liu", "Liu"], year=2017,
+                   journal="Lancet", volume="390", pages="100-108")
+    r = RetrievedRecord(resolved=True,
+                        title="Impact of adverse media reporting on public perceptions of "
+                              "the doctor-patient  relationship in China: an analysis with "
+                              "propensity score matching method.",
+                        authors=["Sun", "Liu", "Liu", "Wang", "Wang", "Hu"], year=2018,
+                        journal="BMJ Open", volume="8", pages="e022455")
+    assert flag_verdict(c, r)[0] == VERDICT_WRONG_PAPER
+
+
+def test_version_chain_keeps_rule_b_sibling_guards_at_full_strength():
+    """The relaxation is on TITLE and ROSTER only. A sibling trial reaching the
+    rule through an abstract locator is still excluded by the distinctive-token
+    and content-coverage guards -- the first draft of this rule dropped both and
+    swallowed the whole adversarial-hardening negative set."""
+    from cre.f1.work_identity import (
+        CONFERENCE_ABSTRACT_CONTENT_COVERAGE_MIN,
+        CONFERENCE_ABSTRACT_MIN_DISTINCTIVE_TOKENS, version_chain_same_work)
+    assert CONFERENCE_ABSTRACT_CONTENT_COVERAGE_MIN == 0.77
+    assert CONFERENCE_ABSTRACT_MIN_DISTINCTIVE_TOKENS == 6
+    # DAPA-HF sibling: specific title (8 tokens) but coverage 0.75 < 0.77.
+    c = ClaimedRef(title="Dapagliflozin in Heart Failure with Mildly Reduced or "
+                         "Preserved Ejection Fraction",
+                   authors=["Solomon SD", "McMurray JJV", "Claggett B"], year=2022,
+                   journal="J Am Coll Cardiol", volume="79", pages="S1900")
+    r = RetrievedRecord(resolved=True,
+                        title="Dapagliflozin in Patients with Heart Failure and Reduced "
+                              "Ejection Fraction",
+                        authors=["McMurray JJV", "Solomon SD", "Claggett B"], year=2019,
+                        journal="N Engl J Med", volume="381", pages="1995-2008",
+                        doi="10.1056/nejmoa1911303")
+    assert version_chain_same_work(c, r, title_similarity=0.8899,
+                                   preprint_source=False) is False

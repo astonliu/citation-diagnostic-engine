@@ -66,6 +66,21 @@ _GENERIC_TITLES = {
 # (e.g. P1025). An "e"-locator ("e171-232") is an ordinary electronic article
 # and is deliberately NOT matched.
 _SUPPLEMENT_PAGE_RE = re.compile(r"^\s*[SP]\d", re.I)
+# An ABSTRACT locator -- the page field of a non-final lineage node (§15.2). Wider
+# than _SUPPLEMENT_PAGE_RE on purpose, and deliberately NOT the same predicate:
+#   [SP]\d   supplement / poster page   S100, P1025
+#   [E]\d    e-locator                  e46, e022455
+#   \d{1,4}  a bare abstract NUMBER     207   (no end page -- an abstract book's
+#            with an optional letter     207A   running number, not a page RANGE)
+# The two are kept apart because _SUPPLEMENT_PAGE_RE is a page-PARITY predicate
+# (_first_pages_agree: "S344" and "344" are different physical slots), and 2,725
+# claimed rows in the seed-37 frame carry a bare-number page while 1,336 carry an
+# e-page. Widening the parity predicate to cover them was measured to stop
+# ``overwhelming_bibliographic_anchor`` firing on 4 frame rows -- a change to a
+# rule the §24 register fences off (LR-1) -- for no gain, since only the abstract
+# rules need the wider shapes. Verified: an ordinary page RANGE never matches.
+_ABSTRACT_LOCATOR_RE = re.compile(
+    r"^\s*(?:[SP]\d|E\d+[A-Za-z]?\s*$|\d{1,4}[A-Za-z]?\s*$)", re.I)
 # Editorial reprint/republication prefixes a journal prepends to a re-run of an
 # earlier work (e.g. J Immunol "Pillars Article:"; "Classic Article",
 # "Reprinted from"). General series markers, not one journal's brand.
@@ -101,6 +116,22 @@ CONFERENCE_ABSTRACT_CONTENT_COVERAGE_MIN = 0.77
 # study inside a drug's trial family -- its few tokens are trivially covered by ANY
 # sibling trial's full title, so it must not be read as an abstract->full match.
 CONFERENCE_ABSTRACT_MIN_DISTINCTIVE_TOKENS = 6
+# --- §15.2 version chain -------------------------------------------------------
+# Two records that are nodes of ONE publication lineage (preprint <-> conference
+# paper <-> extended journal version; conference abstract <-> full paper) are the
+# SAME WORK. Identifiers legitimately change between nodes, so DOI/journal/volume/
+# year inequality cannot by itself route such a pair to review_wrong_paper.
+#
+# These floors are LOWER than RULE B's because RULE B must survive the sibling-
+# TRIAL problem (serial trialists publishing different trials with the same core
+# team and a shared drug/disease title template), which it solves with roster
+# containment >= 0.75 AND coverage >= 0.77 AND title >= 0.87. The version chain is
+# a different question -- is the claimed side a non-final NODE of this same work --
+# and it is gated first on an abstract locator or a preprint venue, which no
+# sibling-trial pair carries. The destination is the AUDITED same-work band, never
+# ``match``, so the bar is a routing bar, not an auto-clear bar.
+VERSION_CHAIN_TITLE_MIN = 0.80
+VERSION_CHAIN_ROSTER_MIN = 0.60
 # Fraction of the resolved title's distinctive tokens that must be reconstructable
 # from the claimed author+title fields for RULE E (a true shifted-field artifact
 # splits ONE title across the two slots; a consortium author whose name merely
@@ -703,6 +734,12 @@ def _is_supplement_locator(pages: str) -> bool:
     return bool(_SUPPLEMENT_PAGE_RE.match(pages or ""))
 
 
+def is_abstract_locator(pages: str) -> bool:
+    """The page field reads as an ABSTRACT locator rather than an article page
+    range -- a supplement/poster page, an e-locator, or a bare abstract number."""
+    return bool(_ABSTRACT_LOCATOR_RE.match(pages or ""))
+
+
 def _is_reprint_record(resolved: RetrievedRecord) -> bool:
     """The resolved record is an editorial reprint/republication of an earlier
     work: a reprint title prefix OR a MEDLINE reprint publication type."""
@@ -764,6 +801,86 @@ def _roster_containment(claimed: ClaimedRef, resolved: RetrievedRecord) -> float
     if not ca or not ra:
         return 0.0
     return len(ca & ra) / len(ca)
+
+
+def _lineage_surname_set(authors: list[str]) -> set[str]:
+    """Surname proxies for a lineage roster, WITHOUT ``_surname_set``'s >=4-char
+    floor.
+
+    That floor silently drops every short romanized surname -- Mao, Li, Xie, Lau,
+    Liu, Sun, Hu, Ma -- so ``_roster_containment`` reads 0.00 for an all-short
+    roster that in fact matches perfectly (PMC12733676:B29: Mao/Li/Xie/Lau against
+    Mao/Li/Xie/Lau/Wang/Smolley). ``_surname_set`` is left alone because it feeds
+    RULE B, whose thresholds were calibrated against its output; changing it would
+    move that rule frame-wide. Recorded as a defect of ``_surname_set`` in its own
+    right -- the blindness is systematic for CJK-romanized names.
+    """
+    out: set[str] = set()
+    for a in authors or []:
+        for t in canonical_title(a).split():
+            if len(t) >= 2:
+                out.add(t)
+    return out
+
+
+def _lineage_roster_containment(claimed: ClaimedRef,
+                                resolved: RetrievedRecord) -> float:
+    ca, ra = _lineage_surname_set(claimed.authors), _lineage_surname_set(resolved.authors)
+    if not ca or not ra:
+        return 0.0
+    return len(ca & ra) / len(ca)
+
+
+def version_chain_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
+                            title_similarity: float,
+                            preprint_source: bool) -> bool:
+    """§15.2: whether the pair are two nodes of ONE publication lineage.
+
+    Gated first on the claimed side reading as a NON-FINAL node -- an abstract
+    locator or a preprint venue. That gate is what separates this rule from RULE
+    B's hard case: the sibling-TRIAL family (serial trialists running different
+    trials with one core team and a shared drug/disease title template). Then one
+    of two routes must establish the lineage:
+
+      ROUTE 1 (shared identifier across nodes). The claimed abstract record
+      carries the FULL PAPER's DOI -- the venue, volume and pages all differ
+      because they are different nodes, but the identifier is the same work's
+      (PMC9829249:R20: an Atherosclerosis abstract at e46 carrying the JACC
+      paper's DOI). An exact DOI agreement across a node boundary is direct
+      lineage evidence and needs no content threshold beyond a title floor.
+
+      ROUTE 2 (content lineage). No shared identifier, so the claim rests on
+      content: this is RULE B's evidence with its TITLE and ROSTER floors relaxed
+      (0.87 -> 0.80, 0.75 -> 0.60), because a lineage node is routinely retitled
+      and re-rostered between the abstract and the paper, while RULE B's other two
+      guards are kept AT FULL STRENGTH. Those two are what exclude the sibling
+      trials, and relaxing them is what made the first draft of this rule swallow
+      the whole adversarial-hardening negative set:
+        * distinctive-token count >= 6 excludes a generic abstract title
+          ("Empagliflozin in heart failure", 3 tokens) that ANY sibling's full
+          title trivially covers;
+        * content coverage >= 0.77 excludes a sibling whose population/endpoint
+          qualifier diverges (DAPA-HF "Reduced" vs "Mildly Reduced or Preserved"
+          scores 0.75).
+
+    Identifier DISAGREEMENT is not a conjunct of either route: changing
+    identifiers is the defining property of a lineage, not evidence against it.
+
+    ``preprint_source`` is passed in rather than computed here: the preprint
+    predicates live in biblio_match, which imports this module.
+    """
+    if not (is_abstract_locator(claimed.pages) or preprint_source):
+        return False
+    if title_similarity < VERSION_CHAIN_TITLE_MIN:
+        return False
+    if _lineage_roster_containment(claimed, resolved) < VERSION_CHAIN_ROSTER_MIN:
+        return False
+    if doi_equivalent(claimed.claimed_doi, resolved.doi):
+        return True                                          # ROUTE 1
+    return (len(_distinctive_title_tokens(claimed.title))
+            >= CONFERENCE_ABSTRACT_MIN_DISTINCTIVE_TOKENS
+            and _abstract_content_coverage(claimed, resolved)
+            >= CONFERENCE_ABSTRACT_CONTENT_COVERAGE_MIN)     # ROUTE 2
 
 
 def _distinctive_title_tokens(title: str) -> set[str]:
@@ -1020,7 +1137,7 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
     # out -- its few tokens are trivially covered by any sibling trial's full title
     # (the coverage guard is necessarily asymmetric, since a genuine full paper adds
     # a subtitle), so specificity is required to disambiguate a drug's trial family.
-    if (_is_supplement_locator(claimed.pages)
+    if (is_abstract_locator(claimed.pages)
             and len(_distinctive_title_tokens(claimed.title)) >= CONFERENCE_ABSTRACT_MIN_DISTINCTIVE_TOKENS
             and _roster_containment(claimed, resolved) >= CONFERENCE_ROSTER_CONTAINMENT_MIN
             and _abstract_content_coverage(claimed, resolved) >= CONFERENCE_ABSTRACT_CONTENT_COVERAGE_MIN

@@ -18,7 +18,7 @@ introduced them; renaming is a breaking change to the artifact contract.
 """
 from __future__ import annotations
 
-REASON_REGISTRY_VERSION = "5.2"
+REASON_REGISTRY_VERSION = "5.3"
 
 # --- §5.6 A.1: same-work reasons -> route review_same_work_variant ------------
 # 20 from work_identity.py + 4 from biblio_match.py = 24. (Rev 5.2 registry adds
@@ -52,6 +52,7 @@ SAME_WORK_REASONS = frozenset({
     "physical_location_same_work",      # F2-C
     "preprint_published_version",       # F2-B, requires version evidence
     "strict_prefix_title",              # F2-D, gated OFF (§11) -- never emitted frozen
+    "version_chain_same_work",          # §15.2, rev 5.3
 })
 
 # --- §5.6 A.2: non-same-work reasons on route review_wrong_paper --------------
