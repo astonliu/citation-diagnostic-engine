@@ -204,12 +204,15 @@ def test_3a_collab_is_parsed_as_an_author_which_is_correct_JATS(tmp_path):
     assert claimed.title == "Ethical principles for medical research involving human subjects"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "OPEN, blocked on a DECISION not an implementation: the collab string holds "
-    "title words, so _corporate_names_conflict reads two organizations in "
-    "conflict and corporate_author_conflict hard-returns wrong_paper despite an "
-    "identical DOI, volume, first page and year. Lifting it needs an authorized "
-    "route, not a parser change. STOP AND REPORT per the spec."))
+# RESOLVED 2026-08-11. This was xfail(strict) and is now an ordinary passing
+# assertion. It was recorded as "blocked on a DECISION not an implementation" --
+# the collab string holds title words, so _corporate_names_conflict reads two
+# organizations and corporate_author_conflict hard-returned wrong_paper despite an
+# identical DOI, volume, first page and year -- and it needed an authorized route
+# rather than a parser change. RULE A2 (_doi_anchored_same_work) is that route:
+# an exact shared DOI, offered the row at the corporate block, with a genuine
+# two-organization check (_distinct_organizations) replacing the title-based
+# containment test that could not tell a displaced boundary from a second body.
 def test_3b_KNOWN_DEFECT_collab_holding_title_words_reads_as_two_organizations(tmp_path):
     claimed = _one_ref(tmp_path, _HELSINKI)
     r = _r(title="World Medical Association Declaration of Helsinki: ethical "

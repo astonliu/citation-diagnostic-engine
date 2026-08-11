@@ -120,6 +120,14 @@ CONFERENCE_ABSTRACT_CONTENT_COVERAGE_MIN = 0.77
 # study inside a drug's trial family -- its few tokens are trivially covered by ANY
 # sibling trial's full title, so it must not be read as an abstract->full match.
 CONFERENCE_ABSTRACT_MIN_DISTINCTIVE_TOKENS = 6
+# RULE A2: minimum boundary-tolerant content agreement (best of the two
+# directions) required before an exact shared DOI is read as same-work. Set from
+# the adjudicated separation, with margin on both sides: the 21-case
+# false-positive packet floors at 0.833 once boundaries are ignored, while the
+# committed DOI-sharing negatives that are NOT already excluded by a series or
+# organization conflict reach only 0.750 (an adjacent article) and 0.667 (the
+# contaminated-DOI TRUE_F2, PMC8015328:ref011).
+DOI_BOUNDARY_AGREEMENT_MIN = 0.80
 # --- §15.2 version chain -------------------------------------------------------
 # Two records that are nodes of ONE publication lineage (preprint <-> conference
 # paper <-> extended journal version; conference abstract <-> full paper) are the
@@ -390,6 +398,146 @@ def _corporate_names_conflict(claimed: ClaimedRef,
     # the titles are identical (canonical form); divergent titles -> conflict.
     ct, rt = canonical_title(claimed.title), canonical_title(resolved.title)
     return not (ct != "" and ct == rt)
+
+
+def _distinct_organizations(claimed: ClaimedRef,
+                            resolved: RetrievedRecord) -> bool:
+    """Affirmative evidence that two INSTITUTIONAL authors are different bodies.
+
+    Deliberately narrower than ``_corporate_names_conflict``, and used only on the
+    DOI-anchored path. That predicate treats a strict containment with divergent
+    titles as a conflict, which is right when the only evidence is the strings --
+    a parent body's document is not its subunit's different document. When an exact
+    DOI already pins ONE record, the remaining question is just "are these two
+    different organizations", and the answer is: only if the SHORTER name carries a
+    token the longer one cannot account for. Extra tokens on the longer name are the
+    ordinary case (a truncated or partially-parsed institutional name), never
+    evidence of a second body.
+
+    False for a non-institutional pair, so the DOI path is unaffected by it.
+    """
+    left_raw = claimed.authors[0] if claimed.authors else ""
+    right_raw = resolved.authors[0] if resolved.authors else ""
+    if not (_CORPORATE_RE.search(left_raw) and _CORPORATE_RE.search(right_raw)):
+        return False
+    left = _corporate_name_tokens(left_raw)
+    right = _corporate_name_tokens(right_raw)
+    if not left or not right:
+        return True
+    short, long = (left, right) if len(left) <= len(right) else (right, left)
+    return any(
+        not any(_corporate_token_equivalent(s, l, terminal=False) for l in long)
+        for s in short)
+
+
+def _doi_anchored_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
+                            title_similarity: float):
+    """RULE A2 -- exact shared DOI read against the citation's slots as a WHOLE.
+
+    RULE A requires the first-author POSITION to agree and a NEAR-IDENTICAL title,
+    so it cannot see the dominant false-positive shape: a reference whose
+    author/title/journal BOUNDARY was parsed in the wrong place. One misplaced
+    boundary makes the author, the title and the journal each look wrong, and the
+    matcher then counts three "independent" disagreements that are really one
+    parsing fault -- a group author left in the title slot, or the journal name
+    swallowed into it.
+
+    An exact DOI is a globally-unique work identifier, so it is treated here as
+    overwhelming. Five affirmative counter-signals still refute it, each
+    load-bearing against a committed negative:
+      * a series/edition conflict (annual editions sharing a run-on DOI);
+      * two genuinely DIFFERENT organizations (National vs International Committee
+        for Pediatric Care; "AAP" vs "American Academy of Pediatrics");
+      * a roster the citation contradicts outright -- the report-vs-article
+        carriers 14741909 and 34249371, whose CONTENT matches almost perfectly but
+        whose author lists have nothing in common;
+      * a supplement/article locator mismatch: a meeting abstract at S344 and the
+        article at 344-352 are different physical slots of one volume, so a shared
+        DOI is a carrier, not proof;
+      * content that agrees in NEITHER direction, which is what a contaminated DOI
+        looks like (PMC8015328:ref011, Paurodontella persica vs compostiocola,
+        0.667; an adjacent article, 0.750).
+    A version-chain node is left to §15.2's rule, which names the relation more
+    precisely than "shared DOI" does.
+
+    Returns evidence or None. The destination is the AUDITED same-work band, never
+    ``match``: a shared DOI is strong enough to lift a row out of the wrong-paper
+    band, not to clear it.
+    """
+    if not doi_equivalent(claimed.claimed_doi, resolved.doi):
+        return None
+    if _series_conflict(claimed.title, resolved.title):
+        return None
+    if _distinct_organizations(claimed, resolved):
+        return None
+    if _roster_contradicted(claimed, resolved):
+        return None
+    if _is_supplement_locator(claimed.pages) != _is_supplement_locator(resolved.pages):
+        return None
+    if version_chain_same_work(claimed, resolved, title_similarity=title_similarity,
+                               preprint_source=False):
+        return None
+    if _boundary_tolerant_agreement(claimed, resolved) < DOI_BOUNDARY_AGREEMENT_MIN:
+        return None
+    return WorkIdentityEvidence(True, "shared_doi_same_work",
+                                ("exact_doi", "boundary_tolerant_content",
+                                 "agreement>=%.2f" % DOI_BOUNDARY_AGREEMENT_MIN))
+
+
+def _roster_contradicted(claimed: ClaimedRef, resolved: RetrievedRecord) -> bool:
+    """The resolved roster shares NO name with anything the citation says.
+
+    This is the guard that keeps the DOI path off the report-vs-article carriers:
+    a citation naming a DOCUMENT ("WHO", "NICE") whose DOI resolves to a journal
+    piece ABOUT that document has near-identical CONTENT but a completely
+    different roster (seed 29: 14741909 "WHO" -> a Letter by Guilbert; 34249371
+    NICE -> a 15-author article). Content agreement cannot separate those from a
+    boundary shift; the roster can.
+
+    Names are looked for across the citation's author AND title slots, so a
+    roster displaced into the title by the very boundary shift this path exists
+    to tolerate still counts (PMC9374052: the author slot holds "BJ" while the
+    title slot holds "Singh D, Madrigal A, ..."). Returns False when either side
+    has no usable roster -- absence of evidence is not contradiction.
+    """
+    resolved_names = _slot_tokens(*(resolved.authors or []))
+    if not resolved_names:
+        return False
+    claimed_side = _slot_tokens(*(list(claimed.authors or []) + [claimed.title or ""]))
+    if not claimed_side:
+        return False
+    return not (resolved_names & claimed_side)
+
+
+def _slot_tokens(*parts: str) -> set:
+    """Distinctive tokens of a citation slot group, boundaries ignored."""
+    return {t for t in canonical_title(" ".join(p or "" for p in parts)).split()
+            if len(t) >= 4 and t not in _STOP}
+
+
+def _boundary_tolerant_agreement(claimed: ClaimedRef,
+                                 resolved: RetrievedRecord) -> float:
+    """How well the two records agree on CONTENT once slot boundaries are ignored.
+
+    Each title is scored against the UNION of the other record's author, title and
+    journal text, so a title that leaked into the author or journal slot (or a
+    group author left in the title) still matches -- one boundary shift stops
+    producing several apparently independent field disagreements.
+
+    The BEST of the two directions is returned, because the two failure shapes are
+    asymmetric: a citing paper often abbreviates a long title down to a fragment
+    (PMC13189598, "Late stent thrombosis" for a paper whose full title runs 20
+    words -- forward coverage 0.231, reverse 1.000), and just as often pads a short
+    title with the journal name. Requiring both directions would reject the very
+    cases this is for; requiring either keeps a contaminated DOI out, because those
+    disagree in BOTH directions.
+    """
+    w_title, r_title = _slot_tokens(claimed.title), _slot_tokens(resolved.title)
+    w_union = _slot_tokens(claimed.title, claimed.journal, *(claimed.authors or []))
+    r_union = _slot_tokens(resolved.title, resolved.journal, *(resolved.authors or []))
+    forward = len(r_title & w_union) / len(r_title) if r_title else 0.0
+    reverse = len(w_title & r_union) / len(w_title) if w_title else 0.0
+    return max(forward, reverse)
 
 
 def _corporate_physically_sufficient(claimed: ClaimedRef,
@@ -954,7 +1102,41 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
 
     blocked = _derivative_block(claimed, resolved)
     if blocked:
+        # A corporate-author conflict is not decisive against an EXACT shared DOI
+        # when the two institutional names are not different bodies. RULE A2 is
+        # offered the row HERE rather than letting it fall through to the ordinary
+        # rules -- falling through would let the institutional-document rules clear
+        # a parent body's work against its committee's DIFFERENT work (AAP
+        # "Dietary guidance for infants" vs "...for children", one shared DOI).
+        if blocked == "corporate_author_conflict":
+            anchored = _doi_anchored_same_work(claimed, resolved,
+                                               title_similarity=title_similarity)
+            if anchored is not None:
+                return anchored
         return WorkIdentityEvidence(False, blocked_by=blocked)
+
+    # RULE A2 (exact shared DOI + boundary-tolerant content). RULE A above requires
+    # the first-author POSITION to agree and a near-identical TITLE, so it cannot
+    # see the dominant false-positive shape: a reference whose author/title/journal
+    # BOUNDARY was parsed in the wrong place. One misplaced boundary makes the
+    # author, the title and the journal each look wrong, and the matcher then counts
+    # three "independent" disagreements that are really one parsing fault -- e.g. a
+    # group author left in the title slot, or the journal name swallowed into it.
+    #
+    # An exact DOI is a globally-unique work identifier, so it is treated here as
+    # overwhelming evidence, checked against the citation's slots as a WHOLE rather
+    # than field by field (_boundary_tolerant_agreement). Three affirmative
+    # counter-signals still refute it, and each is load-bearing against a committed
+    # negative:
+    #   * a series/edition conflict  (annual editions sharing a run-on DOI);
+    #   * two genuinely DIFFERENT organizations (National vs International
+    #     Committee for Pediatric Care; "AAP" vs "American Academy of Pediatrics");
+    #   * content that does not agree in EITHER direction, which is what a
+    #     contaminated DOI looks like (PMC8015328:ref011, Paurodontella persica vs
+    #     compostiocola, scores 0.667; an adjacent article scores 0.750).
+    # The destination is the AUDITED same-work band, never ``match``: a shared DOI
+    # is strong enough to lift a row out of the wrong-paper band, not to auto-clear
+    # it (§16.2).
     first_author = first_author_equivalent(claimed, resolved)
     first_author_typo = _first_author_typo(claimed, resolved)
     author_overlap = _author_overlap(claimed, resolved)
@@ -1229,5 +1411,13 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
         return WorkIdentityEvidence(True, "single_token_metadata_typo",
                                     ("first_author", "journal",
                                      "locator" if locator else "year_transposition"))
+
+    # RULE A2 as a LAST RESORT, deliberately after every specific rule so it
+    # changes no existing reason code: it only ever converts a row that would
+    # otherwise fall through to wrong-paper.
+    anchored = _doi_anchored_same_work(claimed, resolved,
+                                       title_similarity=title_similarity)
+    if anchored is not None:
+        return anchored
 
     return WorkIdentityEvidence(False)
