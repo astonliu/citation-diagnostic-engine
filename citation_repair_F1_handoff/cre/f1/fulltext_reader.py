@@ -307,30 +307,41 @@ def _blocks_excluding(elem, skip) -> list:
 # ==========================================================================
 # Leading numbering on a real heading ("3.1. Materials and Methods", "2 Results").
 # Digits only, and a separator is required, so it can never eat a leading word.
-_HEADING_NUMBER_RE = re.compile(r"^\d+(?:\.\d+)*\s*[.):]?\s+")
+#: Leading enumeration: an arabic number ("2", "2.1") or a roman numeral ("ii",
+#: "iv"), optionally bracketed, and REQUIRING a trailing separator or whitespace.
+#:
+#: That trailing requirement is load-bearing, not defensive. Roman numerals are
+#: spelled with letters that ordinary headings start with -- ``d`` in
+#: "Discussion", ``m`` in "Methods", ``i`` in "Introduction``, ``c`` in
+#: "Conclusion" -- so a numeral alternative that could match without a following
+#: separator would eat that first character and silently mislabel the section.
+#: Matching is done on the case-folded heading, hence lowercase numeral letters.
+_HEADING_ENUM_RE = re.compile(
+    r"^[(\[]?\s*(?:\d+(?:\.\d+)*|[ivxlcdm]+)\s*(?:[).\]:]+|\s)\s*")
 
-# Matched in order: the first entry that equals the normalized heading, or is its
-# leading phrase, wins. Order therefore encodes precedence -- "Results and
-# Discussion" is results, not discussion.
-_HEADING_LABELS = (
-    ("materials and methods", LABEL_METHODS),
-    ("methods and materials", LABEL_METHODS),
-    ("subjects and methods", LABEL_METHODS),
-    ("patients and methods", LABEL_METHODS),
-    ("methods", LABEL_METHODS),
-    ("method", LABEL_METHODS),
-    ("results", LABEL_RESULTS),
+# Keyword -> label, checked IN ORDER against the heading's tokens, so position
+# encodes precedence: results > methods > discussion > intro. A heading naming
+# several takes the first, which is why "Results and Discussion" is results.
+#
+# Containment rather than equality: real headings qualify their section name
+# ("Research Design and Methods", "Methodology", "Summary of findings") and a
+# phrase list can only ever chase those variants one at a time. Keywords are
+# stems, so plurals and compounds fall out for free.
+#
+# "concluding" is listed beside "conclusion" because it is not a superstring of
+# it -- concludING vs concluSION -- so "Concluding remarks" would otherwise stop
+# matching. Essay-shaped papers close with these instead of Discussion; without
+# them a review's closing argument lands in ``other``.
+_HEADING_KEYWORDS = (
     ("result", LABEL_RESULTS),
+    ("method", LABEL_METHODS),
+    ("materials", LABEL_METHODS),
     ("discussion", LABEL_DISCUSSION),
+    ("conclusion", LABEL_DISCUSSION),
+    ("concluding", LABEL_DISCUSSION),
+    ("summary", LABEL_DISCUSSION),
     ("introduction", LABEL_INTRO),
     ("background", LABEL_INTRO),
-    # Essay-shaped papers close with these instead of Discussion. Without them a
-    # review's closing argument lands in ``other``, which was invisible while
-    # completeness gated on results/methods and is merely wrong now.
-    ("concluding remarks", LABEL_DISCUSSION),
-    ("conclusions", LABEL_DISCUSSION),
-    ("conclusion", LABEL_DISCUSSION),
-    ("summary", LABEL_DISCUSSION),
 )
 
 # JATS sec-type is a controlled-ish vocabulary of pipe-joined tokens
@@ -348,19 +359,25 @@ _SEC_TYPE_TOKENS = (
 
 
 def _normalize_heading(title: str) -> str:
-    """Case-fold a heading and drop its numbering and trailing punctuation."""
+    """Case-fold a heading and drop its enumeration and trailing punctuation."""
     text = _ws(title).casefold()
-    text = _HEADING_NUMBER_RE.sub("", text)
+    text = _HEADING_ENUM_RE.sub("", text)
     return text.strip(" .:;-").strip()
 
 
 def _label_from_heading(title: str) -> "str | None":
-    """The label a heading names, or None when it names none of them."""
+    """The label a heading names, or None when it names none of them.
+
+    Token containment on the enumeration-stripped, case-folded heading, in
+    :data:`_HEADING_KEYWORDS` precedence order. Splitting into tokens first keeps
+    a keyword from matching across a word boundary, so only a whole word that
+    CONTAINS the stem counts."""
     norm = _normalize_heading(title)
     if not norm:
         return None
-    for phrase, label in _HEADING_LABELS:
-        if norm == phrase or norm.startswith(phrase + " "):
+    tokens = [token for token in re.split(r"[^a-z0-9]+", norm) if token]
+    for keyword, label in _HEADING_KEYWORDS:
+        if any(keyword in token for token in tokens):
             return label
     return None
 

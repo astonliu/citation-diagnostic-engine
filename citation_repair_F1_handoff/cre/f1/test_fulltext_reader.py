@@ -945,3 +945,104 @@ def test_the_rule_is_written_on_the_fixture_itself():
     assert "MUST NOT" in fixture_doc
     assert "retrieval_complete" in fixture_doc
     assert "incomplete_reasons" in fixture_doc
+
+
+# ==========================================================================
+# Heading matching: enumeration stripping + token containment.
+# New rows only -- every pre-existing labelling row above is untouched.
+# ==========================================================================
+@pytest.mark.parametrize("heading,expected", [
+    # The two cases named in the spec.
+    ("2. Research Design and Methods", fr.LABEL_METHODS),
+    ("Results and Discussion", fr.LABEL_RESULTS),
+    # Containment, not equality: real headings qualify their section name, and a
+    # phrase list could only chase these one variant at a time.
+    ("Methodology", fr.LABEL_METHODS),
+    ("Statistical Methods", fr.LABEL_METHODS),
+    ("Summary of findings", fr.LABEL_DISCUSSION),
+    ("Study Results", fr.LABEL_RESULTS),
+    ("Materials", fr.LABEL_METHODS),
+    ("Conclusions and future directions", fr.LABEL_DISCUSSION),
+])
+def test_headings_match_by_token_containment(heading, expected):
+    assert fr._label_from_heading(heading) == expected
+
+
+@pytest.mark.parametrize("heading,expected_norm", [
+    ("2. Results", "results"),
+    ("2 Results", "results"),
+    ("2.1 Results", "results"),
+    ("2.1. Results", "results"),
+    ("(3) Results", "results"),
+    ("[4] Results", "results"),
+    ("II. Results", "results"),
+    ("iv. Results", "results"),
+    ("XIV) Results", "results"),
+    ("3: Results", "results"),
+])
+def test_leading_enumeration_is_stripped_before_matching(heading, expected_norm):
+    assert fr._normalize_heading(heading) == expected_norm
+    assert fr._label_from_heading(heading) == fr.LABEL_RESULTS
+
+
+@pytest.mark.parametrize("heading", [
+    "Discussion",      # d is a roman numeral letter
+    "Method",          # m
+    "Introduction",    # i
+    "Conclusion",      # c
+    "Materials",       # m
+    "Xenograft model", # x
+    "Limitations",     # l
+    "Validation",      # v
+])
+def test_enumeration_stripping_never_eats_a_real_heading(heading):
+    """A roman-numeral alternative that matched without a trailing separator
+    would swallow the first letter of these and mislabel the section. The
+    separator requirement is what prevents it, so it is pinned here."""
+    assert fr._normalize_heading(heading) == heading.casefold()
+
+
+@pytest.mark.parametrize("heading,expected", [
+    ("Results and Discussion", fr.LABEL_RESULTS),          # results > discussion
+    ("Methods and Results", fr.LABEL_RESULTS),             # results > methods
+    ("Materials, Methods and Discussion", fr.LABEL_METHODS),  # methods > discussion
+    ("Background and Discussion", fr.LABEL_DISCUSSION),    # discussion > intro
+    ("Introduction and Background", fr.LABEL_INTRO),
+])
+def test_multiple_matches_follow_declared_precedence(heading, expected):
+    """results > methods > discussion > intro, encoded by keyword order."""
+    assert fr._label_from_heading(heading) == expected
+
+
+@pytest.mark.parametrize("heading", [
+    "Acknowledgements", "Limitations", "Funding", "5-year survival",
+    "A heading naming no canonical section", "", "   ", "Data availability",
+])
+def test_headings_naming_no_section_still_match_nothing(heading):
+    assert fr._label_from_heading(heading) is None
+
+
+def test_sec_type_still_outranks_the_heading():
+    """Priority is unchanged: sec-type first, then heading, then inherited."""
+    resolve, fetch, _ = _seams(
+        '<?xml version="1.0"?><article><body>'
+        '<sec sec-type="results"><title>Discussion</title>'
+        '<p>Labelled by sec-type, not by its title.</p></sec>'
+        '</body></article>')
+    out = fr.fetch_fulltext("908", resolve_pmcid=resolve, fetch_xml=fetch)
+    assert [s["label"] for s in out["sections"]] == ["results"]
+
+
+def test_enumerated_headings_label_end_to_end():
+    """The widened matcher reaches real extraction, not just the unit helper."""
+    resolve, fetch, _ = _seams(
+        '<?xml version="1.0"?><article><body>'
+        '<sec><title>I. Introduction</title><p>Context.</p></sec>'
+        '<sec><title>2. Research Design and Methods</title><p>How.</p></sec>'
+        '<sec><title>(3) Results and Discussion</title><p>What.</p></sec>'
+        '<sec><title>IV. Concluding remarks</title><p>So what.</p></sec>'
+        '</body></article>')
+    out = fr.fetch_fulltext("909", resolve_pmcid=resolve, fetch_xml=fetch)
+    assert [s["label"] for s in out["sections"]] == [
+        "intro", "methods", "results", "discussion"]
+    assert out["sections_present"] == ["discussion", "intro", "methods", "results"]
