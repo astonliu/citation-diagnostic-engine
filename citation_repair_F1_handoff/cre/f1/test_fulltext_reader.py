@@ -133,6 +133,31 @@ MINIMAL_RESULTS_JATS = """<?xml version="1.0"?>
 </body></article></pmc-articleset>
 """
 
+# Enough prose to clear NONTRIVIAL_BODY_CHARS, for the rows that must face the
+# REAL floor rather than opt out of it. Deliberately boring: it is padding, and
+# nothing asserts anything about its content beyond its presence.
+# Stripped: the reader collapses whitespace, so a trailing space would not
+# survive extraction and would break the exact-text assertions that use it.
+FILLER = ("This paragraph exists only to give the body a realistic length. "
+          * 20).strip()
+
+# A non-IMRAD body -- intro + discussion, zero results, zero methods -- at a
+# realistic size, so "an essay-shaped paper is a complete retrieval" is proved
+# against the real floor instead of a neutralized one. The intro text is kept
+# short and exact so the section-text assertion stays precise.
+DISCUSSION_ONLY_BIG_JATS = """<?xml version="1.0"?>
+<pmc-articleset><article><body>
+  <sec sec-type="intro"><title>Background</title><p>Prior work.</p></sec>
+  <sec><title>Discussion</title><p>{filler}</p></sec>
+</body></article></pmc-articleset>
+""".format(filler=FILLER)
+
+# A full IMRAD body at realistic size: the ordinary complete case, under the real
+# floor. FULL_JATS itself stays small so its exact label/text/hash assertions
+# remain readable.
+FULL_JATS_BIG = FULL_JATS.replace(
+    "<p>Mortality fell by 12%.</p>", f"<p>Mortality fell by 12%. {FILLER}</p>")
+
 
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -204,20 +229,27 @@ def no_size_floor(monkeypatch):
     These fixtures run a few dozen to a few hundred characters: they exist to pin
     labelling, namespaces, hashing, sanitization and cache behaviour, and padding
     each past a 1000-character floor would bury what they actually test. Opt-in,
-    never autouse -- the floor has its own rows, which must see the real value."""
+    never autouse.
+
+    RULE -- a test that asserts ``retrieval_complete`` or ``incomplete_reasons``
+    MUST NOT use this fixture. Those two fields ARE the floor's output, so
+    asserting them under a neutralized floor proves nothing while reading exactly
+    like proof. A row that needs to make a completeness claim uses a realistic
+    fixture (``FULL_JATS_BIG``, ``DISCUSSION_ONLY_BIG_JATS``, ``_essay_jats()``)
+    and faces the real constant. ``test_no_completeness_claim_hides_behind_a_
+    lowered_floor`` enforces this mechanically, so it cannot decay into a comment.
+    """
     monkeypatch.setattr(fr, "NONTRIVIAL_BODY_CHARS", 1)
 
 
 # --------------------------------------------------------------------------
 # Row 1 -- namespaced JATS with results + methods + 2 tables
 # --------------------------------------------------------------------------
-def test_namespaced_jats_results_methods_and_tables_is_complete(no_size_floor):
+def test_namespaced_jats_extracts_labels_tables_and_figures(no_size_floor):
     resolve, fetch, _ = _seams(FULL_JATS_NS)
     out = fr.fetch_fulltext("111", resolve_pmcid=resolve, fetch_xml=fetch)
 
     assert out["resolved"] is True
-    assert out["retrieval_complete"] is True
-    assert out["incomplete_reasons"] == []
     assert out["pmcid"] == "PMC7654321"
     assert out["source"] == "live"
 
@@ -264,8 +296,8 @@ def test_unnamespaced_jats_output_is_identical_to_namespaced(no_size_floor):
     namespaced = fr.fetch_fulltext("111", resolve_pmcid=resolve_a,
                                    fetch_xml=fetch_a)
     plain = fr.fetch_fulltext("111", resolve_pmcid=resolve_b, fetch_xml=fetch_b)
+    # Whole-dict equality already covers every field, completeness included.
     assert namespaced == plain
-    assert plain["retrieval_complete"] is True
 
 
 # --------------------------------------------------------------------------
@@ -314,9 +346,10 @@ def test_no_body_is_cached_because_it_is_a_property_of_the_document(tmp_path):
 # False / no_results_or_methods -- made completeness structurally unreachable
 # for every non-IMRAD paper, holding reviews forever under DEC-032.
 # --------------------------------------------------------------------------
-def test_discussion_and_intro_only_is_complete_and_records_its_sections(
-        no_size_floor):
-    resolve, fetch, _ = _seams(DISCUSSION_ONLY_JATS)
+def test_discussion_and_intro_only_is_complete_and_records_its_sections():
+    """Faces the REAL floor: this row's whole claim is a completeness claim, so
+    proving it under a neutralized floor would prove nothing."""
+    resolve, fetch, _ = _seams(DISCUSSION_ONLY_BIG_JATS)
     out = fr.fetch_fulltext("444", resolve_pmcid=resolve, fetch_xml=fetch)
     assert out["resolved"] is True
     assert out["retrieval_complete"] is True
@@ -378,17 +411,21 @@ def test_undefined_entity_parse_error_yields_no_sections():
 # --------------------------------------------------------------------------
 # Row 8 -- lone surrogate
 # --------------------------------------------------------------------------
-def test_lone_surrogate_is_escaped_at_the_boundary_and_recorded(no_size_floor):
+def test_lone_surrogate_is_escaped_at_the_boundary_and_recorded():
     """A lone surrogate makes ET.fromstring raise UnicodeEncodeError, and would
     kill a later JSONL write. It is escaped before parsing, and recorded."""
     resolve, fetch, _ = _seams(
-        MINIMAL_RESULTS_JATS.format(body="Effect size " + chr(0xD800) + " here."))
+        MINIMAL_RESULTS_JATS.format(
+            body="Effect size " + chr(0xD800) + " here. " + FILLER))
     out = fr.fetch_fulltext("777", resolve_pmcid=resolve, fetch_xml=fetch)
 
     assert out["sanitized_paths"] == ["xml_text"]
-    assert out["retrieval_complete"] is True          # not a retrieval failure
+    # Real floor, not a lowered one: an escaped code point is a sanitization
+    # event, never a retrieval failure.
+    assert out["retrieval_complete"] is True
+    assert out["incomplete_reasons"] == []
     text = out["sections"][0]["text"]
-    assert text == "Effect size \\ud800 here."
+    assert text == "Effect size \\ud800 here. " + FILLER
     # The whole record survives the JSONL round trip that motivated the guard.
     json.dumps(out, ensure_ascii=False).encode("utf-8")
     assert out["sections"][0]["content_sha256"] == _sha(text)
@@ -444,7 +481,7 @@ def test_cache_round_trip_is_identical_and_makes_no_request(tmp_path):
 # --------------------------------------------------------------------------
 # Row 10 -- corrupt cache
 # --------------------------------------------------------------------------
-def test_corrupt_cache_is_ignored_refetched_and_rewritten(tmp_path, no_size_floor):
+def test_corrupt_cache_is_ignored_refetched_and_rewritten(tmp_path):
     cache_dir = str(tmp_path / "fulltext")
     os.makedirs(cache_dir, exist_ok=True)
     path = os.path.join(cache_dir, "fulltext_pmid_999.json")
@@ -455,7 +492,6 @@ def test_corrupt_cache_is_ignored_refetched_and_rewritten(tmp_path, no_size_floo
     out = fr.fetch_fulltext("999", cache_dir=cache_dir, resolve_pmcid=resolve,
                             fetch_xml=fetch)
     assert out["source"] == "live"
-    assert out["retrieval_complete"] is True
     assert calls == {"resolve": 1, "fetch": 1}
 
     with open(path, encoding="utf-8") as f:
@@ -583,7 +619,7 @@ def test_completeness_requires_resolution_even_with_a_pmcid_shaped_string():
     assert out["retrieval_complete"] is False
 
 
-def test_pure_container_sec_emits_no_blank_section(no_size_floor):
+def test_pure_container_sec_emits_no_blank_section():
     resolve, fetch, _ = _seams(
         '<?xml version="1.0"?><article><body>'
         '<sec sec-type="results"><title>Results</title>'
@@ -592,7 +628,6 @@ def test_pure_container_sec_emits_no_blank_section(no_size_floor):
     out = fr.fetch_fulltext("1414", resolve_pmcid=resolve, fetch_xml=fetch)
     assert [(s["label"], s["title"]) for s in out["sections"]] == [
         ("results", "Primary")]
-    assert out["retrieval_complete"] is True
 
 
 def test_sub_article_body_is_never_read_as_the_papers_own():
@@ -680,12 +715,11 @@ def test_sec_type_wins_over_a_misleading_heading():
 # --------------------------------------------------------------------------
 # The LIVE seams, exercised offline through an injected session
 # --------------------------------------------------------------------------
-def test_live_default_seams_resolve_then_efetch_with_no_injection(no_size_floor):
+def test_live_default_seams_resolve_then_efetch_with_no_injection():
     session = _RoutedSession({ELINK: _elink_ok("7654321"),
                               EFETCH: _Resp(text=FULL_JATS)})
     out = fr.fetch_fulltext("1919", session=session, api_key="KEY")
     assert out["pmcid"] == "PMC7654321"
-    assert out["retrieval_complete"] is True
 
     urls = [url for url, _ in session.calls]
     assert urls == [ELINK, EFETCH]
@@ -720,11 +754,13 @@ def test_live_omits_api_key_when_absent():
     assert "api_key" not in session.calls[1][1]
 
 
-def test_injected_seams_mean_no_session_is_ever_used(no_size_floor):
+def test_injected_seams_mean_no_session_is_ever_used():
     resolve, fetch, _ = _seams(FULL_JATS)
     out = fr.fetch_fulltext("2323", session=_BoomSession(),
                             resolve_pmcid=resolve, fetch_xml=fetch)
-    assert out["retrieval_complete"] is True
+    # _BoomSession would have raised; reaching sections proves the seams ran.
+    assert out["resolved"] is True
+    assert out["sections"]
 
 
 # ==========================================================================
@@ -857,3 +893,55 @@ def test_a_pre_dec041_cache_entry_is_refetched_not_served(tmp_path):
     assert out["source"] == "live"
     assert out["retrieval_complete"] is True
     assert out["incomplete_reasons"] == []
+
+
+def test_full_imrad_body_at_realistic_size_is_complete():
+    """The ordinary case, under the real floor: results and methods present, a
+    body of realistic length, complete."""
+    resolve, fetch, _ = _seams(FULL_JATS_BIG)
+    out = fr.fetch_fulltext("907", resolve_pmcid=resolve, fetch_xml=fetch)
+    assert out["retrieval_complete"] is True
+    assert out["incomplete_reasons"] == []
+    assert "results" in out["sections_present"]
+    assert "methods" in out["sections_present"]
+
+
+def test_no_completeness_claim_hides_behind_a_lowered_floor():
+    """Enforces the no_size_floor rule mechanically, so it cannot decay into a
+    comment nobody reads.
+
+    retrieval_complete and incomplete_reasons ARE the floor's output. Asserting
+    either one while the floor is neutralized proves nothing about the shipped
+    predicate, yet reads exactly like proof -- the most expensive kind of test to
+    have, because it looks like coverage and is not. A row making a completeness
+    claim must use a realistic fixture and face the real constant."""
+    import ast
+
+    source = os.path.join(os.path.dirname(__file__), "test_fulltext_reader.py")
+    with open(source, encoding="utf-8") as handle:
+        text = handle.read()
+
+    offenders = []
+    for node in ast.parse(text).body:
+        if not (isinstance(node, ast.FunctionDef)
+                and node.name.startswith("test_")
+                and node.name != "test_no_completeness_claim_hides_behind_a_lowered_floor"):
+            continue
+        if "no_size_floor" not in [arg.arg for arg in node.args.args]:
+            continue
+        body = ast.get_source_segment(text, node) or ""
+        claimed = [field for field in ("retrieval_complete", "incomplete_reasons")
+                   if field in body]
+        if claimed:
+            offenders.append(f"{node.name} asserts {claimed} under no_size_floor")
+
+    assert offenders == [], "; ".join(offenders)
+
+
+def test_the_rule_is_written_on_the_fixture_itself():
+    """The enforcement above is only half of it: the fixture has to SAY why, or
+    the next person deletes the guard rather than the violation."""
+    fixture_doc = no_size_floor.__doc__ or ""
+    assert "MUST NOT" in fixture_doc
+    assert "retrieval_complete" in fixture_doc
+    assert "incomplete_reasons" in fixture_doc
