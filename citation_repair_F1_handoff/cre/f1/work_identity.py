@@ -675,15 +675,95 @@ def _edition_ordinals(title: str) -> set[int]:
     return out
 
 
+#: A roman numeral counts as a SERIES ORDINAL only in series context. `_ROMAN_RE`
+#: alone matches a bare i, v or x anywhere in a title, which is how "X-ray" and the
+#: hybrid-binomial "Populus x canadensis" came to be read as ordinals and forced
+#: same-work pairs to wrong-paper.
+#:
+#: (a) preceded by a series keyword, or (b) segment-initial AND closed by '.' or
+#: ':' -- the shape a real ordinal actually takes ("Part II.", ": I. The decision
+#: scheme"). A letter buried mid-phrase is not an ordinal.
+_SERIES_KEYWORD_ROMAN_RE = re.compile(
+    r"\b(?:part|pt|no|number|vol|volume|chapter|chap|section|sect|series|book)\.?\s+"
+    r"(i|ii|iii|iv|v|vi|vii|viii|ix|x)\b", re.I)
+_SEGMENT_INITIAL_ROMAN_RE = re.compile(
+    r"(?:^|[:;.–—-])\s*(i|ii|iii|iv|v|vi|vii|viii|ix|x)\s*[.:]\s", re.I)
+
+
 def _roman_series_ordinals(title: str) -> set[str]:
-    title_without_dotted_iv = _DOTTED_IV_ABBREVIATION_RE.sub(" ", title or "")
-    return {token.lower() for token in _ROMAN_RE.findall(title_without_dotted_iv)}
+    """Roman ordinals in SERIES CONTEXT only. Raw title, after the dotted-i.v. mask
+    exactly as before."""
+    text = _DOTTED_IV_ABBREVIATION_RE.sub(" ", title or "")
+    out = {m.group(1).lower() for m in _SERIES_KEYWORD_ROMAN_RE.finditer(text)}
+    out |= {m.group(1).lower() for m in _SEGMENT_INITIAL_ROMAN_RE.finditer(text)}
+    return out
+
+
+def _roman_stems(title: str) -> "list[tuple[str, str]]":
+    """``(token, stem)`` for every roman occurrence, stem = the raw text before it.
+
+    Ungated on purpose: this is the SECOND part of the rule, catching a series pair
+    whose ordinals sit outside the shapes above but whose surrounding text is
+    otherwise the same title."""
+    text = _DOTTED_IV_ABBREVIATION_RE.sub(" ", title or "")
+    return [(m.group(0).lower(), text[:m.start()]) for m in _ROMAN_RE.finditer(text)]
+
+
+def _roman_stem_conflict(claimed_title: str, resolved_title: str) -> bool:
+    """Conflict when an ordinal present on ONE side only sits on a near-identical
+    stem on the other.
+
+    UNMATCHED-ONLY IS LOAD-BEARING. An earlier revision compared every cross-pair
+    with ``ta != tb``, including ordinals present on BOTH sides, and added 43 rows
+    to review_wrong_paper frame-wide; under this form 0 of those 43 fire. An
+    ordinal appearing on both sides is shared context, not a discriminator."""
+    left, right = _roman_stems(claimed_title), _roman_stems(resolved_title)
+    if not left or not right:
+        return False
+    left_tokens = {t for t, _ in left}
+    right_tokens = {t for t, _ in right}
+    # DEFERRED import, and it has to be: biblio_match imports THIS module at load
+    # time, so a module-level import would be circular. _pair_sim and
+    # normalize_title are the functions the 0.96 floor was calibrated against --
+    # substituting work_identity's own JaroWinkler would be a different scale and
+    # would silently invalidate the frame-wide measurement behind this rule. By the
+    # time this runs (from flag_verdict) biblio_match is fully loaded.
+    from .biblio_match import _pair_sim, normalize_title
+
+    for ta, stem_a in left:
+        if ta in right_tokens:
+            continue                      # present on both sides -> not a discriminator
+        for tb, stem_b in right:
+            if tb in left_tokens:
+                continue
+            if _pair_sim(normalize_title(stem_a), normalize_title(stem_b)) >= 0.96:
+                return True
+    return False
+
+
+def roman_conflict_suppressed(claimed_title: str, resolved_title: str) -> bool:
+    """True when the OLD ungated roman rule would have fired and the gated one
+    does not -- i.e. C1 is what took this row out of the wrong-paper band.
+
+    C5 needs this: a row that only stopped conflicting because a bare ``i``/``v``/
+    ``x`` no longer counts as an ordinal must not thereby CLEAR to ``match``. The
+    gate removed a false signal; it did not establish that the two are the same
+    work."""
+    def ungated(title):
+        text = _DOTTED_IV_ABBREVIATION_RE.sub(" ", title or "")
+        return {t.lower() for t in _ROMAN_RE.findall(text)}
+    a, b = ungated(claimed_title), ungated(resolved_title)
+    if not (a and b and a != b):
+        return False                       # the old rule would not have fired
+    return not _series_conflict(claimed_title, resolved_title)
 
 
 def _series_conflict(claimed_title: str, resolved_title: str) -> bool:
     a = _roman_series_ordinals(claimed_title)
     b = _roman_series_ordinals(resolved_title)
     if a and b and a != b:
+        return True
+    if _roman_stem_conflict(claimed_title, resolved_title):
         return True
     # Serial annual/periodic editions differ only by an embedded 4-digit year
     # ("...Statistics-2017 Update" vs "...-2019 Update"; "Standards of Care-2019"

@@ -65,13 +65,10 @@ _BJA = dict(year=1997, journal="Br J Anaesth", volume="79", pages="740-743")
 # period is a boundary, so "I.v." -> {i, v} while "Iv" -> {iv}.
 # =====================================================================
 
-@pytest.mark.xfail(strict=True, reason=(
-    "OPEN, found by this fixture: the dotted-abbreviation mask is NOT "
-    "COMPOSITIONAL. Masking the resolved 'I.v.' leaves {ii}, but the written "
-    "'Iv' is undotted and so survives as a roman token: {iv, ii} vs {ii}. The "
-    "sets differ and _series_conflict still fires on a same-work pair. NO "
-    "seed-41 row demonstrates this, so per the spec it is recorded, NOT fixed. "
-    "Widening the mask requires its own authorization."))
+# RESOLVED 2026-08-12 by C1, NOT PREDICTED BY ITS SPEC. The context gate makes the
+# dotted-abbreviation mask's non-compositionality moot: an undotted 'Iv' beside a
+# real numeral is not in series context, so it never enters the set that the mask
+# was failing to clean. Reported as an unpredicted XPASS rather than absorbed.
 def test_1a_KNOWN_DEFECT_mask_is_not_compositional_beside_a_real_numeral():
     c = _c(title="Iv anesthesia: II. Pharmacokinetics", authors=["Hase", "Oda"],
            claimed_doi="10.1093/bja/79.6.740", **_BJA)
@@ -123,10 +120,9 @@ def test_1h_hyphen_boundary_is_one_sided_and_so_cannot_conflict():
                             "Xray crystallography of lysozyme") is False
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "OPEN residual roman surface: a real roman numeral coexisting with an "
-    "abbreviated genus makes BOTH sides non-empty and unequal, so the rule "
-    "fires on a same-work pair. Not demonstrated by any seed-41 row."))
+# RESOLVED 2026-08-12 by C1's series-context gate: a roman letter only counts as an
+# ordinal when a series keyword precedes it or it is segment-initial and closed by
+# '.' or ':'. An abbreviated genus is neither, so both sides now yield empty sets.
 def test_1i_KNOWN_DEFECT_roman_numeral_plus_abbreviated_genus_false_conflicts():
     assert _series_conflict("Vi capsular antigen of V. cholerae",
                             "VI capsular antigen of Vibrio cholerae.") is False

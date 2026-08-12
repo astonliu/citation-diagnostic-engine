@@ -18,10 +18,10 @@ introduced them; renaming is a breaking change to the artifact contract.
 """
 from __future__ import annotations
 
-REASON_REGISTRY_VERSION = "5.3"
+REASON_REGISTRY_VERSION = "5.4"
 
 # --- §5.6 A.1: same-work reasons -> route review_same_work_variant ------------
-# 20 from work_identity.py + 5 from biblio_match.py = 25. (Rev 5.2 registry added
+# 20 from work_identity.py + 9 from biblio_match.py = 29. (Rev 5.2 registry added
 # ``translated_title_missing_volume_anchors``, which the code emits from
 # work_identity RULE F but the rev-5.2 draft's A.1 table omitted -- caught by the
 # equality test below. Rev 5.3 added ``version_chain_same_work``, the fifth
@@ -54,6 +54,12 @@ SAME_WORK_REASONS = frozenset({
     "preprint_published_version",       # F2-B, requires version evidence
     "strict_prefix_title",              # F2-D, gated OFF (§11) -- never emitted frozen
     "version_chain_same_work",          # §15.2, rev 5.3
+    # C1-C5 (rev 5.4). Each names WHICH repair took a row out of the wrong-paper
+    # band, so a row that left it can never be read as "cleanly matched".
+    "implausible_author_field",         # C2
+    "corporate_name_inverted",          # C4
+    "page_editorial_suffix",            # C3
+    "roman_not_in_series_context",      # C1
 })
 
 # --- §5.6 A.2: non-same-work reasons on route review_wrong_paper --------------

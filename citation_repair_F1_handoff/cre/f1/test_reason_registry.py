@@ -26,6 +26,12 @@ def _emitted_reason_literals() -> set:
     reasons |= set(re.findall(r'WorkIdentityEvidence\(\s*True,\s*"([^"]+)"', wi))
     # biblio_match: m.same_work_reason = "reason"
     reasons |= set(re.findall(r'same_work_reason\s*=\s*"([^"]+)"', bm))
+    # biblio_match, C5 (rev 5.4): the four repair reasons are assigned to
+    # FieldAgreement.repair_reason at the point the repair happens, then emitted as
+    # same_work_reason through a variable in flag_verdict. The literal never appears
+    # next to `same_work_reason`, so the pattern above cannot see it -- scanning the
+    # assignment site keeps the drift guard total over what the module can emit.
+    reasons |= set(re.findall(r'repair_reason\s*=\s*"([^"]+)"', bm))
     # unscoreable: return ("bucket", ...)
     reasons |= set(re.findall(r'return\s*\(\s*"([a-z0-9_]+)"\s*,', un))
     return reasons

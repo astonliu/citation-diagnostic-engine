@@ -2,7 +2,7 @@
 
 **Spec date:** 2026-07-26
 
-**Revision:** 5.3 (supersedes revisions 1–5.2)
+**Revision:** 5.4 (supersedes revisions 1–5.3)
 
 **Amendment 2026-08-07 (frame-scoping remediation; docs-only, no normative rule
 change):** (Item 1) §20 corrected — the reband FRAME is defined by a hash-pinned
@@ -224,7 +224,7 @@ The journal-authority and feature-flag fields (added rev 5.2, enforced by
   "journal_match_authoritative_rate": 0.0,
   "f2i_field_transposition_active": false,
   "f2d_strict_prefix_active": false,
-  "reason_registry_version": "5.3"
+  "reason_registry_version": "5.4"
 }
 ```
 
@@ -397,7 +397,7 @@ spec cannot drift behind the code (that test already caught
 `translated_title_missing_volume_anchors`, which an earlier draft of this table
 omitted). The schema in §19.1 MUST reject any `route_reason` not in this registry.
 
-**A.1 — same-work reasons → route `review_same_work_variant` (25).** From
+**A.1 — same-work reasons → route `review_same_work_variant` (29).** From
 `work_identity.py`: `mixed_identity_citation`, `overwhelming_bibliographic_anchor`,
 `authoritative_title_alias`, `canonical_title_exact`, `malformed_title_wrapper`,
 `translated_title_metadata`, `translated_title_shared_anchors`,
@@ -410,7 +410,25 @@ omitted). The schema in §19.1 MUST reject any `route_reason` not in this regist
 `near_identical_title`, `physical_location_same_work` (F2-C), `preprint_published_version`
 (F2-B, requires version evidence), `strict_prefix_title` (F2-D — gated OFF §11, never
 emitted in the frozen configuration), **`version_chain_same_work`** (§15.2 — added in
-rev 5.3, which is why `REASON_REGISTRY_VERSION` moves `5.2` → `5.3`).
+rev 5.3, which is why `REASON_REGISTRY_VERSION` moves `5.2` → `5.3`), and the four
+**repair reasons** added in rev 5.4 (`5.3` → `5.4`): `implausible_author_field`
+(C2), `corporate_name_inverted` (C4), `page_editorial_suffix` (C3) and
+`roman_not_in_series_context` (C1).
+
+**A.1a — the repair reasons (rev 5.4).** Each names WHICH repair removed a
+disagreement signal for a comparison. They exist because a repair is not a match: a
+rule that stops a false signal firing has not established that two records are the
+same work, and a row that reached `match` would leave the audited population
+unseen. So a repaired row that would otherwise clear is routed to
+`review_same_work_variant` — audited, and excluded from the F2 count either way, so
+the routing costs nothing in precision. Measured on the seed-43 flagged pool: 8 rows
+move, **0 into `match`**, **0 TRUE_F2 lost**.
+
+Unlike the other A.1 codes these are assigned to `FieldAgreement.repair_reason` at
+the point the repair happens and emitted as `same_work_reason` through a variable in
+`flag_verdict`, so `test_reason_registry`'s static scan reads the assignment site
+too — otherwise the drift guard would be blind to exactly the codes most likely to
+be renamed.
 
 **A.2 — non-same-work reasons → route `review_wrong_paper` (2).**
 `preprint_shape_unconfirmed` (preprint shape without version evidence),

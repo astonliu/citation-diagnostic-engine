@@ -26,7 +26,7 @@ the model can't load. Stage 1 ships independently and has no such dependency.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 import requests
@@ -37,7 +37,8 @@ from .ratelimit import CROSSREF, OPENALEX, request_with_retry
 from .textnorm import fold_bibliographic_text, fold_chemical_charges
 from .work_identity import (assess_same_work, first_author_equivalent,
                             doi_equivalent, journal_equivalent,
-                            is_distinctive_title, version_chain_same_work)
+                            is_distinctive_title, version_chain_same_work,
+                            _strip_acronym_gloss, roman_conflict_suppressed)
 from .journal_identity import journal_identity
 
 # ``Claimed`` is the handoff's name for the claimed-reference metadata object.
@@ -64,6 +65,13 @@ class FieldAgreement:
     volume_match: Optional[bool] = None
     pages_match: Optional[bool] = None
     doi_match: Optional[bool] = None
+    #: C5. Names WHICH repair removed a disagreement signal for this comparison
+    #: (C2 filtered an unjudgeable author, C4 un-inverted a corporate name, C3
+    #: stripped an editorial page suffix), or None. A repaired row must never take
+    #: the clean-match short-circuit: the repair removed a false signal, it did not
+    #: establish agreement, and a row reaching ``match`` leaves the audited
+    #: population. The artifacts' written_* fields are untouched either way.
+    repair_reason: "Optional[str]" = None
     # F2-G (spec §8.1): how journal_match was decided and whether that method is
     # authoritative enough for F2-C. Only issn_intersection / authority_alias /
     # nlm_unique_id / manual_alias set ``journal_match_authoritative`` True;
@@ -363,7 +371,7 @@ def _surname_present(claimed_surname: str, cand_authors: list[str]) -> bool:
     return False
 
 
-def field_agreement(claimed: Claimed, cand: RetrievedRecord) -> FieldAgreement:
+def field_agreement(claimed: Claimed, cand: RetrievedRecord, *, repair: bool = True) -> FieldAgreement:
     """Each field -> True / False / None (None = can't judge, missing on a side).
 
     * author : claimed first-author surname present in candidate authors
@@ -378,6 +386,20 @@ def field_agreement(claimed: Claimed, cand: RetrievedRecord) -> FieldAgreement:
     fa = FieldAgreement()
 
     # author
+    # C2/C4 act at COMPARISON TIME ONLY. ClaimedRef.authors and the emitted
+    # written_authors are left untouched in every artifact -- the corrupt value is
+    # the evidence for the JATS-tagging finding and must survive verbatim.
+    #
+    # C2: drop entries that cannot be names at all, so an unjudgeable field yields
+    # None rather than a confident False. "ICH S7A" is not a person and cannot
+    # DISAGREE with one; has_confident_disagreement counts a False here as a
+    # wrong-paper signal.
+    # C4: un-invert a corporate name a reference manager rendered as
+    # "Association AD", but only on an exact surname+initials match against a
+    # resolved roster entry.
+    if repair:
+        claimed, fa.repair_reason = repair_claimed_for_comparison(claimed, cand)
+
     claimed_sn = _first_author_surname(claimed.authors)
     if claimed_sn and cand.authors:
         fa.author_match = _surname_present(claimed_sn, cand.authors)
@@ -420,9 +442,19 @@ def field_agreement(claimed: Claimed, cand: RetrievedRecord) -> FieldAgreement:
     cv, rv = _digits(claimed.volume), _digits(cand.volume)
     if cv and rv:
         fa.volume_match = cv == rv
-    cp, rp = _canonical_pages(claimed.pages), _canonical_pages(cand.pages)
+    cp = _canonical_pages(claimed.pages, strip_editorial=repair)
+    rp = _canonical_pages(cand.pages, strip_editorial=repair)
     if cp and rp:
         fa.pages_match = cp == rp
+        # C5 for C3: set ONLY when stripping CHANGED the outcome -- pages that
+        # already agreed need no repair, and flagging them would divert rows that
+        # were never in the wrong-paper band (measured: 59 such rows on the seed-37
+        # frame before this was tightened).
+        if fa.pages_match and fa.repair_reason is None:
+            cp_raw = _canonical_pages(claimed.pages, strip_editorial=False)
+            rp_raw = _canonical_pages(cand.pages, strip_editorial=False)
+            if cp_raw != rp_raw:
+                fa.repair_reason = "page_editorial_suffix"
 
     if claimed.claimed_doi and cand.doi:
         fa.doi_match = doi_equivalent(claimed.claimed_doi, cand.doi)
@@ -474,7 +506,105 @@ def _canonical_segment(seg: str) -> str:
     return f"{prefix}{start}-{end_out}{suffix}"
 
 
-def _canonical_pages(s: str) -> str:
+#: C3. Exposure measured at aa118ca: 147 of 58,906 rows (0.25%), 2 of the 110
+#: flagged (7.3x enrichment). Anchored to ';' so it can only ever remove trailing
+#: editorial matter, never part of a range.
+_PAGE_EDITORIAL_SUFFIX = re.compile(
+    r"\s*;\s*(?:quiz|discussion|author reply|reply|erratum|comment)\b.*$", re.I)
+
+
+def _implausible_author(name: str) -> bool:
+    """An author entry that cannot be a personal or corporate name.
+
+    STRUCTURAL ONLY: a digit, or a bracket/colon, in an author field is never a
+    name -- it is a document code ("ICH M3 (R2)", "ICH S7A") or a section number
+    the publisher glued on ("...Committee: 3"). T1 (2026-08-12) established that
+    9 of 9 audited parse-boundary rows carry the wrong string INSIDE a JATS tag as
+    PMC serves it, five of them in structured <element-citation>, so the parser
+    read the tags faithfully and the corruption is upstream.
+
+    DELIBERATELY NOT a token-count or capitalization rule. Three-or-more-
+    capitalized-tokens was tested and fires on "American Diabetes Association",
+    "Garcia Lopez Martinez", "Van Der Berg" and "Maria Del Carmen Garcia Lopez";
+    every threshold that spares those also spares real corruptions. The
+    name-list-in-one-surname case needs a signal that is not a token count and is
+    out of scope."""
+    n = (name or "").strip()
+    if not n:
+        return False
+    # Normalize away the two corruptions this codebase ALREADY recovers, before
+    # judging. Without this, C2 discards wholesale exactly the entries D2b and the
+    # acronym-gloss rule were built to repair -- a coarser rule silently undoing a
+    # finer one:
+    #   * a colon-introduced trailing section number ("...Committee: 3", D2b);
+    #   * a parenthetical acronym glossing the words beside it ("World Medical
+    #     Association (WMA)"), which _strip_acronym_gloss already handles.
+    n = re.sub(r"\s*:\s*\d+\s*$", "", n)
+    n = _strip_acronym_gloss(n).strip()
+    if not n:
+        return False
+    # A DIGIT, and only a digit. The spec also proposed brackets/colons, but both
+    # named targets ("ICH S7A", "ICH M3 (R2)") carry digits, and a parenthetical
+    # that is NOT an acronym gloss is ordinary in a real corporate name --
+    # "International Committee for Pediatric Care (ICPC)" is a legitimate body, and
+    # filtering it destroyed the two-organization guard that keeps it apart from
+    # the National committee sharing its DOI.
+    return bool(re.search(r"\d", n))
+
+
+def _uninvert_corporate(written: str, resolved_authors: list) -> "str | None":
+    """Reverse a reference manager's corporate-name inversion, or ``None``.
+
+    A manager that treats a corporate author as a person emits Vancouver shape --
+    last word as surname, initials of the preceding words as given initials:
+    "American Diabetes Association" -> "Association AD". MEDLINE stores a corporate
+    name unsegmented in CollectiveName "exactly as they appear in the journal", so
+    this shape is never produced by the RESOLVED side; it is always citing-side
+    corruption.
+
+    BOTH conditions are required -- last word equal AND the initials of every
+    preceding word equal, in order -- so an ordinary Vancouver personal name has no
+    multi-word roster entry to match and is left alone."""
+    m = re.fullmatch(r"([A-Z][A-Za-z'\-]+)[ ,]+([A-Z]{1,5})\.?", (written or "").strip())
+    if not m:
+        return None
+    surname, inits = m.group(1), m.group(2)
+    for r in resolved_authors or []:
+        toks = re.findall(r"[A-Za-z][A-Za-z'\-]*", r or "")
+        if len(toks) >= 2 and toks[-1].lower() == surname.lower():
+            if "".join(t[0] for t in toks[:-1]).upper() == inits.upper():
+                return r
+    return None
+
+
+def repair_claimed_for_comparison(claimed, cand):
+    """``(claimed_for_comparison, repair_reason)`` -- C2 + C4, applied ONCE.
+
+    Used by BOTH ``field_agreement`` and ``flag_verdict``. It has to be both: the
+    field comparison and ``assess_same_work`` must see the SAME author list, or a
+    row is repaired for the fields and then blocked by an identity rule still
+    reading the corrupt value (PMC8012337:CR14 -- every field agrees after C4
+    un-inverts 'Association AD', but the corporate-conflict block was still
+    comparing the inverted form and hard-returned wrong-paper).
+
+    Returns a COPY. ``ClaimedRef.authors`` and the emitted ``written_authors`` are
+    never mutated -- the corrupt value is the evidence for the JATS-tagging
+    finding and has to survive verbatim in every artifact."""
+    repair_reason = None
+    authors = [a for a in (claimed.authors or []) if not _implausible_author(a)]
+    if (claimed.authors or []) and not authors:
+        repair_reason = "implausible_author_field"
+    if authors:
+        restored = _uninvert_corporate(authors[0], cand.authors)
+        if restored is not None:
+            authors = [restored] + authors[1:]
+            repair_reason = "corporate_name_inverted"
+    if repair_reason is None:
+        return claimed, None
+    return replace(claimed, authors=authors), repair_reason
+
+
+def _canonical_pages(s: str, *, strip_editorial: bool = True) -> str:
     """Canonicalize a page range so an elided end page compares equal to its
     written-out form (F2-A, spec §7.1). PubMed elides the shared leading digits of
     the end page (``141-4``, ``1083-91``, ``3143-421``, and with a boundary carry
@@ -493,6 +623,13 @@ def _canonical_pages(s: str) -> str:
     if not s:
         return ""
     t = s.strip().lower()
+    # C3: MEDLINE appends EDITORIAL matter to a page range -- "212-8; quiz 276",
+    # "E2; discussion 38-9", "1083-91; author reply 92". Those are a different
+    # item printed after the article, not part of its extent, so the two sides
+    # occupy the SAME pages and pages_match must not read False. Stripped FIRST,
+    # before dash folding, so the suffix's own dashes never enter the range.
+    if strip_editorial:
+        t = _PAGE_EDITORIAL_SUFFIX.sub("", t)
     for d in _PAGE_DASHES:
         t = t.replace(d, "-")
     t = re.sub(r"\s+", "", t)
@@ -505,7 +642,7 @@ def _canonical_pages(s: str) -> str:
 # Composite score + best match
 # =====================================================================
 def match_score(claimed: Claimed, cand: RetrievedRecord,
-                accept: float = 0.85) -> MatchResult:
+                accept: float = 0.85, *, repair: bool = True) -> MatchResult:
     """Title similarity, nudged by confirmatory field agreement and pulled down
     by confident field DISagreement, with a STRONG-CORROBORATION OVERRIDE.
 
@@ -534,7 +671,7 @@ def match_score(claimed: Claimed, cand: RetrievedRecord,
     recall set, not assumed away here.
     """
     ts = title_sim(claimed.title, cand.title)
-    f = field_agreement(claimed, cand)
+    f = field_agreement(claimed, cand, repair=repair)
     score = ts
     # confirmatory boosts
     if f.author_match:
@@ -694,6 +831,29 @@ def _physical_location_conjunction(f: FieldAgreement) -> bool:
             and f.journal_match is True and f.doi_match is not False)
 
 
+def _confident_disagreement(f, title_sim: float) -> bool:
+    """The BOOLEAN wrong-paper signal, as a function so it can also be evaluated on
+    the UNREPAIRED comparison (C5 needs to know whether a repair is what removed
+    it)."""
+    return bool(
+        (f.first_author_match is False)
+        or (f.author_match is False) or (f.year_match is False)
+        or ((f.volume_match is False or f.pages_match is False)
+            and title_sim < SAME_WORK_TITLE_SIM_MIN))
+
+
+def _repair_moved_it_out(original_claimed, cand, accept: float) -> bool:
+    """Whether the row WOULD have carried a confident disagreement without the
+    C2/C3/C4 repair.
+
+    C5 exists to stop a repair CLEARING a row out of the audited population -- not
+    to move rows that were already matching cleanly. Without this check the
+    diversion fired on any row a repair touched, and on the seed-37 frame that took
+    59 rows out of ``match`` that had never been in the wrong-paper band."""
+    raw = match_score(original_claimed, cand, accept=accept, repair=False)
+    return _confident_disagreement(raw.fields, raw.title_sim)
+
+
 def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
                  accept: float = 0.85) -> tuple[str, MatchResult]:
     """Classify a (claimed, resolved-candidate) pair into a priority band.
@@ -728,6 +888,10 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
 
     Compute F2 precision primarily over VERDICT_WRONG_PAPER.
     Call is_scoreable_title on both titles before calling this."""
+    # C2/C4 repair applied ONCE, up front, so the field comparison and the identity
+    # assessment below read the same author list (see repair_claimed_for_comparison).
+    _claimed_original = claimed
+    claimed, _repair = repair_claimed_for_comparison(claimed, cand)
     m = match_score(claimed, cand, accept=accept)
     f = m.fields
     # has_confident_disagreement: a BOOLEAN wrong-paper signal. Tri-state -- only a
@@ -789,6 +953,24 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # (title_sim >= accept) with agreeing coordinates is an ordinary same_record
     # and stays ``match`` (§5.4 step 3) -- e.g. a perfectly-cited reference. Net
     # HIGH membership is unchanged either way.
+    # C5: a row whose author comparison was REPAIRED (C2 filtered an unjudgeable
+    # entry, or C4 un-inverted a corporate name) must not clear here. The repair
+    # removed a disagreement signal rather than establishing agreement, and a row
+    # that reaches ``match`` leaves the audited population and is never seen by a
+    # human. review_same_work_variant is audited and is excluded from the F2 count
+    # either way, so routing there costs nothing in precision.
+    # _repair is the authority: the hoisted call above already consumed the repair,
+    # so field_agreement's own (idempotent) pass sees nothing left to do.
+    repair_reason = _repair or f.repair_reason
+    if repair_reason is None and roman_conflict_suppressed(claimed.title, cand.title):
+        repair_reason = "roman_not_in_series_context"
+    if (repair_reason is not None and not has_confident_disagreement
+            and m.score >= accept
+            and (repair_reason == "roman_not_in_series_context"
+                 or _repair_moved_it_out(_claimed_original, cand, accept))):
+        m.same_work_reason = repair_reason
+        m.identity_signals = ("repaired_comparison",)
+        return VERDICT_SAME_WORK_VARIANT, m
     if not has_confident_disagreement and m.score >= accept and not (
             _physical_location_conjunction(f) and m.title_sim < accept):
         return VERDICT_MATCH, m

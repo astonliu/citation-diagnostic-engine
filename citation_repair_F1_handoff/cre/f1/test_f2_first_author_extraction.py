@@ -98,15 +98,12 @@ def test_D1_contributor_run_in_the_first_author_slot():
                r_rest=("Lee", "Kim", "Yoon")) is True
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "D2a DECLINED. 'Association AD' is 'American Diabetes Association' with the "
-    "leading words replaced by their initials. Matching it requires expanding an "
-    "acronym against the OTHER name's words, which is exactly what "
-    "test_corporate_abbreviation_is_a_token_change_and_stays_high forbids ('AAP' "
-    "vs 'American Academy of Pediatrics' must stay a conflict). Restricting the "
-    "expansion to a TRAILING initials token would thread that needle, but it "
-    "extends what counts as corporate identity and so relaxes a RULE A/A2 "
-    "conjunct -- out of scope. Reported to ZD as the concrete option."))
+# RESOLVED 2026-08-12 by C4 (_uninvert_corporate). D2a was declined because
+# expanding an acronym against the OTHER name's words would break the AAP guard.
+# C4 does not do that: it reverses a reference manager's INVERSION, requiring the
+# last word to match a resolved roster entry AND the initials of every preceding
+# word to match in order -- so 'AAP' vs 'American Academy of Pediatrics' is still a
+# conflict, and 'Smith JA' is still left alone.
 def test_D2a_corporate_name_mangled_to_surname_plus_initials():
     assert _fa("Association AD", "American Diabetes Association") is True
 
