@@ -61,7 +61,12 @@ def extractor_of(*claims):
 
 
 def run(tmp_path, refs, *, extractor, coverage_judge, fetch_abstract=abstract_ok,
-        disposition, monkeypatch, pubtypes_lookup=None):
+        disposition, monkeypatch, pubtypes_lookup=None, **extra):
+    """``**extra`` is passed straight through to ``run_natural_judgment``.
+
+    Added for the opt-in full-text seams so their tests drive the REAL entry point
+    through this same helper rather than reconstructing the call -- a reconstruction
+    is the one thing a wiring test must not do, since wiring is what it checks."""
     (tmp_path / "PMC1.xml").write_text("<x/>", encoding="utf-8")
     monkeypatch.setattr(jr, "parse_pmc_xml", lambda path, source_pmcid=None: refs)
     out_dir = tmp_path / "out"
@@ -69,7 +74,7 @@ def run(tmp_path, refs, *, extractor, coverage_judge, fetch_abstract=abstract_ok
         str(tmp_path), str(out_dir), extractor=extractor,
         coverage_judge=coverage_judge, fetch_abstract=fetch_abstract,
         preband_disposition=disposition, pubtypes_lookup=pubtypes_lookup,
-        model="test-model",
+        model="test-model", **extra,
     )
     rows = [json.loads(l) for l in
             (out_dir / "judgment_predictions.jsonl").read_text().splitlines()]

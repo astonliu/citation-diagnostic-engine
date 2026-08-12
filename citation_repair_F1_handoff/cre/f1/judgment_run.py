@@ -16,8 +16,12 @@ Pipeline per parsed ref:
   2. build_item
   3. pre-band gate           (consume an F1/F2/F8 disposition)    -> EXCLUDED if not cleared;
                                                                      FAIL CLOSED if unknown
-  4. assemble_evidence       (cited abstract; review reflist opt)
+  4. assemble_evidence       (cited abstract; review reflist opt;
+                              cited_fulltext when the full-text seam is wired)
   5. extract_atomic_claims + coverage_verdicts (injected LLM)     -> QUARANTINE on ValueError
+                              -- abstract scope (coverage_v2) by default, or the
+                              retrieved BODY (coverage_v3, DEC-030/032) when BOTH
+                              fetch_fulltext and coverage_judge_v3 are supplied
   6. type through judgment_engine (from_legacy_coverage -> decide_judgment) with
      entity from F7 when its seams are wired, else the empty seam; provenance from
      F3 when wired; temporal from F5 when its seams are wired, else UNJUDGEABLE
@@ -98,6 +102,18 @@ from .f3_provenance import (
 )
 from .f5_supersession import F5Policy, decide_f5
 from .f7_entity import F7Policy, make_entity_assessor
+# The opt-in full-text coverage path (DEC-030/032). Both live OUTSIDE the frozen
+# substrate for the same reason coverage_aggregate does: band_prompts.py cannot be
+# edited without drifting its pinned blob OID.
+from .coverage_aggregate import no_usable_fulltext_dict
+from .coverage_prompts_v3 import (
+    COVERAGE_PROMPT_VERSION_V3,
+    RESPONSE_PARSER_VERSION as RESPONSE_PARSER_VERSION_V3)
+
+#: What the manifest and every full-text-scoped record call the evidence scope.
+#: Matches judgment_band's BAND_MODE_FULLTEXT marker so one run's two layers agree.
+EVIDENCE_SCOPE_FULLTEXT = "fulltext_sections"
+EVIDENCE_SCOPE_ABSTRACT = "abstract"
 
 # --- dispositions (every pair lands in exactly one) -----------------------
 DISP_EXCLUDED_NO_CITANCE = "excluded_no_citance"
@@ -372,13 +388,24 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
                f3_fetch_reflist=None, f3_resolve_pmcid=None,
                f4_policy=None, f3_policy=None,
                f5_seams=None, f5_evidence_builder=None, f5_policy=None,
-               f7_seams=None, f7_evidence_builder=None, f7_policy=None) -> dict:
+               f7_seams=None, f7_evidence_builder=None, f7_policy=None,
+               fetch_fulltext=None, coverage_judge_v3=None) -> dict:
     """Type a single PRE-BAND-CLEARED item through coverage + the engine.
 
     Mutates and returns a durable record. Raises ValueError (propagated from the
     strict band parsers) on malformed model output -- the caller quarantines it.
     ``f4_policy=None`` defaults to a development-mode (non-reportable) F4Policy;
     ``f4_verifier_call_llm`` is threaded into ``refine_support_strength``.
+
+    FULL-TEXT COVERAGE (opt-in, DEC-030/032). Supplying BOTH ``fetch_fulltext`` and
+    ``coverage_judge_v3`` moves coverage from the cited abstract to the retrieved
+    body: evidence gains ``cited_fulltext``, a complete retrieval is judged by the v3
+    judge, and a retrieval that is NOT complete is held with no model call of either
+    version. The record's ``coverage_prompt_version`` is OVERWRITTEN to
+    ``coverage_v3`` on that path, because ``_new_record`` stamps the frozen abstract
+    version on every record and leaving it would be a false provenance stamp.
+    Supplying neither leaves every byte of this function's output unchanged;
+    supplying one alone is a configuration error and raises in the caller.
 
     F5 (temporal supersession) is wired through injected seams, fail-closed like
     F3: when BOTH ``f5_seams`` (a dict of the six offline ``decide_f5`` seam
@@ -401,14 +428,53 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
     rec = _new_record(item)
     rec["preband_cleared"] = True
 
+    # OPT-IN FULL-TEXT COVERAGE (DEC-030/032), mirroring run_band's branch exactly.
+    # MODE COMES FROM CONFIGURATION, never from the fetched value: inferring it from
+    # the presence of cited_fulltext would let a failed fetch silently drop an
+    # opted-in run back to abstract scope and judge it with v2 -- a scope change
+    # nothing in the output would record.
+    fulltext_path = fetch_fulltext is not None
     item["evidence"] = jb.assemble_evidence(
-        item, fetch_abstract=fetch_abstract, fetch_reflist=fetch_reflist)
+        item, fetch_abstract=fetch_abstract, fetch_reflist=fetch_reflist,
+        fetch_fulltext=fetch_fulltext)
     rec["evidence"] = item["evidence"]
     from .band_prompts import evidence_is_usable
     rec["evidence_usable"] = bool(evidence_is_usable(item["evidence"]))
 
     claims = jb.extract_atomic_claims(item["citing_sentence"], extractor=extractor)
-    verdicts = jb.coverage_verdicts(claims, item["evidence"], judge=coverage_judge)
+    if not fulltext_path:
+        # Default path, untouched: abstract scope, v2 prompt, no parser-version key.
+        verdicts = jb.coverage_verdicts(claims, item["evidence"],
+                                        judge=coverage_judge)
+    else:
+        fulltext = item["evidence"].get("cited_fulltext")
+        complete = (isinstance(fulltext, dict)
+                    and fulltext.get("retrieval_complete") is True)
+        if complete:
+            verdicts = jb.coverage_verdicts(
+                claims, item["evidence"], judge=coverage_judge_v3,
+                prompt_version=COVERAGE_PROMPT_VERSION_V3,
+                parser_version=RESPONSE_PARSER_VERSION_V3)
+        else:
+            # Mirrors the no-usable-abstract gate: deterministic HELD, no model call
+            # of EITHER version. Reached by a partial retrieval and equally by a
+            # reader result that is None or not a dict -- a fetch failure is an
+            # unretrieved body, which is what this branch is for. DEC-032 holds
+            # rather than flags when it cannot argue from silence.
+            rec["fulltext_incomplete_hold"] = True
+            verdicts = jb.coverage_verdicts(
+                claims, item["evidence"],
+                judge=lambda cl, _ev: [no_usable_fulltext_dict() for _ in cl],
+                prompt_version=COVERAGE_PROMPT_VERSION_V3,
+                parser_version=RESPONSE_PARSER_VERSION_V3)
+        # PROVENANCE MUST STATE THE SCOPE THE ROW WAS ACTUALLY JUDGED AT.
+        # _new_record stamps the frozen ABSTRACT version on every record, which is
+        # correct on the default path and a FALSE PROVENANCE STAMP here -- the same
+        # defect class as DEC-020's omitted temperature. Overwritten, not added, so
+        # a reader never has to reconcile two version fields on one row.
+        rec["coverage_prompt_version"] = COVERAGE_PROMPT_VERSION_V3
+        rec["response_parser_version"] = RESPONSE_PARSER_VERSION_V3
+        rec["evidence_scope"] = EVIDENCE_SCOPE_FULLTEXT
     rec["atomic_claims"] = claims
     rec["coverage_verdicts"] = verdicts
     rec["ts"] = int(time.time())
@@ -602,6 +668,7 @@ def run_natural_judgment(
     f4_policy=None, f3_policy=None,
     f5_seams=None, f5_evidence_builder=None, f5_policy=None,
     f7_seams=None, f7_evidence_builder=None, f7_policy=None,
+    fetch_fulltext=None, coverage_judge_v3=None,
     model: str = "", email: str = DEFAULT_EMAIL, api_key: str = "",
     max_docs: "int | None" = None, session=None,
     chain_genesis: str = "",
@@ -644,6 +711,18 @@ def run_natural_judgment(
     if f5_seams is not None:
         from .f5_supersession import validate_f5_policy
         validate_f5_policy(f5_policy if f5_policy is not None else F5Policy())
+    # The full-text path needs BOTH seams, validated UP FRONT like every other
+    # config defect -- before any output file exists, so it can never be mistaken
+    # for a per-pair quarantine. Supplying only one would either judge full text
+    # with the abstract-scoped prompt or fetch a body nothing reads; both are scope
+    # changes no output would record, which is why this raises instead of
+    # half-enabling. Same rule and same wording as run_band's gate.
+    if (fetch_fulltext is None) != (coverage_judge_v3 is None):
+        raise ValueError(
+            "the full-text path needs BOTH fetch_fulltext and coverage_judge_v3; "
+            "supplying one alone would silently judge full text with the "
+            "abstract-scoped prompt, or fetch a body nothing reads")
+    fulltext_path = fetch_fulltext is not None
 
     os.makedirs(out_dir, exist_ok=True)
     pred_path = os.path.join(out_dir, "judgment_predictions.jsonl")
@@ -664,6 +743,9 @@ def run_natural_judgment(
     counts: dict[str, int] = {}          # one entry per emitted record; sums to refs_seen
     preband_by_label: dict[str, int] = {}  # auxiliary funnel; NOT summed into totals
     f4_counts = {"eligible_claims": 0, "generator_calls": 0, "verifier_calls": 0}
+    # Full-text retrieval funnel. Separate from `counts` for the same reason
+    # f4_counts is: `counts` sums to the record total and admits no statistics.
+    fulltext_counts = {"no_usable_fulltext": 0}
 
     def bump(key: str) -> None:
         counts[key] = counts.get(key, 0) + 1
@@ -799,7 +881,18 @@ def run_natural_judgment(
                                      f5_policy=f5_policy,
                                      f7_seams=f7_seams,
                                      f7_evidence_builder=f7_evidence_builder,
-                                     f7_policy=f7_policy)
+                                     f7_policy=f7_policy,
+                                     fetch_fulltext=fetch_fulltext,
+                                     coverage_judge_v3=coverage_judge_v3)
+                    if rec.get("fulltext_incomplete_hold") is True:
+                        # Its OWN tally, never `counts`. `counts` is one entry per
+                        # emitted record and is summed into `total_records`, so an
+                        # extra key there would corrupt the record count rather than
+                        # add a statistic -- same reason f4_counts is separate.
+                        # Counted at all because a run whose bodies mostly failed to
+                        # retrieve looks identical in the route counters to one
+                        # judged against complete text: DEC-032 makes both hold.
+                        fulltext_counts["no_usable_fulltext"] += 1
                 except ValueError as e:                   # strict-parser failure -> quarantine
                     rec = _new_record(item)
                     rec["preband_cleared"] = True
@@ -842,6 +935,23 @@ def run_natural_judgment(
         "F3_V3_SELECT_PROMPT": _sha256_text(F3_V3_SELECT_PROMPT),
         "F3_V4_LOOPCLOSE_PROMPT": _sha256_text(F3_V4_LOOPCLOSE_PROMPT),
     }
+
+    # Full-text coverage provenance -- ONLY when the path is wired, and CONDITIONAL
+    # for exactly the reason the F5 block below is: module_sha256 is built from a
+    # fixed tuple, so appending to it unconditionally would add a key to every
+    # abstract-path manifest and move bytes the opt-in guarantee pins. A v3 run's
+    # coverage number is conditional on the reader, the v3 prompt and the span
+    # resolver, so with the path wired all three are recorded.
+    if fulltext_path:
+        for mod in (__import__("cre.f1.coverage_prompts_v3", fromlist=["x"]),
+                    __import__("cre.f1.coverage_aggregate", fromlist=["x"]),
+                    __import__("cre.f1.fulltext_reader", fromlist=["x"]),
+                    __import__("cre.f1.sentence_spans", fromlist=["x"])):
+            f = getattr(mod, "__file__", None)
+            if f and os.path.exists(f):
+                module_hashes[os.path.basename(f)] = _sha256_file(f)
+        from .coverage_prompts_v3 import COVERAGE_PROMPT_V3
+        prompt_hashes["COVERAGE_PROMPT_V3"] = _sha256_text(COVERAGE_PROMPT_V3)
 
     # F5 provenance -- ONLY when F5 is actually wired. An F5 run previously emitted
     # no module hash, no prompt hash and no policy block, so the governing settings
@@ -900,7 +1010,26 @@ def run_natural_judgment(
         "trust_boundary": _TRUST_BOUNDARY,
         "model": model,
         "claim_extract_prompt_version": CLAIM_EXTRACT_PROMPT_VERSION,
-        "coverage_prompt_version": COVERAGE_PROMPT_VERSION,
+        # The scope the run ACTUALLY judged at. Defaults to the frozen abstract
+        # version, so a default run stamps exactly what it stamped before.
+        "coverage_prompt_version": (COVERAGE_PROMPT_VERSION_V3 if fulltext_path
+                                    else COVERAGE_PROMPT_VERSION),
+        # Full-text path only, and every key conditional: an abstract-path manifest
+        # must stay byte-identical (the opt-in guarantee), so absent here means the
+        # path was never wired -- never "unknown".
+        **({"response_parser_version": RESPONSE_PARSER_VERSION_V3,
+            "evidence_scope": EVIDENCE_SCOPE_FULLTEXT,
+            "fetch_fulltext_wired": True,
+            "fulltext_counts": dict(fulltext_counts),
+            "fulltext_note": (
+                "Coverage was judged against the retrieved BODY (DEC-030), not the "
+                "cited abstract. A reference whose retrieval was not complete is "
+                "held deterministically with NO model call of either version and "
+                "counted under fulltext_counts.no_usable_fulltext -- DEC-032 holds "
+                "rather than flags, because an argument from silence needs a "
+                "complete text. Mode comes from CONFIGURATION: a failed fetch holds "
+                "and never falls back to abstract scope."
+            )} if fulltext_path else {}),
         "module_sha256": module_hashes,
         "prompt_sha256": prompt_hashes,
         "f4": {
