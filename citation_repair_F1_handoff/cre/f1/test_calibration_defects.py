@@ -321,17 +321,24 @@ def test_the_prompt_requires_the_span_to_be_the_complete_basis():
     reasoned from -- makes the audit STRUCTURALLY unable to detect a false
     ``established``, which is the one failure mode it exists to catch. In run 2
     it passed both of CR4's rows as verbatim while both verdicts are wrong."""
-    # RESTATED for the span LIST (run 3 item 2). The RULE is unchanged -- the span
-    # is the complete basis -- but it now names evidence_spans, because a single
-    # string could not hold two non-contiguous passages and the judge stitched them.
-    assert "evidence_spans IS THE COMPLETE EVIDENCE for what you report" in PROMPT
-    assert "must justify your findings ON THEIR OWN" in PROMPT
-    # A finding whose justification needs text outside the spans is not established.
-    assert ("A finding whose justification needs text outside the listed spans is "
-            "not established") in PROMPT
-    # They are the basis reasoned from, not the most quotable lines.
-    assert ("They are not samples, illustrations, or the most quotable lines"
-            in PROMPT)
+    # WHAT SURVIVES OF THIS ROW, and what DEC-047 withdrew.
+    #
+    # SURVIVES: the reporting obligation. Record every sentence you relied on, and
+    # only those. That is what run 2's defect actually was -- four rationales leaning
+    # on text absent from their own span -- and it is still worth measuring.
+    assert "LIST EVERY SENTENCE YOU RELIED ON, and list only those." in PROMPT
+    assert "If your rationale leans on a sentence, its id belongs in evidence_spans" \
+        in PROMPT
+    #
+    # WITHDRAWN: the self-sufficiency GATE. The prompt no longer tells the model a
+    # finding is unestablished when its basis is not fully listed. That gated on a
+    # task with kappa 0.20-0.37 human agreement (Sarol), and MultiVerS reports that
+    # many rationales are context-dependent, "making isolated sentence selection
+    # inherently problematic". It also caused the run-4 quarantine that destroyed
+    # CR42's six claims. Spans are recorded and reported; they do not gate.
+    assert "must justify your findings ON THEIR OWN" not in PROMPT
+    assert "IS THE COMPLETE EVIDENCE" not in PROMPT
+    assert "They do not affect the verdict" in PROMPT
 
 
 def test_the_rationale_field_is_told_it_may_only_use_the_span():
@@ -339,9 +346,15 @@ def test_the_rationale_field_is_told_it_may_only_use_the_span():
     description, not only in a rule the model may skim. CR4's rationale quoted two
     passages it never put in its span; had the field said what it may rely on, the
     reply would have been self-contradictory rather than merely wrong."""
-    assert "It may rely ONLY on text you put in evidence_spans." in PROMPT
-    # ...and the escape hatch is named, so "thin the quote" is not the way out.
-    assert "the honest answer is an unconfirmed specific, not a thinner quote" in PROMPT
+    # Reworded by DEC-047, in the direction the defect actually needs. The old form
+    # ("may rely ONLY on text you put in the span") pushed the model to protect its
+    # span list, and protecting the span list is what produced run 4's empty one. The
+    # obligation now runs the other way: report the finding, and list what you used.
+    assert "LIST EVERY SENTENCE YOU RELIED ON, and list only those." in PROMPT
+    assert "never trim, soften or withhold a finding" in PROMPT
+    # ...and the escape hatch is an EMPTY LIST, not a thinner quote or a softer verdict.
+    assert "return an empty list and say so in the rationale" in PROMPT
+    assert "that is a recorded outcome, not a failure" in PROMPT
 
 
 def test_multiple_load_bearing_passages_are_all_carried():
@@ -353,17 +366,20 @@ def test_multiple_load_bearing_passages_are_all_carried():
     the judge reached for a bare ``...`` instead, the audit could not match it, and
     a span audit that mismatches on format is not checking anything. Two contiguous
     entries now, each independently verbatim, and no marker to split on."""
-    assert "List EVERY load-bearing passage, however many that is." in PROMPT
-    assert "a gap means TWO entries, never an ellipsis" in PROMPT
-    lead = "N-containing molecules are shielded by recalcitrant substrates"
-    tail = "This slows SOM decomposition"
-    body = f"{lead} such as lignin. Some intervening sentence. {tail}."
-    sections = [{"label": "discussion", "text": body}]
-    spans = [{"label": "discussion", "text": lead},
-             {"label": "discussion", "text": tail}]
-    assert v3.spans_are_verbatim(spans, sections) is True
-    # The stitched form the _v2 contract forced is now malformed at the parser.
-    assert any(marker in " [...] " for marker in v3.FORBIDDEN_ELLIPSES)
+    assert "LIST EVERY SENTENCE YOU RELIED ON" in PROMPT
+    assert "Include a sentence that supplies necessary context" in PROMPT
+    lead = "N-containing molecules are shielded by recalcitrant substrates such as lignin."
+    middle = "Some intervening sentence."
+    tail = "This slows SOM decomposition."
+    sections = [{"label": "discussion", "text": f"{lead} {middle} {tail}",
+                 "content_sha256": "unused"}]
+    judge = v3.make_coverage_judge_v3(lambda prompt: _reply_v3(
+        spans=[{"label": "discussion", "sentence_ids": ["s1", "s3"]}]))
+    out = judge(["claim"], {"cited_fulltext": _reader_result(sections)})[0]
+    assert out["evidence_spans"][0]["sentence_ids"] == ["s1", "s3"]
+    assert v3.spans_are_verbatim(out["evidence_spans"], sections) is True
+    # No marker to ban any more: the gap between s1 and s3 IS the id numbering.
+    assert not hasattr(v3, "FORBIDDEN_ELLIPSES")
 
 
 # ==========================================================================
@@ -412,9 +428,14 @@ def test_the_absent_genus_pair_is_the_worked_example_and_answers_alike():
 # closed (a label that names a section the text did not come from) is still live.
 # ==========================================================================
 def _reply_v3(*, engages=True, contradicts=False, specifics=(), rationale="r",
-              label="results", text="Drug X reduced infarct size.", spans=None):
+              label="results", ids=("s1",), text=None, spans=None):
     if spans is None:
-        spans = [{"label": label, "text": text}] if engages and text else []
+        if not engages:
+            spans = []
+        elif text is not None:
+            spans = [{"label": label, "text": text}]
+        else:
+            spans = [{"label": label, "sentence_ids": list(ids)}]
     return json.dumps({
         "engages_subject": engages, "contradicts": contradicts,
         "unconfirmed_specifics": list(specifics), "rationale": rationale,
@@ -440,7 +461,9 @@ def test_each_span_carries_its_own_label_and_the_packed_field_is_gone():
     judge = v3.make_coverage_judge_v3(lambda prompt: _reply_v3())
     out = judge(["claim"], {"cited_fulltext": _reader_result()})[0]
     assert out["evidence_spans"] == [
-        {"label": "results", "text": "Drug X reduced infarct size."}]
+        {"label": "results", "sentence_ids": ["s1"],
+         "text": "Drug X reduced infarct size.",
+         "span_source": v3.SPAN_SOURCE_SELECTED}]
     for retired in ("evidence_span", "evidence_span_label", "evidence_span_text"):
         assert retired not in out
 
@@ -472,9 +495,13 @@ def test_a_table_label_is_accepted_when_the_reader_emitted_one():
     sections = [{"label": "table", "title": "Table 1", "text": row,
                  "content_sha256": "unused"}]
     judge = v3.make_coverage_judge_v3(
-        lambda prompt: _reply_v3(label="table", text=row))
+        lambda prompt: _reply_v3(label="table", ids=["s1"]))
     out = judge(["claim"], {"cited_fulltext": _reader_result(sections)})[0]
-    assert out["evidence_spans"] == [{"label": "table", "text": row}]
+    # The row comes back EXACTLY, pipes and all, and the model never retyped it --
+    # which is the single biggest thing selection buys (DEC-047).
+    assert out["evidence_spans"] == [
+        {"label": "table", "sentence_ids": ["s1"], "text": row,
+         "span_source": v3.SPAN_SOURCE_SELECTED}]
     assert v3.spans_are_verbatim(out["evidence_spans"], sections) is True
 
 
@@ -498,8 +525,9 @@ def test_the_parser_version_moved_and_is_stamped_on_every_verdict(
     existed and was written nowhere. Both the model-judged and the deterministic
     HELD rows carry it: it names the reply contract the row was produced under, so
     a file missing it on some rows could not be read at all."""
-    # Bumped again by run 3 item 2 -- the span pair became a list.
-    assert v3.RESPONSE_PARSER_VERSION == "strict_coverage_spanlist_v3"
+    # Bumped twice more since: the span pair became a list (run 3 item 2), and then
+    # generated text became SELECTED sentence ids (DEC-047).
+    assert v3.RESPONSE_PARSER_VERSION == "strict_coverage_spanids_v4"
     _patch_not_review(monkeypatch)
     out_dir = tmp_path / "out"
     for complete in (True, False):

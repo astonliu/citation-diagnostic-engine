@@ -170,34 +170,39 @@ def fulltext_judge_dict(verdict: bp.CoverageVerdict, retrieval_complete) -> dict
     }
 
 
-def fulltext_judge_dict_v3(verdict, retrieval_complete) -> dict:
-    """:func:`fulltext_judge_dict` for a SPAN-LIST ``CoverageVerdictV3``.
+def fulltext_judge_dict_v3(verdict, retrieval_complete, *,
+                           evidence_spans=(), span_status="") -> dict:
+    """:func:`fulltext_judge_dict` for a SENTENCE-SELECTION ``CoverageVerdictV3``.
 
     ``verdict`` is duck-typed rather than annotated, to avoid importing
     ``coverage_prompts_v3`` -- which imports this module -- back into it.
 
-    The one shape difference: ``evidence_span`` is GONE, and so are the
-    ``evidence_span_label`` / ``evidence_span_text`` pair that briefly replaced it.
-    All three are superseded by ONE ``evidence_spans`` list of ``{label, text}``
-    entries, one per contiguous passage (ZD 2026-08-11, run 3 item 2).
+    ``evidence_spans`` and ``span_status`` are passed in RESOLVED rather than read off
+    the verdict, because resolving an id to its text needs the sections and only the
+    judge has them. Each resolved span carries ``label`` / ``sentence_ids`` / ``text``
+    / ``span_source``: the ids are machine-checkable provenance, the text keeps the
+    artifact readable, and the source records whether the model pointed at the
+    sentence or merely quoted something we aligned to it.
 
-    Superseded rather than kept alongside, and both times for the same reason. The
-    pair existed so a label could not contradict its own text; the LIST exists so a
-    verdict resting on two non-contiguous passages can record both without stitching
-    them with an ellipsis, which is what broke the audit in run 3. Keeping any older
-    field alongside would keep every downstream reader on a shape that cannot hold
-    the second passage.
+    The span field has now been superseded four times -- one string, a label/text
+    pair, a list of ``{label, text}``, and now selections -- and every step removed
+    one way for the model to misreport source text. This one removes the last, by not
+    asking it to report text at all.
+
+    ``span_status`` IS RECORDED AND REPORTED AND DOES NOT GATE ``established``
+    (DEC-047). ``aggregate_fulltext_coverage`` is reused unchanged, as it has been
+    across every span reshape: the DEC-032 truth table reads only ``engages_subject``
+    / ``contradicts`` / ``unconfirmed_specifics``. A verdict with
+    ``span_status="not_found"`` is decided exactly as one with a full span list --
+    incompleteness is measured as recall, not punished as error.
 
     Entries are COPIED, not aliased: the record is durable JSONL and must not share
-    mutable state with the parsed verdict.
-
-    ``aggregate_fulltext_coverage`` is reused UNCHANGED across all three shapes: the
-    DEC-032 truth table reads only ``engages_subject`` / ``contradicts`` /
-    ``unconfirmed_specifics``, so no span reshape has ever touched it."""
+    mutable state with the caller's list."""
     return {
         "established": aggregate_fulltext_coverage(verdict, retrieval_complete),
         "rationale": verdict.rationale,
-        "evidence_spans": [dict(entry) for entry in verdict.evidence_spans],
+        "evidence_spans": [dict(entry) for entry in evidence_spans or ()],
+        "span_status": span_status,
         "engages_subject": verdict.engages_subject,
         "contradicts": verdict.contradicts,
         "unconfirmed_specifics": list(verdict.unconfirmed_specifics),
@@ -213,11 +218,16 @@ def no_usable_fulltext_dict() -> dict:
 
     Carries an EMPTY ``evidence_spans`` list, because this dict only ever appears on
     the v3 path and one record shape per path is what makes the path readable. Empty
-    is the honest value: nothing was retrieved, so nothing can be cited."""
+    is the honest value: nothing was retrieved, so nothing can be cited.
+
+    ``span_status`` is ``"not_applicable"``, NOT ``"not_found"``: no model call was
+    made and no selection was attempted, so counting it as a selection miss would
+    inflate the recall denominator with rows that never entered the task."""
     return {
         "established": None,
         "rationale": "no usable full text (retrieval incomplete; deterministic gate)",
         "evidence_spans": [],
+        "span_status": "not_applicable",
         "engages_subject": None,
         "contradicts": None,
         "unconfirmed_specifics": [],

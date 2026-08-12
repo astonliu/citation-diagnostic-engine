@@ -97,9 +97,11 @@ def _reader_result(sections=None, *, complete=True):
 
 def _reply(*, engages=True, contradicts=False, specifics=(), rationale="r",
            spans=None):
-    """A coverage_v3 reply under the SPAN-LIST contract."""
+    """A coverage_v3 reply. Spans are SELECTIONS as of DEC-047 -- see
+    ``test_evidence_span_selection.py`` for why generating them was the design error
+    behind all three of this file's fixes."""
     if spans is None:
-        spans = ([{"label": "results", "text": "Drug X reduced infarct size."}]
+        spans = ([{"label": "results", "sentence_ids": ["s1"]}]
                  if engages else [])
     return json.dumps({
         "engages_subject": engages, "contradicts": contradicts,
@@ -207,18 +209,19 @@ def test_the_examples_block_is_fenced_off_as_a_reference_list():
 # ==========================================================================
 # ITEM 2 -- evidence_spans is a list of {label, text}
 # ==========================================================================
-def test_evidence_spans_is_a_list_of_label_text_entries():
-    """Acceptance row 3."""
+def test_evidence_spans_is_a_list_of_selection_entries():
+    """Acceptance row 3, now a SELECTION rather than a quotation."""
     verdict = v3.parse_coverage_v3(_reply())
     assert verdict.evidence_spans == (
-        {"label": "results", "text": "Drug X reduced infarct size."},)
+        {"label": "results", "sentence_ids": ["s1"]},)
 
 
 def test_the_retired_single_span_fields_are_gone():
     """The pair is REPLACED, not supplemented. Leaving either field alongside the
     list would keep every downstream reader on the shape that could not record two
     passages."""
-    assert v3.SPAN_KEYS == frozenset({"label", "text"})
+    assert v3.SPAN_KEYS_IDS == frozenset({"label", "sentence_ids"})
+    assert v3.SPAN_KEYS_TEXT == frozenset({"label", "text"})
     assert "evidence_spans" in v3.COVERAGE_KEYS_V3
     assert "evidence_span_label" not in v3.COVERAGE_KEYS_V3
     assert "evidence_span_text" not in v3.COVERAGE_KEYS_V3
@@ -227,40 +230,52 @@ def test_the_retired_single_span_fields_are_gone():
     assert not hasattr(verdict, "evidence_span_text")
 
 
-def test_two_non_contiguous_passages_are_two_entries_and_both_audit_verbatim():
-    """Acceptance rows 3-4, on run 3's ACTUAL CR4 span.
+def test_two_non_contiguous_passages_are_two_ids_and_both_audit_verbatim():
+    """Acceptance rows 3-4 of the run-3 spec, carried forward to SELECTION.
 
     At 3e5261d this verdict could only be recorded as one string with ``[...]``
-    between the passages, and the audit then mismatched on format -- reading False
-    for a span that is otherwise honest. Two entries, and both match verbatim."""
+    between the passages, and the audit then mismatched on format. Run 3 made it two
+    entries of quoted text; DEC-047 makes it two IDS, so the gap between them is
+    expressed by the id numbers rather than by any marker at all. Both resolve
+    verbatim because the resolver reads them out of the section."""
     sections = _sections(("discussion", CR4_DISCUSSION))
-    spans = [{"label": "discussion", "text": CR4_LEAD},
-             {"label": "discussion", "text": CR4_TAIL}]
-    verdict = v3.parse_coverage_v3(_reply(spans=spans))
-    assert len(verdict.evidence_spans) == 2
-    assert v3.spans_are_verbatim(verdict.evidence_spans, sections) is True
-    for entry in verdict.evidence_spans:
-        assert v3.span_is_verbatim(entry["label"], entry["text"], sections) is True
+    judge = v3.make_coverage_judge_v3(lambda prompt: _reply(spans=[
+        {"label": "discussion", "sentence_ids": ["s1", "s3"]}]))
+    out = judge(["claim"], {"cited_fulltext": _reader_result(sections)})[0]
+    span = out["evidence_spans"][0]
+    assert span["sentence_ids"] == ["s1", "s3"]
+    assert CR4_LEAD in span["text"] and CR4_TAIL in span["text"]
+    assert CR4_MIDDLE not in span["text"]          # s2 was not selected
+    assert v3.spans_are_verbatim(out["evidence_spans"], sections) is True
 
 
-def test_the_stitched_span_run_3_actually_emitted_is_now_rejected():
-    """The same evidence stitched with ``[...]`` -- exactly what run 3's CR4
-    emitted -- is malformed, so the format mismatch cannot recur silently. A gap
-    means two entries."""
+def test_a_stitched_span_can_no_longer_be_expressed_at_all():
+    """Run 3's defect is now STRUCTURALLY UNREACHABLE rather than rejected.
+
+    Run 3's fix banned ``[...]``, ``...`` and U+2026 inside a span text, and that ban
+    was right for a contract where the model supplied the text. Under SELECTION there
+    is no model-supplied text to police: ids name whole sentences and the resolver
+    joins them. A stitched string can now only arrive as a DRIFT-FALLBACK quote, where
+    it is not rejected either -- it is aligned to whichever single sentence it best
+    matches, or recorded as a miss. Nothing is lost, because the reason to ban it (an
+    unauditable span) can no longer occur.
+
+    ``FORBIDDEN_ELLIPSES`` is retired with the generated-text contract."""
+    assert not hasattr(v3, "FORBIDDEN_ELLIPSES")
+    sections = _sections(("discussion", CR4_DISCUSSION))
     stitched = CR4_LEAD + " [...] " + CR4_TAIL
-    with pytest.raises(ValueError, match="ellipsis"):
-        v3.parse_coverage_v3(_reply(
-            spans=[{"label": "discussion", "text": stitched}]))
-
-
-@pytest.mark.parametrize("marker", ["[...]", "...", "…"])
-def test_every_ellipsis_form_is_forbidden_inside_a_span_text(marker):
-    """Acceptance row 4. All three forms, because the judge reached for two of them
-    across runs 2 and 3."""
-    assert marker in v3.FORBIDDEN_ELLIPSES
-    with pytest.raises(ValueError, match="ellipsis"):
-        v3.parse_coverage_v3(_reply(
-            spans=[{"label": "results", "text": f"a{marker}b"}]))
+    judge = v3.make_coverage_judge_v3(lambda prompt: _reply(
+        spans=[{"label": "discussion", "text": stitched}]))
+    out = judge(["claim"], {"cited_fulltext": _reader_result(sections)})[0]
+    # It aligns to NEITHER sentence, and that is the right answer rather than a
+    # shortfall: a quote spanning two sentences is ~0.4-0.6 Jaccard against either one
+    # alone, so nothing clears the floor and the row is an honest UNALIGNED miss. The
+    # alternative -- attributing a two-sentence quote to whichever single sentence
+    # scored highest -- would manufacture provenance the model never claimed.
+    assert out["span_status"] == v3.SPAN_STATUS_UNALIGNED
+    assert out["evidence_spans"] == []
+    # ...and, DEC-047, the verdict and the reference survive it.
+    assert out["established"] is True
 
 
 def test_a_label_outside_the_readers_vocabulary_is_malformed():
@@ -292,9 +307,12 @@ def test_engages_subject_false_means_an_empty_list():
     assert verdict.evidence_spans == ()
     with pytest.raises(ValueError, match="engages_subject=false requires"):
         v3.parse_coverage_v3(_reply(
-            engages=False, spans=[{"label": "results", "text": "x"}]))
-    with pytest.raises(ValueError, match="at least one evidence span"):
-        v3.parse_coverage_v3(_reply(engages=True, spans=[]))
+            engages=False, spans=[{"label": "results", "sentence_ids": ["s1"]}]))
+    # NO LONGER TRUE that an engaged claim must carry a span. That half rested on the
+    # original SecD, which DEC-047 withdrew, and enforcing it is what quarantined CR42
+    # and destroyed all six of its claims in run 4. It is a RECORDED MISS now.
+    engaged_without_span = v3.parse_coverage_v3(_reply(engages=True, spans=[]))
+    assert engaged_without_span.evidence_spans == ()
 
 
 @pytest.mark.parametrize("bad", [
@@ -314,12 +332,14 @@ def test_a_malformed_span_list_fails_closed(bad):
         v3.parse_coverage_v3(_reply(spans=bad))
 
 
-def test_duplicate_spans_are_rejected():
-    """Same discipline ``unconfirmed_specifics`` already has. A repeated passage is
-    not two pieces of evidence, and counting it twice would overstate the basis."""
-    entry = {"label": "results", "text": "Drug X reduced infarct size."}
-    with pytest.raises(ValueError, match="duplicate"):
-        v3.parse_coverage_v3(_reply(spans=[entry, dict(entry)]))
+def test_duplicate_sentence_ids_within_an_entry_are_rejected():
+    """Same discipline ``unconfirmed_specifics`` already has, moved to where
+    duplication can now occur: inside one entry's id list. A sentence cited twice is
+    not two pieces of evidence, and counting it twice would overstate both the basis
+    and the span_source tally."""
+    with pytest.raises(ValueError, match="repeats"):
+        v3.parse_coverage_v3(_reply(spans=[
+            {"label": "results", "sentence_ids": ["s1", "s1"]}]))
 
 
 def test_the_verdict_record_carries_the_span_list_and_both_versions(
@@ -330,23 +350,31 @@ def test_the_verdict_record_carries_the_span_list_and_both_versions(
     stamped = _rows(out_dir / "judgment_band_items.jsonl")[0][
         "coverage_verdicts"][0]
     assert stamped["evidence_spans"] == [
-        {"label": "results", "text": "Drug X reduced infarct size."}]
+        {"label": "results", "sentence_ids": ["s1"],
+         "text": "Drug X reduced infarct size.",
+         "span_source": v3.SPAN_SOURCE_SELECTED}]
+    assert stamped["span_status"] == v3.SPAN_STATUS_SELECTED
     assert stamped["prompt_version"] == "coverage_v3"          # scope, unmoved
     assert stamped["response_parser_version"] == v3.RESPONSE_PARSER_VERSION
-    assert v3.RESPONSE_PARSER_VERSION == "strict_coverage_spanlist_v3"
+    assert v3.RESPONSE_PARSER_VERSION == "strict_coverage_spanids_v4"
     for retired in ("evidence_span", "evidence_span_label", "evidence_span_text"):
         assert retired not in stamped
 
 
-def test_the_prompt_states_the_span_list_contract():
-    """The prompt-side half of item 2, including the forbidden markers by name."""
+def test_the_prompt_states_the_span_selection_contract():
+    """The prompt-side half, REWRITTEN for selection (DEC-047).
+
+    Run 3's version of this row asserted the ellipsis ban and SecD's
+    stand-on-their-own clause. Both are gone: there is no model-supplied text to ban a
+    marker in, and SecD's self-sufficiency requirement was withdrawn. What the prompt
+    must now say is that the model POINTS."""
     flat = " ".join(v3.COVERAGE_PROMPT_V3.split())
     assert "evidence_spans (JSON list of objects" in flat
-    assert "One entry per CONTIGUOUS passage" in flat
-    assert "a gap means TWO entries, never an ellipsis" in flat
-    assert "[...]" in flat and "…" in flat
-    # Amendment SecD survives the reshape: the list must stand on its own.
-    assert "must justify your findings ON THEIR OWN" in flat
+    assert '"sentence_ids": ["s2", "s7"]' in flat
+    assert "You POINT at them by id -- do not copy, quote or retype the text" in flat
+    assert "The code reads the text back out of the section for you" in flat
+    # The reporting obligation is what survives of SecD.
+    assert "LIST EVERY SENTENCE YOU RELIED ON" in flat
 
 
 def test_the_span_list_is_still_blind_to_the_annotator():

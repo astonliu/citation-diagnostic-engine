@@ -100,6 +100,48 @@ def test_the_table_label_run_2_mislabelled_is_really_there(cr42_evidence):
 
 
 @live_ncbi
+def test_the_real_sections_segment_into_addressable_units(cr42_evidence):
+    """DEC-047 on real data: the whole paper becomes addressable, and the table row
+    run 2 mislabelled as ``intro`` now has an id the model can point at instead of
+    retyping.
+
+    Also the cost check. Ids add characters to a prompt that was already ~52 KB, and
+    if that were expensive the redesign would trade one problem for another."""
+    from cre.f1 import sentence_spans as ss
+
+    units = ss.segment_sections(cr42_evidence["sections"])
+    total = sum(len(u) for u in units.values())
+    print(f"\n  {total} addressable units across {len(units)} labels")
+    for label, group in units.items():
+        print(f"    [{label}] {len(group)} units")
+    assert total > 100, "a 19-section paper should yield many addressable units"
+
+    # The header row run 2 attributed to `intro`, now one unit under `table`.
+    table = units["table"]
+    header = [u for u in table if "Species name | Code | Phyllum" in u["text"]]
+    assert header, "the table header row was not emitted as its own unit"
+    print(f"    table header is {header[0]['id']}: {header[0]['text'][:70]}")
+    # A row is never split on the periods inside its cells.
+    assert header[0]["text"].count(" | ") >= 5
+
+    # Segmentation is pure, so a second pass over the same sections is identical --
+    # the property that lets the prompt and the resolver agree on what s2 means.
+    assert ss.segment_sections(cr42_evidence["sections"]) == units
+
+
+@live_ncbi
+def test_ids_cost_little_on_a_real_prompt(cr42_evidence):
+    """The id prefixes are ~3% of a prompt this size. Worth stating, because a
+    redesign that tripled prompt cost would not be a good trade."""
+    rendered = v3.render_evidence_sections(cr42_evidence["sections"])
+    raw = sum(len(s["text"]) for s in cr42_evidence["sections"])
+    overhead = (len(rendered) - raw) / raw
+    print(f"\n  evidence block {len(rendered)} chars vs {raw} raw "
+          f"({overhead:.1%} overhead for labels + ids)")
+    assert overhead < 0.25
+
+
+@live_ncbi
 def test_the_real_prompt_carries_the_reply_shape_rule(cr42_evidence):
     """What the model actually sees for this reference. The evidence block is large,
     which is the context in which run 3's reply grew a second object -- so the
@@ -110,6 +152,7 @@ def test_the_real_prompt_carries_the_reply_shape_rule(cr42_evidence):
     print(f"\n  rendered prompt {len(prompt)} chars, evidence block "
           f"{len(v3.render_evidence_sections(cr42_evidence['sections']))} chars")
     assert "EXACTLY ONE bare JSON object" in flat
+    assert "You POINT at them by id" in flat
     assert "for the ONE claim above" in flat
     assert "Never emit a second object" in flat
     assert "END OF EXAMPLES" in prompt
@@ -129,18 +172,25 @@ def test_cr42_does_not_quarantine_with_a_live_judge(tmp_path, monkeypatch,
     defect -- P(loss) = 1 - (1-p)**6 here -- so six clean parses is the thing being
     demonstrated, not one.
 
-    Requires ANTHROPIC_API_KEY. Model and prefill are recorded into the manifest via
-    run_band's model-identity parameters, so the row is reportable rather than
-    conditional on an unrecorded adapter (DEC-020's lesson)."""
+    Requires ANTHROPIC_API_KEY. Model, prefill and the DEC-046 temperature pin are
+    recorded into the manifest via run_band's model-identity parameters, so the row is
+    reportable rather than conditional on an unrecorded adapter (DEC-020's lesson).
+
+    UNDER DEC-047 THIS ROW ALSO CHECKS SOMETHING NEW: whether the model actually
+    POINTS. The span_status tally is printed, because "did CR42 stop quarantining" and
+    "did the judge return usable ids" are different questions and only the second one
+    tells us the redesign works. A run of six not_found rows would be a pass on the
+    acceptance row and a failure of the design."""
     import anthropic
 
     MODEL = "claude-sonnet-4-5"
     PREFILL = "{"
+    TEMPERATURE = 0                      # DEC-046, pinned
     client = anthropic.Anthropic()
 
     def call_llm(prompt: str) -> str:
         reply = client.messages.create(
-            model=MODEL, max_tokens=2000,
+            model=MODEL, max_tokens=2000, temperature=TEMPERATURE,
             messages=[{"role": "user", "content": prompt},
                       {"role": "assistant", "content": PREFILL}])
         return PREFILL + reply.content[0].text
@@ -150,14 +200,14 @@ def test_cr42_does_not_quarantine_with_a_live_judge(tmp_path, monkeypatch,
 
     xml_dir = tmp_path / "xml"
     xml_dir.mkdir()
-    refs = "".join(
-        f'<ref id="CR{i}"><element-citation><article-title>Cited {i}</article-title>'
-        f'<pub-id pub-id-type="pmid">{CR42_CITED_PMID}</pub-id>'
-        f'</element-citation></ref>' for i in (42,))
     (xml_dir / "PMC10115774.xml").write_text(
         '<article><body><p>' + CR42_CITANCE +
         ' <xref ref-type="bibr" rid="CR42">42</xref>.</p></body>'
-        '<back><ref-list>' + refs + '</ref-list></back></article>',
+        '<back><ref-list>'
+        '<ref id="CR42"><element-citation><article-title>Cited 42</article-title>'
+        f'<pub-id pub-id-type="pmid">{CR42_CITED_PMID}</pub-id>'
+        '</element-citation></ref>'
+        '</ref-list></back></article>',
         encoding="utf-8")
 
     out_dir = tmp_path / "out"
@@ -172,7 +222,7 @@ def test_cr42_does_not_quarantine_with_a_live_judge(tmp_path, monkeypatch,
         fetch_abstract=lambda pmid: "unused on the full-text path",
         fetch_fulltext=lambda pmid: cr42_evidence,
         coverage_judge_v3=v3.make_coverage_judge_v3(call_llm),
-        model=MODEL, assistant_prefill=PREFILL,
+        model=MODEL, assistant_prefill=PREFILL, temperature=TEMPERATURE,
         session=object())
 
     row = json.loads(
@@ -182,16 +232,33 @@ def test_cr42_does_not_quarantine_with_a_live_judge(tmp_path, monkeypatch,
     print(f"  parse_error={row.get('parse_error')!r}")
     for verdict in row.get("coverage_verdicts", []):
         print(f"    established={verdict['established']!r} "
-              f"spans={len(verdict['evidence_spans'])} "
-              f"labels={[s['label'] for s in verdict['evidence_spans']]}")
+              f"span_status={verdict['span_status']} "
+              f"ids={[(s['label'], s['sentence_ids']) for s in verdict['evidence_spans']]}")
+    print(f"  evidence_selection={manifest.get('evidence_selection')}")
+
+    # THE ACCEPTANCE ROW.
     assert manifest["counts"][jb.ROUTE_PARSE_QUARANTINE] == 0
     assert row["proposed_route"] != jb.ROUTE_PARSE_QUARANTINE
     assert len(row["coverage_verdicts"]) == len(CR42_CLAIMS)
-    # Every span the live judge emitted must audit verbatim, and none may carry an
-    # ellipsis -- the parser would have raised, so reaching here already proves it.
+
+    # Every span the live judge produced resolves verbatim -- which under selection is
+    # a check on the RESOLVER, not on the model, and cannot fail for a selected span.
+    # Rows with an EMPTY list are skipped rather than failed: an engaged claim with no
+    # resolvable span is a recorded miss (DEC-047), not an error.
     for verdict in row["coverage_verdicts"]:
-        if verdict["engages_subject"] is True:
+        if verdict["evidence_spans"]:
             assert v3.spans_are_verbatim(verdict["evidence_spans"],
                                          cr42_evidence["sections"])
+
+    # DID IT POINT? Reported separately from the acceptance row, and asserted only
+    # weakly: at least one of six engaged claims should yield a usable selection, or
+    # the redesign has not achieved what it set out to.
+    selection = manifest["evidence_selection"]
+    assert selection["segmenter"]["name"]
+    if selection["engaged_claims"]:
+        assert selection["engaged_claims_with_span"] >= 1, (
+            "no engaged claim produced a resolvable span; the judge is not pointing")
+
     assert manifest["params"]["model"] == MODEL
     assert manifest["params"]["assistant_prefill"] == PREFILL
+    assert manifest["params"]["temperature"] == TEMPERATURE

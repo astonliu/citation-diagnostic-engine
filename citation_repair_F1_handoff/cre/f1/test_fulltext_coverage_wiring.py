@@ -68,22 +68,27 @@ def reader_result(*, complete=True, sections=None, reasons=None, **extra):
 
 
 def coverage_reply(*, engages=True, contradicts=False, specifics=(),
-                   rationale="r", span_label="results",
-                   span_text="Drug X reduced infarct size", spans=None):
-    """A coverage_v3 reply under the SPAN-LIST contract.
+                   rationale="r", span_label="results", span_ids=("s1",),
+                   span_text=None, spans=None):
+    """A coverage_v3 reply under the SENTENCE-SELECTION contract.
 
-    The span has been reshaped twice. It was one ``"label: text"`` string until
-    2026-08-11, which let the judge write a label its own text contradicted; then a
-    ``label``/``text`` PAIR, which could hold only one passage; and now a LIST of
-    ``{label, text}`` entries, because run 3's CR4 rested on two non-contiguous
-    passages and the pair left the judge no way to record both except stitching them
-    with ``[...]`` -- which broke the audit (ZD 2026-08-11, run 3 item 2).
+    The span field has been reshaped four times, each removing one way for the model
+    to misreport source text: one ``"label: text"`` string; a ``label``/``text``
+    PAIR, so a label could not contradict its own text; a LIST of ``{label, text}``,
+    so two non-contiguous passages could both be recorded; and now ``{label,
+    sentence_ids}``, so the model POINTS instead of retyping and the text is exact by
+    construction (ZD 2026-08-11, DEC-047).
 
-    ``span_label`` / ``span_text`` are kept as the one-entry shorthand most rows
-    here want; pass ``spans`` for the multi-entry cases."""
+    ``span_ids`` is the one-entry shorthand most rows want. ``span_text`` produces
+    the DRIFT-FALLBACK shape, which the judge aligns post hoc rather than rejecting;
+    pass ``spans`` for anything else."""
     if spans is None:
-        spans = ([{"label": span_label, "text": span_text}]
-                 if engages and span_text else [])
+        if not engages:
+            spans = []
+        elif span_text is not None:
+            spans = [{"label": span_label, "text": span_text}]
+        else:
+            spans = [{"label": span_label, "sentence_ids": list(span_ids)}]
     return json.dumps({
         "engages_subject": engages, "contradicts": contradicts,
         "unconfirmed_specifics": list(specifics),
@@ -204,13 +209,14 @@ def test_prompt_and_parser_versions_move_independently():
     """DEC-022, now demonstrated in both directions and THREE contract versions.
 
     At the v3 introduction the SCOPE moved and the five-key contract did not, so the
-    prompt version moved alone. Twice since, the opposite: the scope has NOT moved --
-    ``coverage_v3`` still means full-text sections -- while the output contract
-    changed shape, first splitting the span into a label/text pair (runs 1-2 item 6,
-    ``_6key_v2``) and then replacing that pair with a span LIST (run 3 item 2,
-    ``_spanlist_v3``). Each time the PARSER version moved alone."""
+    prompt version moved alone. THREE times since, the opposite: the scope has NOT
+    moved -- ``coverage_v3`` still means full-text sections -- while the output
+    contract changed shape, splitting the span into a label/text pair (``_6key_v2``),
+    replacing that pair with a span LIST (``_spanlist_v3``), and finally replacing
+    generated text with SELECTED sentence ids (``_spanids_v4``, DEC-047). Each time
+    the PARSER version moved alone."""
     assert v3.COVERAGE_PROMPT_VERSION_V3 == "coverage_v3"    # scope, unmoved
-    assert v3.RESPONSE_PARSER_VERSION == "strict_coverage_spanlist_v3"
+    assert v3.RESPONSE_PARSER_VERSION == "strict_coverage_spanids_v4"
     assert bp.COVERAGE_PROMPT_VERSION == "coverage_v2"       # frozen, unmoved
     # The frozen five-key parser stays exactly where it was: the v3 path no longer
     # calls it, and band_prompts.py is not touched (blob OID fa01126e...).
@@ -230,21 +236,32 @@ def test_prompt_never_asks_the_model_about_completeness():
     assert 'No "established" field' in v3.COVERAGE_PROMPT_V3
 
 
-def test_renderer_preserves_document_order_and_duplicate_labels():
-    """Sol flag 5. Order is the reader's emission order, and a label may repeat --
-    a paper has more than one methods block. Neither may be reordered or merged."""
+def test_renderer_groups_repeated_labels_into_one_id_space():
+    """Sol flag 5, REVISED for sentence ids (DEC-047).
+
+    A paper has more than one methods block, and the old renderer emitted each as its
+    own ``methods:`` block in document order. It cannot any more, and the reason is
+    forced rather than chosen: a span cites ``(label, id)``, so two blocks each
+    starting at ``s1`` would make ``methods:s1`` ambiguous and unresolvable. Repeated
+    labels are therefore concatenated into ONE block with ONE id space.
+
+    WHAT IS PRESERVED: document order WITHIN a label (M1 is s1, M2 is s2), and
+    first-appearance order across labels. WHAT IS LOST: the interleaving of M1, R1, M2
+    -- and that is acceptable because rule 7 makes the whole retrieved text one
+    evidence pool, so cross-label adjacency was never load-bearing for judging."""
     rendered = v3.render_evidence_sections([
         section("methods", "M", "M1"),
         section("results", "R", "R1"),
         section("methods", "M", "M2"),
     ])
-    assert rendered == "methods: M1\n\nresults: R1\n\nmethods: M2"
-    assert rendered.index("M1") < rendered.index("R1") < rendered.index("M2")
+    assert rendered == "[methods]\n  s1  M1\n  s2  M2\n\n[results]\n  s1  R1"
+    assert rendered.index("M1") < rendered.index("M2")
+    assert rendered.index("[methods]") < rendered.index("[results]")
 
 
 def test_renderer_skips_sections_with_no_text():
     assert v3.render_evidence_sections([section(text="  "), section(text="A")]) \
-        == "results: A"
+        == "[results]\n  s1  A"
     assert v3.render_evidence_sections([]) == ""
     assert v3.render_evidence_sections(None) == ""
 
@@ -254,7 +271,7 @@ def test_both_slots_are_filled_and_nothing_is_left_behind():
     assert "<<ATOMIC_CLAIM>>" not in prompt
     assert "<<EVIDENCE_SECTIONS>>" not in prompt
     assert "My claim" in prompt
-    assert "results: Body text." in prompt
+    assert "[results]\n  s1  Body text." in prompt
 
 
 @pytest.mark.parametrize("poison", ["<<EVIDENCE_SECTIONS>>", "<<ATOMIC_CLAIM>>"])
@@ -266,16 +283,16 @@ def test_placeholder_text_in_the_claim_is_preserved_verbatim(poison):
     claim = f"Claim mentioning {poison} literally"
     prompt = v3.render_prompt(claim, [section(text="Body text.")])
     assert claim in prompt, "the claim was corrupted by slot substitution"
-    assert "results: Body text." in prompt
+    assert "[results]\n  s1  Body text." in prompt
     # Exactly one evidence block: the placeholder inside the claim is inert.
-    assert prompt.count("results: Body text.") == 1
+    assert prompt.count("[results]\n  s1  Body text.") == 1
 
 
 def test_placeholder_text_in_a_section_cannot_forge_a_claim_slot():
     prompt = v3.render_prompt("Real claim", [section(text="<<ATOMIC_CLAIM>>")])
     assert "Real claim" in prompt
     assert prompt.count("Real claim") == 1
-    assert "results: <<ATOMIC_CLAIM>>" in prompt
+    assert "[results]\n  s1  <<ATOMIC_CLAIM>>" in prompt
 
 
 def test_v3_judge_calls_the_model_once_per_claim_with_labelled_sections():
@@ -291,7 +308,8 @@ def test_v3_judge_calls_the_model_once_per_claim_with_labelled_sections():
                     section("methods", "M", "How."), section("results", "R", "What.")])})
     assert len(prompts) == 2
     assert len(out) == 2
-    assert "methods: How.\n\nresults: What." in prompts[0]
+    assert ("[methods]\n  s1  How.\n\n[results]\n  s1  What."
+            in prompts[0])
     assert "claim one" in prompts[0] and "claim two" in prompts[1]
     assert out[0]["established"] is True
 
@@ -407,7 +425,7 @@ def test_complete_retrieval_routes_through_v3(tmp_path, monkeypatch):
                                 section("results", "R", "What.")]),
                             capture=capture)
     assert len(capture) == 1
-    assert "methods: How.\n\nresults: What." in capture[0]
+    assert "[methods]\n  s1  How.\n\n[results]\n  s1  What." in capture[0]
     row = rows(out_dir, "judgment_band_items.jsonl")[0]
     assert row["coverage_verdicts"][0]["prompt_version"] == "coverage_v3"
     assert row["coverage_verdicts"][0]["established"] is True
@@ -523,13 +541,21 @@ def test_unencodable_section_quarantines_the_reference(tmp_path, monkeypatch, wh
             if "pmcid" in r] == ["PMC1"]
 
 
-def test_unencodable_v3_evidence_span_quarantines_the_reference(
+def test_unencodable_v3_model_text_quarantines_the_reference(
         tmp_path, monkeypatch):
     """The surrogate arrives from the MODEL this time, through the v3 reply, and
-    lands on the record via the coverage verdict rather than the reader."""
+    lands on the record via the coverage verdict rather than the reader.
+
+    IT NOW ARRIVES THROUGH THE RATIONALE, not the span, and that narrowing is worth
+    recording. Under sentence SELECTION the model never supplies span text -- the
+    resolver reads it out of the section -- so a span cannot carry a code point the
+    section did not already contain, and the reader sanitizes sections at its own
+    boundary. A surrogate offered in a drift-fallback quote simply fails to align and
+    is dropped. The rationale is free text and remains an ingress, so this guard is
+    still load-bearing; it now has one door instead of two."""
     manifest, out_dir = run(
         tmp_path, monkeypatch, fulltext=reader_result(),
-        reply=coverage_reply(span_text="bad " + SURROGATE))
+        reply=coverage_reply(rationale="bad " + SURROGATE))
     assert manifest["counts"][jb.ROUTE_PARSE_QUARANTINE] == 1
     assert rows(out_dir, "judgment_band_annotation_queue.jsonl") == []
     item = rows(out_dir, "judgment_band_items.jsonl")[0]
@@ -715,28 +741,37 @@ def test_resuming_in_the_same_mode_is_allowed(tmp_path, monkeypatch):
 
 
 # ==========================================================================
-# Q1 disposition: span verification stays prompt-only (no runtime binding)
+# Q1 disposition SUPERSEDED by DEC-047: the span IS bound at runtime now
 # ==========================================================================
-def test_span_text_is_not_bound_at_runtime_and_payload_stays_blind():
-    """Adjudicated Q1=(a), and it survives BOTH span reshapes: span TEXT is still
-    not verified against the section at runtime. It is required by the prompt
-    (rules 8-9) and audited offline via ``v3.span_is_verbatim`` /
-    ``v3.spans_are_verbatim``, because quarantining on a non-verbatim span would
-    silently drop exactly the rows the audit exists to surface. Only the LABEL is
-    checked in code -- a label outside the supplied set cannot be audited at all,
-    so it fails closed.
+def test_span_text_is_bound_at_runtime_and_payload_stays_blind():
+    """Q1=(a) is SUPERSEDED, and in the direction it was arguing against.
 
-    What must hold regardless is that the spans -- fabricated or not -- never reach
-    the annotator: rationale and spans live on the item record only."""
+    Q1=(a) held that span text must not be verified against the section at runtime:
+    the prompt would require verbatim-ness and an offline audit would check it,
+    because quarantining a non-verbatim span would drop exactly the rows the audit
+    exists to surface. That reasoning was sound GIVEN GENERATION -- and generation is
+    what DEC-047 removed. There is no longer a model-supplied text to verify or to
+    reject: the resolver reads the sentence out of the section, so the span is bound
+    at runtime and correct by construction. The dilemma Q1 adjudicated is gone rather
+    than decided.
+
+    What the fabricated-span case becomes: the model quotes something the paper never
+    says, nothing clears the alignment floor, and the record shows an honest MISS
+    instead of a fabricated span. No quarantine, and no false provenance either.
+
+    The blindness half survives untouched -- rationale and spans are item-record
+    fields only, and the annotation payload is a whitelist at both levels."""
     judge = v3.make_coverage_judge_v3(
         lambda prompt: coverage_reply(span_text="never in any section"))
     out = judge(["claim"], {"cited_fulltext": reader_result()})
-    assert out[0]["evidence_spans"] == [
-        {"label": "results", "text": "never in any section"}]
-    assert out[0]["established"] is True          # accepted, by design
-    # ...and the audit is what catches it, offline.
-    assert v3.spans_are_verbatim(out[0]["evidence_spans"],
-                                 reader_result()["sections"]) is False
+    assert out[0]["evidence_spans"] == []
+    assert out[0]["span_status"] == v3.SPAN_STATUS_UNALIGNED
+    assert out[0]["established"] is True          # DEC-047: spans do not gate
+    # A SELECTED span, by contrast, cannot fail the audit at all.
+    selected = v3.make_coverage_judge_v3(lambda prompt: coverage_reply())(
+        ["claim"], {"cited_fulltext": reader_result()})
+    assert v3.spans_are_verbatim(selected[0]["evidence_spans"],
+                                 reader_result()["sections"]) is True
 
     payload = jb.annotation_payload({
         "item_key": "k", "citing_sentence": "S", "cited_pmid": "1",

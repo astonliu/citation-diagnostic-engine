@@ -88,8 +88,9 @@ from .band_prompts import (
 # be edited without drifting its pinned blob OID.
 from .coverage_aggregate import no_usable_fulltext_dict
 from .coverage_prompts_v3 import (
-    COVERAGE_PROMPT_VERSION_V3,
+    COVERAGE_PROMPT_VERSION_V3, SPAN_MISS_STATUSES,
     RESPONSE_PARSER_VERSION as RESPONSE_PARSER_VERSION_V3)
+from .sentence_spans import segmenter_provenance
 
 # Label space for the F3 slice of the band (the annotator's terminal choices).
 # Coverage-gap -> F6, misattribution -> F3, otherwise ACCURATE.
@@ -304,6 +305,10 @@ def coverage_verdicts(claims: list, evidence: dict, *,
         }
         if parser_version:
             record["evidence_spans"] = list(v.get("evidence_spans") or [])
+            # RECORDED AND REPORTED, never a gate (DEC-047). Absent from a judge that
+            # does not supply it would be indistinguishable from a genuine
+            # not_applicable, so it defaults to the honest "we did not ask".
+            record["span_status"] = v.get("span_status") or "not_applicable"
         else:
             record["evidence_span"] = v.get("evidence_span", "")
         record.update({
@@ -672,7 +677,7 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
              max_docs: "int | None" = None, email: str = DEFAULT_EMAIL,
              api_key: str = "", session=None,
              model: str = "", assistant_prefill: str = "",
-             stop_sequences: tuple = ()) -> dict:
+             stop_sequences: tuple = (), temperature=None) -> dict:
     """Run the judgment-band front-end over a directory of PMC-OA citing papers.
 
     Pipeline per doc: parse -> build items -> extract claims -> assemble
@@ -714,7 +719,8 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
     says v3 is ready to freeze. Supplying only one is a configuration error and
     raises, rather than half-enabling a scope change.
 
-    MODEL IDENTITY (``model`` / ``assistant_prefill`` / ``stop_sequences``).
+    MODEL IDENTITY (``model`` / ``assistant_prefill`` / ``stop_sequences`` /
+    ``temperature``).
     Every coverage number is conditional on the adapter that produced it -- the
     same class of omission as DEC-020's missing ``temperature`` / ``top_p`` -- so
     these three ride verbatim into ``manifest["params"]``. They are RECORDED, not
@@ -723,7 +729,12 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
     recorded as ABSENT rather than guessed: a defaulted model name would be a
     fabricated provenance record, and a defaulted key would also change the
     manifest bytes of every default run. The notebook passes them; the band never
-    infers them."""
+    infers them.
+
+    ``temperature`` takes ``None`` for absent rather than ``""``, because 0 is both a
+    REAL value and a falsy one -- DEC-046 pins ``temperature=0``, and a truthiness
+    test would silently drop exactly the pinned value it exists to record
+    (CONTRADICTIONS 41). A pin that is not recorded is not evidenced."""
     if (fetch_fulltext is None) != (coverage_judge_v3 is None):
         raise ValueError(
             "the full-text path needs BOTH fetch_fulltext and coverage_judge_v3; "
@@ -792,6 +803,19 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
     # byte-identical until calibration says v3 is ready to freeze.
     if fulltext_path:
         counts["no_usable_fulltext"] = 0
+        # An engaged claim that ended up with no evidence recorded. A RECALL MISS,
+        # counted and reported -- it used to raise and quarantine the whole reference
+        # (DEC-047). Seeded to 0 on this path only, same precedent as the counter
+        # above: an unconditional key would move the default run's manifest bytes.
+        counts["evidence_span_not_found"] = 0
+    # Evidence-selection measurement (DEC-047 item 5). Sentence ids make selection
+    # measurable with NO new annotation, so these accumulate per run and feed
+    # Recall@k / sentence-selection F1 once gold spans exist. Full-text path only.
+    span_status_tally: dict = {}
+    span_source_tally: dict = {}
+    span_count_tally: dict = {}
+    engaged_claims = 0
+    engaged_claims_with_span = 0
     pubtype_cache: dict = {}
 
     files = sorted(fn for fn in os.listdir(xml_dir)
@@ -1000,6 +1024,32 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                     if bucket is not None:
                         counts[bucket] += 1
 
+                # Evidence-selection tallies (DEC-047 item 5), full-text path only.
+                # Keyed off engages_subject rather than span_status, because the
+                # DENOMINATOR is "claims where selection was actually attempted": an
+                # off-topic claim has nothing to point at, and a deterministic hold
+                # never reached the model, so counting either would understate recall
+                # by padding it with rows that were never in the task.
+                if fulltext_path:
+                    for verdict in item["coverage_verdicts"]:
+                        if verdict.get("engages_subject") is not True:
+                            continue
+                        engaged_claims += 1
+                        spans = verdict.get("evidence_spans") or []
+                        status = verdict.get("span_status") or "not_applicable"
+                        span_status_tally[status] = (
+                            span_status_tally.get(status, 0) + 1)
+                        span_count_tally[str(len(spans))] = (
+                            span_count_tally.get(str(len(spans)), 0) + 1)
+                        if spans:
+                            engaged_claims_with_span += 1
+                        for span in spans:
+                            source = span.get("span_source") or "unknown"
+                            span_source_tally[source] = (
+                                span_source_tally.get(source, 0) + 1)
+                        if status in SPAN_MISS_STATUSES:
+                            counts["evidence_span_not_found"] += 1
+
                 # Stamp pinned prompt versions on the item record.
                 item["claim_extract_prompt_version"] = CLAIM_EXTRACT_PROMPT_VERSION
                 item["coverage_prompt_version"] = coverage_version
@@ -1059,6 +1109,9 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                if assistant_prefill else {}),
             **({"stop_sequences": list(stop_sequences)}
                if stop_sequences else {}),
+            # `is not None`, NOT truthiness: DEC-046 pins temperature=0, and 0 is
+            # falsy, so a truthiness test would drop the one value that matters.
+            **({"temperature": temperature} if temperature is not None else {}),
         },
         "counts": counts,
         "coverage_distribution": {
@@ -1082,6 +1135,34 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                 "path is excluded here and counted under counts.no_usable_abstract."
             ),
         },
+        # Evidence-selection measurement (DEC-047 item 5). Full-text path ONLY: an
+        # unconditional key would change the manifest bytes of every default run and
+        # break the opt-in guarantee. Spans are RECORDED AND REPORTED and do not gate
+        # any verdict, so everything here is a measurement, never a filter.
+        **({"evidence_selection": {
+            # A stored sentence id only means something relative to the segmenter
+            # that cut it, so re-resolving a run's spans later needs this.
+            "segmenter": segmenter_provenance(),
+            "engaged_claims": engaged_claims,
+            "engaged_claims_with_span": engaged_claims_with_span,
+            "span_count_distribution": dict(span_count_tally),
+            "span_status": dict(span_status_tally),
+            "span_source": dict(span_source_tally),
+            "note": (
+                "Per ENGAGED atomic claim (engages_subject true) -- the claims where "
+                "evidence selection was actually attempted. Off-topic claims and "
+                "deterministic holds are excluded: neither entered the task, and "
+                "counting them would pad the recall denominator. span_status is "
+                "selected / aligned (evidence recorded) or not_found / unaligned (a "
+                "recall MISS, counted in counts.evidence_span_not_found). "
+                "span_source is per SPAN, not per claim: 'selected' means the judge "
+                "named sentence ids, 'aligned' means it quoted prose that was matched "
+                "post hoc at word-level Jaccard >= 0.7. NONE of this gates a verdict "
+                "(DEC-047): incompleteness is measured as recall, not punished as "
+                "error. A verbatim span is a SURFACE property and is never evidence "
+                "that a verdict is correct."
+            ),
+        }} if fulltext_path else {}),
         "distinct_cited_pmids_looked_up": len(pubtype_cache),
         "items_path": items_path,
         "annotation_queue_path": queue_path,
