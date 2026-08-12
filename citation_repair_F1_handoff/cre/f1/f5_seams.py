@@ -1,0 +1,364 @@
+"""cre/f1/f5_seams.py -- the six injected callables F5 needs to run.
+
+``f5_supersession`` is a finished detector that supplies NO implementation for the
+six callables it invokes; only test fakes have ever satisfied them, so
+``decide_f5`` has never run on real data. This module is those implementations.
+They live OUTSIDE the detector on purpose: the detector type-checks every return
+and fails closed, and that boundary is what lets the seams be swapped or stubbed
+without touching validated routing.
+
+The six are deliberately UNEQUAL in depth, because their evidence bases are:
+
+  check_formal_notice            mature machine-readable infrastructure. Cheap.
+  classify_evidence_tier         deterministic mapping, NO model call.
+  fetch_comparability_source     abstract-first, escalate only when inconclusive.
+  retrieve_superseding_candidates the expensive one; structural filter first.
+  find_supersession_attestation  a DECLARED STUB. Path A is unreachable.
+  judge_contradiction            renders ids, resolves ids, emits the contract.
+
+WHAT THIS IS FOR. F5 runs here as a DISCOVERY INSTRUMENT -- high-recall candidate
+generation feeding a human annotation queue -- not as a scored detector. No
+claim-level supersession ground truth exists anywhere in the literature (the
+largest hand-built sets are 396, 146 and 49 items, each with two independent
+reviewers plus adjudication), so there is nothing to score against. Nothing here
+ships autonomously: ``deploy_path_a`` stays hard-gated off and ``reportable``
+stays False.
+"""
+from __future__ import annotations
+
+import json
+import os
+from typing import Optional
+
+from . import f5_contradiction_prompt as fcp
+from .f5_supersession import (
+    Attestation, CandidateWork, ComparabilitySource, EvidenceTier, NoticeStatus,
+    RetrievalResult,
+)
+
+# --------------------------------------------------------------------------
+# Retrieval protocol -- recorded, not implied.
+# --------------------------------------------------------------------------
+#: How deep to retrieve. Set DELIBERATELY and recorded in the manifest, because a
+#: silent cap reads as "we looked at everything". Shallow retrieval is the most
+#: expensive mistake available here: BM25 on SciFact-Open goes Recall@1 20.22% ->
+#: Recall@50 66.09%, and Sarol goes Recall@1 0.09 -> Recall@20 0.55.
+CANDIDATE_CAP = 50
+
+#: v1 has NO learned reranker. This is a stated limitation, not an oversight: BM25
+#: beats every pure dense retriever on SciFact in BEIR (nDCG@10 0.665 vs DPR
+#: 0.318), and monoT5 reranking is the known next gain (Recall@3 30.87% -> 48.26%)
+#: but does not fit the deadline.
+RERANKER = "none"
+
+RETRIEVAL_PROTOCOL_VERSION = "f5_retrieval_v1"
+
+
+def retrieval_protocol(*, after_date: str = "", as_of_date: str = "",
+                       mesh_terms=()) -> dict:
+    """The protocol in READABLE form, for the manifest.
+
+    ``retrieval_query_hash`` on the record is a hash, and a hash is not a protocol
+    -- nobody can audit what was searched from it. This is what actually gets
+    recorded so a reader can tell what was and was not looked at."""
+    return {
+        "protocol_version": RETRIEVAL_PROTOCOL_VERSION,
+        "sources_queried": ["pubmed_esearch", "pubmed_elink_citedin"],
+        "date_window": {"after": after_date, "as_of": as_of_date},
+        "mesh_terms": list(mesh_terms),
+        "candidate_cap": CANDIDATE_CAP,
+        "reranker": RERANKER,
+        "structural_filter": [
+            "publication date strictly after after_date",
+            "MeSH overlap with the cited work",
+            "citation neighbourhood via elink (citing the cited work)",
+        ],
+        "known_limitations": [
+            "no learned reranker in v1 (monoT5 is the identified next gain)",
+            "absence of a candidate is NOT evidence that no superseding work exists",
+        ],
+    }
+
+
+# --------------------------------------------------------------------------
+# 3b. classify_evidence_tier -- deterministic, no model call.
+# --------------------------------------------------------------------------
+#: PubMed publication types -> OCEBM tier. Ordered most-specific first: a record
+#: carrying both "Meta-Analysis" and "Journal Article" is a meta-analysis.
+_PUBTYPE_TIER = (
+    ("meta-analysis", EvidenceTier.SYSTEMATIC_REVIEW_OR_META_ANALYSIS),
+    ("systematic review", EvidenceTier.SYSTEMATIC_REVIEW_OR_META_ANALYSIS),
+    ("randomized controlled trial", EvidenceTier.RCT),
+    ("controlled clinical trial", EvidenceTier.RCT),
+    ("clinical trial, phase iii", EvidenceTier.RCT),
+    ("clinical trial, phase ii", EvidenceTier.RCT),
+    ("clinical trial", EvidenceTier.RCT),
+    ("observational study", EvidenceTier.PROSPECTIVE_COHORT),
+    ("comparative study", EvidenceTier.RETROSPECTIVE_COHORT),
+    ("case reports", EvidenceTier.CASE_SERIES_OR_REPORT),
+    ("preprint", EvidenceTier.PREPRINT_UNREVIEWED),
+)
+
+#: MeSH publication-characteristic terms, consulted only when publication type
+#: does not decide it.
+_MESH_TIER = (
+    ("cohort studies", EvidenceTier.PROSPECTIVE_COHORT),
+    ("prospective studies", EvidenceTier.PROSPECTIVE_COHORT),
+    ("retrospective studies", EvidenceTier.RETROSPECTIVE_COHORT),
+    ("case-control studies", EvidenceTier.CASE_CONTROL),
+    ("cross-sectional studies", EvidenceTier.CROSS_SECTIONAL),
+)
+
+#: The conservative FLOOR for anything unrecognised. ``_tier_from`` raises on an
+#: unknown string, so this mapping must be TOTAL over what PubMed actually emits;
+#: an unrecognised record therefore lands at the bottom of the ladder rather than
+#: stopping the run.
+#:
+#: CAVEAT, stated because the enum value is a claim: this floor does NOT assert the
+#: work is a preprint. Tier is used to decide whether a candidate has the standing
+#: to supersede, so the fail-closed default is the value that can never outrank
+#: anything. A record landing here is unclassified, not unreviewed, and that
+#: distinction is lost in the stored value -- which is why
+#: ``classify_evidence_tier_explained`` returns the basis alongside the tier.
+UNCLASSIFIED_TIER = EvidenceTier.PREPRINT_UNREVIEWED
+
+
+def classify_evidence_tier_explained(meta: dict) -> "tuple[EvidenceTier, str]":
+    """``(tier, basis)`` -- the basis says WHICH signal decided, or 'unclassified'."""
+    meta = meta or {}
+    pubtypes = [str(p).strip().lower() for p in (meta.get("publication_types") or [])]
+    for needle, tier in _PUBTYPE_TIER:
+        if any(needle == p for p in pubtypes):
+            return tier, f"publication_type:{needle}"
+    for needle, tier in _PUBTYPE_TIER:
+        if any(needle in p for p in pubtypes):
+            return tier, f"publication_type_contains:{needle}"
+    mesh = [str(m).strip().lower() for m in (meta.get("mesh_terms") or [])]
+    for needle, tier in _MESH_TIER:
+        if any(needle in m for m in mesh):
+            return tier, f"mesh:{needle}"
+    return UNCLASSIFIED_TIER, "unclassified"
+
+
+def classify_evidence_tier(meta: dict) -> EvidenceTier:
+    """Deterministic PubMed-metadata -> OCEBM tier. NO model call, TOTAL."""
+    return classify_evidence_tier_explained(meta)[0]
+
+
+# --------------------------------------------------------------------------
+# 3a. check_formal_notice -- the F5/F8 boundary.
+# --------------------------------------------------------------------------
+_RETRACTION_TYPES = ("retracted publication", "retraction of publication")
+_CORRECTION_TYPES = ("published erratum", "erratum")
+_EOC_TYPES = ("expression of concern",)
+
+
+def _notice_from_pubtypes(pubtypes) -> str:
+    lowered = [str(p).strip().lower() for p in (pubtypes or [])]
+    for p in lowered:
+        if any(t in p for t in _RETRACTION_TYPES):
+            return "retraction"
+    for p in lowered:
+        if any(t in p for t in _EOC_TYPES):
+            return "eoc"
+    for p in lowered:
+        if any(t in p for t in _CORRECTION_TYPES):
+            return "correction"
+    return "none"
+
+
+def make_check_formal_notice(fetch_meta):
+    """``check_formal_notice(work_id, *, as_of_date)`` over an injected metadata
+    reader, so the network call is testable without one.
+
+    ``as_of_date`` is LOAD-BEARING, not decorative: Bakker et al. document papers
+    being retracted while reviews are in press, so notice status is a function of
+    the date you check. A notice dated AFTER as_of_date is not applied -- at that
+    moment it did not yet exist."""
+    def check_formal_notice(work_id: str, *, as_of_date: str) -> NoticeStatus:
+        meta = fetch_meta(work_id) or {}
+        kind = _notice_from_pubtypes(meta.get("publication_types"))
+        date = meta.get("notice_date") or None
+        if kind == "none":
+            return NoticeStatus(notice_kind="none", notice_resolution="resolved_clear")
+        if date and as_of_date and str(date) > str(as_of_date):
+            # Not yet in force at the moment being assessed.
+            return NoticeStatus(notice_kind="none", notice_resolution="resolved_clear")
+        resolution = "unresolved" if kind == "eoc" else "flagged"
+        return NoticeStatus(notice_kind=kind, notice_resolution=resolution,
+                            date=str(date) if date else None)
+    return check_formal_notice
+
+
+# --------------------------------------------------------------------------
+# 3c. fetch_comparability_source -- abstract first, escalate only if needed.
+# --------------------------------------------------------------------------
+def make_fetch_comparability_source(fetch_abstract, fetch_fulltext=None,
+                                    *, thin_source_log=None):
+    """``fetch_comparability_source(work_id, *, as_of_date)``.
+
+    ABSTRACT FIRST. Rosemblat measured that for the species axis the disambiguating
+    fact was in the evidence sentence in 6 of 24 cases but required the FULL
+    ABSTRACT in 17 of 24 -- so the abstract is the floor, not the sentence.
+    DeepSciVerify's escalation resolved 67% of instances without full-text
+    retrieval, so full text is fetched only when the abstract is thin.
+
+    A THIN SOURCE MUST BE VISIBLE. ``_source_text`` is the only thing span
+    verification checks against, so an empty source silently turns every candidate
+    into UNASSESSABLE. Anything thin is appended to ``thin_source_log`` so the run
+    can report it instead of reporting a quiet zero."""
+    def fetch_comparability_source(work_id: str, *, as_of_date: str) -> ComparabilitySource:
+        abstract = (fetch_abstract(work_id) or "").strip()
+        methods = results = None
+        if len(abstract) < 200 and fetch_fulltext is not None:
+            full = fetch_fulltext(work_id) or {}
+            methods = (full.get("methods") or None)
+            results = (full.get("results") or None)
+        source = ComparabilitySource(abstract=abstract or None, methods=methods,
+                                     results=results)
+        if thin_source_log is not None and not (abstract or methods or results):
+            thin_source_log.append(work_id)
+        return source
+    return fetch_comparability_source
+
+
+# --------------------------------------------------------------------------
+# 3d. retrieve_superseding_candidates -- structural filter, then depth.
+# --------------------------------------------------------------------------
+def make_retrieve_superseding_candidates(search_candidates, *, cap: int = CANDIDATE_CAP,
+                                         protocol_log=None):
+    """``retrieve_superseding_candidates(cited_meta, claim, *, after_date, as_of_date)``.
+
+    STRUCTURE BEFORE SEMANTICS. RobotReviewer LIVE went from 23% to 55% precision at
+    unchanged 100% recall on structural narrowing alone, so the date window, MeSH
+    overlap and the citation neighbourhood are applied first and the semantic step
+    only ranks what survives.
+
+    ADEQUACY AND STATUS ARE HONEST, and they have to be: they gate
+    confident-negative-versus-hold inside the detector. A transport failure returns
+    ``status="failure"``, NEVER ``adequacy="empty"`` -- that exact confusion, an
+    outage wearing the same reason string as a real absence, cost calibration run 1
+    its entire yield. ``__post_init__`` already enforces empty <=> adequacy=empty,
+    so a failure with no candidates is reported as empty+failure and the detector
+    holds rather than concluding."""
+    def retrieve_superseding_candidates(cited_meta: dict, claim: str, *,
+                                        after_date: str, as_of_date: str) -> RetrievalResult:
+        mesh = list((cited_meta or {}).get("mesh_terms") or [])
+        if protocol_log is not None:
+            protocol_log.append(retrieval_protocol(
+                after_date=after_date, as_of_date=as_of_date, mesh_terms=mesh))
+        try:
+            hits = search_candidates(cited_meta, claim, after_date=after_date,
+                                     as_of_date=as_of_date, cap=cap)
+        except Exception as exc:                      # transport / parse failure
+            return RetrievalResult(
+                (), "empty", "failure",
+                rationale=f"retrieval failed, no search was completed: {exc!r}")
+        if hits is None:
+            return RetrievalResult((), "empty", "failure",
+                                   rationale="retrieval returned nothing at all")
+
+        seen, candidates = set(), []
+        for hit in hits:
+            work_id = str(hit.get("id") or "").strip()
+            pub_date = str(hit.get("pub_date") or "").strip()
+            if not work_id or work_id in seen:
+                continue          # duplicates are rejected by RetrievalResult too
+            if after_date and pub_date and pub_date <= after_date:
+                continue          # strictly after, per the structural filter
+            seen.add(work_id)
+            candidates.append(CandidateWork(id=work_id, pub_date=pub_date))
+            if len(candidates) >= cap:
+                break
+
+        if not candidates:
+            return RetrievalResult(
+                (), "empty", "ok",
+                rationale=("no admissible later evidence was found under this "
+                           "protocol; this is NOT a finding that none exists"))
+        adequacy = "adequate" if len(candidates) < cap else "inadequate"
+        return RetrievalResult(
+            tuple(candidates), adequacy, "ok",
+            rationale=(f"{len(candidates)} candidate(s) under {RETRIEVAL_PROTOCOL_VERSION}"
+                       + (f"; CAPPED at {cap}, more may exist" if adequacy == "inadequate"
+                          else "")))
+    return retrieve_superseding_candidates
+
+
+# --------------------------------------------------------------------------
+# 3e. find_supersession_attestation -- a DECLARED STUB.
+# --------------------------------------------------------------------------
+ATTESTATION_LOOKUP_PERFORMED = False
+
+ATTESTATION_STUB_REASON = (
+    "v1 performs NO attestation lookup. deploy_path_a is hard-gated off, so Path A "
+    "is unreachable by construction and this seam could only ever set an audit "
+    "flag. path_a_eligible=False therefore means 'not looked for', NOT 'no "
+    "attestation exists in the world'."
+)
+
+
+def find_supersession_attestation(cited_meta: dict, claim: str, candidate_id: str,
+                                  *, as_of_date: str) -> Optional[Attestation]:
+    """DECLARED STUB -- always returns None. See ATTESTATION_STUB_REASON.
+
+    Named rather than a lambda so it is self-declaring at every call site and in
+    any traceback, and so the manifest can record that the lookup was not
+    performed."""
+    return None
+
+
+# --------------------------------------------------------------------------
+# 3f. judge_contradiction -- renders ids, resolves ids, emits the contract.
+# --------------------------------------------------------------------------
+def make_judge_contradiction(complete, *, span_miss_log=None):
+    """``judge_contradiction(cited_source, candidate_source, claim) -> str``.
+
+    ``complete(prompt) -> str`` is the model call, injected so this is testable
+    offline. The judge SELECTS sentence ids; this resolves them back to text before
+    the detector's verbatim check ever runs, so a selected span passes that check
+    by construction. An unresolvable span becomes an empty string, which the
+    detector records as ``span_unverifiable`` -- a RECORDED MISS, which is the
+    DEC-047 rule, and it is appended to ``span_miss_log`` so misses are counted
+    rather than inferred."""
+    def judge_contradiction(cited_source, candidate_source, claim: str) -> str:
+        prompt = fcp.render_prompt(cited_source, candidate_source, claim)
+        raw = complete(prompt)
+        obj = json.loads(raw)
+
+        cited_units = fcp.source_units(cited_source)
+        cand_units = fcp.source_units(candidate_source)
+        for key, units in (("cited_finding_span", cited_units),
+                           ("candidate_contradiction_span", cand_units)):
+            entry = obj.get(key)
+            if isinstance(entry, str):
+                # A judge that ignored the instruction and quoted prose: align it
+                # rather than discard it, same floor as the coverage judge.
+                entry = {"label": "abstract", "text": entry}
+            text, span_source = fcp.resolve_span(entry, units)
+            if span_source == fcp.SPAN_SOURCE_UNRESOLVED and span_miss_log is not None:
+                span_miss_log.append({"key": key, "entry": entry})
+            obj[key] = text
+        return json.dumps(obj)
+    return judge_contradiction
+
+
+# --------------------------------------------------------------------------
+# The bundle the runner passes to decide_f5.
+# --------------------------------------------------------------------------
+def build_f5_seams(*, fetch_meta, fetch_abstract, search_candidates, complete,
+                   fetch_fulltext=None, cap: int = CANDIDATE_CAP,
+                   thin_source_log=None, span_miss_log=None,
+                   protocol_log=None) -> dict:
+    """All six seams, ready for ``decide_f5(..., f5_seams=...)``."""
+    return {
+        "check_formal_notice": make_check_formal_notice(fetch_meta),
+        "classify_evidence_tier": classify_evidence_tier,
+        "fetch_comparability_source": make_fetch_comparability_source(
+            fetch_abstract, fetch_fulltext, thin_source_log=thin_source_log),
+        "retrieve_superseding_candidates": make_retrieve_superseding_candidates(
+            search_candidates, cap=cap, protocol_log=protocol_log),
+        "find_supersession_attestation": find_supersession_attestation,
+        "judge_contradiction": make_judge_contradiction(
+            complete, span_miss_log=span_miss_log),
+    }

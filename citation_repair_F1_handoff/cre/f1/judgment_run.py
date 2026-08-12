@@ -556,6 +556,42 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
     return rec
 
 
+def _f5_manifest_block(f5_policy, f5_records) -> dict:
+    """The ``"f5"`` manifest block: policy, retrieval protocol, tallies.
+
+    F5 previously emitted NO module hash, NO prompt hash and NO policy block, so
+    the governing settings of an F5 number were recorded nowhere. This is the
+    counterpart to the existing ``"f4"`` block.
+
+    The retrieval protocol is recorded in READABLE form, not only as
+    ``retrieval_query_hash``: a hash is not a protocol, and nobody can audit what
+    was searched from one. Absence is reported as "none found under this protocol"
+    and never as "no superseding paper exists" -- SciFact-Open measured that 34.3%
+    (251/732) of pooled candidates assumed to hold no evidence actually held it."""
+    from .f5_seams import (ATTESTATION_LOOKUP_PERFORMED, ATTESTATION_STUB_REASON,
+                           CANDIDATE_CAP, RERANKER, retrieval_protocol)
+    from .f5_supersession import F5Policy
+    from .f5_discovery_queue import QUEUE_VERSION, disposition_counts
+
+    policy = f5_policy if f5_policy is not None else F5Policy()
+    return {
+        "mode": policy.mode,
+        "deploy_path_a": policy.deploy_path_a,
+        "reportable": False,        # unreachable by construction; stated, not implied
+        "contradiction_prompt_version": policy.contradiction_prompt_version,
+        "comparability_policy_version": policy.comparability_policy_version,
+        "retrieval_protocol": retrieval_protocol(),
+        "candidate_cap": CANDIDATE_CAP,
+        "reranker": RERANKER,
+        "queue_version": QUEUE_VERSION,
+        "disposition_counts": disposition_counts(f5_records),
+        "records_emitted": len(f5_records or []),
+        # So path_a_eligible=False can never be read as "no attestation exists".
+        "attestation_lookup_performed": ATTESTATION_LOOKUP_PERFORMED,
+        "attestation_lookup_note": ATTESTATION_STUB_REASON,
+    }
+
+
 def run_natural_judgment(
     xml_dir: str, out_dir: str, *,
     extractor, coverage_judge, fetch_abstract, fetch_reflist=None,
@@ -659,8 +695,14 @@ def run_natural_judgment(
     ckpt_fh = open(checkpoint_path, "a", encoding="utf-8")
     side_fh = open(sidecar_path, "a", encoding="utf-8")
 
+    # Every F5 record produced this run, for the discovery queue and the manifest
+    # tallies. Collected at emit so it follows the same crash invariant as the
+    # predictions themselves.
+    f5_records_all: list = []
+
     def emit(rec: dict) -> None:
         nonlocal prev_link, chain_count
+        f5_records_all.extend(rec.get("f5_records") or [])
         # Write order pins the crash invariant: predictions >= sidecar >= manifest.
         pred_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         pred_fh.flush()
@@ -801,6 +843,25 @@ def run_natural_judgment(
         "F3_V4_LOOPCLOSE_PROMPT": _sha256_text(F3_V4_LOOPCLOSE_PROMPT),
     }
 
+    # F5 provenance -- ONLY when F5 is actually wired. An F5 run previously emitted
+    # no module hash, no prompt hash and no policy block, so the governing settings
+    # of an F5 number were recorded nowhere (DEC-020's failure mode, CONTRADICTIONS
+    # 41 a third time). Added CONDITIONALLY because the default abstract path's
+    # manifest bytes are an opt-in guarantee: an unconditional key, even a
+    # zero-valued one, changes every default run.
+    if f5_seams is not None:
+        for name in ("cre.f1.f5_supersession", "cre.f1.f5_contradiction_prompt",
+                     "cre.f1.f5_seams", "cre.f1.f5_discovery_queue"):
+            try:
+                mod = __import__(name, fromlist=["x"])
+            except ImportError:
+                continue
+            f = getattr(mod, "__file__", None)
+            if f and os.path.exists(f):
+                module_hashes[os.path.basename(f)] = _sha256_file(f)
+        from .f5_contradiction_prompt import F5_CONTRADICTION_PROMPT
+        prompt_hashes["F5_CONTRADICTION_PROMPT"] = _sha256_text(F5_CONTRADICTION_PROMPT)
+
     # "F4 actually evaluated" is mechanically defined by the counters; reportable
     # additionally requires the formal wiring end-to-end.
     f4_reportable = (
@@ -853,6 +914,8 @@ def run_natural_judgment(
             "generator_calls": f4_counts["generator_calls"],
             "verifier_calls": f4_counts["verifier_calls"],
         },
+        **({"f5": _f5_manifest_block(f5_policy, f5_records_all)}
+           if f5_seams is not None else {}),
         "chain_genesis": genesis,
         "chain_tip": prev_link,
         "chain_record_count": chain_count,
@@ -879,5 +942,19 @@ def run_natural_judgment(
         "record_hashes_path": sidecar_path,
         "manifest_path": manifest_path,
     }
+    # The F5 discovery queue -- its OWN artifact, never appended to
+    # annotation_queue_path (that file is written by two entry points and 24
+    # assertions across 8 test files pin its contents, 8 of them asserting it is
+    # empty). Written only when F5 ran, so the default path gains no file.
+    if f5_seams is not None:
+        from .f5_discovery_queue import (QUEUE_FILENAME, assert_blind, build_queue)
+        f5_queue = build_queue(f5_records_all)
+        assert_blind(f5_queue)      # on the BUILT rows, at every depth
+        f5_queue_path = os.path.join(out_dir, QUEUE_FILENAME)
+        with open(f5_queue_path, "w", encoding="utf-8") as fh:
+            for row in f5_queue:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        manifest["f5_discovery_queue_path"] = f5_queue_path
+        manifest["f5"]["queued_rows"] = len(f5_queue)
     _write_json_atomic(manifest_path, manifest)
     return manifest

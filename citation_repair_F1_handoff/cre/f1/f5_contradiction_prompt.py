@@ -148,6 +148,20 @@ def resolve_span(entry, units_by_label) -> "tuple[str, str]":
     return unit["text"], SPAN_SOURCE_ALIGNED
 
 
+def render_prompt(cited_source, candidate_source, claim: str) -> str:
+    """The full prompt for one candidate pair.
+
+    Substitution is by explicit REPLACE, not ``str.format``: the prompt shows the
+    judge literal JSON (``{"label": ..., "sentence_ids": [...]}``) and format would
+    read those braces as fields and raise. Escaping every brace instead would make
+    the one part of the prompt that must be copied exactly the hardest part to
+    read."""
+    return (F5_CONTRADICTION_PROMPT
+            .replace("<<CITED_SOURCE>>", render_comparability_source(cited_source))
+            .replace("<<CANDIDATE_SOURCE>>", render_comparability_source(candidate_source))
+            .replace("<<CLAIM_TEXT>>", claim or ""))
+
+
 F5_CONTRADICTION_PROMPT = """\
 You are assessing whether a LATER scientific paper directly contradicts a specific
 finding in an EARLIER paper that cited it. Work through four steps in order, then
@@ -201,13 +215,13 @@ passage you want spans two consecutive sentences, name both ids. Only if no sing
 sentence carries it may you quote the passage as {"label": ..., "text": ...}.
 
 CITED (earlier) WORK SOURCE:
-{cited_source}
+<<CITED_SOURCE>>
 
 CANDIDATE (later) WORK SOURCE:
-{candidate_source}
+<<CANDIDATE_SOURCE>>
 
 THE CITED FINDING UNDER ASSESSMENT:
-{claim_text}
+<<CLAIM_TEXT>>
 
 Return ONLY one JSON object with exactly these keys and no others:
 
