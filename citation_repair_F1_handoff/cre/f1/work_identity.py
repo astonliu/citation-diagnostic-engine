@@ -255,6 +255,24 @@ def _first_author_aliases(authors: list[str]) -> set[str]:
     # remains position-zero-to-position-zero evidence; it never searches later
     # coauthors.
     aliases = {cleaned, tokens[0], tokens[-1]}
+    # A HYPHENATED compound surname is the same relation as a space-separated one
+    # ("Kost-Alimova" cited as "Alimova", exactly as "Romeo Casabona" is cited as
+    # "Romeo"), but canonical_title collapses an intra-word hyphen to a SINGLE
+    # token ("kostalimova"), so the component never reaches the alias set above.
+    # Split the raw value on hyphens so both spellings of one relation behave the
+    # same way. Position zero only, as everywhere else in this helper.
+    # NOTE (D4, seed 43, 2026-08-12): a hyphenated compound surname is NOT aliased
+    # component-wise here, though a space-separated one is (``tokens[0]`` /
+    # ``tokens[-1]`` below), so "Kost-Alimova" cited as "Alimova" stays a
+    # disagreement. Adding the split was implemented and measured, then WITHHELD:
+    # it moves PMC8114883 into ``match`` while its DOIs CONFIDENTLY disagree,
+    # because ``has_confident_disagreement`` excludes doi_match and first-author
+    # was the only signal holding that row in the audited pool. Dropping a
+    # DOI-disagreeing row out of the review population is a recall loss in the
+    # matcher. Closing the gap belongs in ``has_confident_disagreement`` and is
+    # corpus-wide -- 340 of seed 43's ``match`` rows carry ``doi_match is False``
+    # (0.61%), up to 4x the current review volume -- so it is measured and
+    # authorized separately (§24 LR-5, CONTRADICTIONS#F2-29).
     # Preserve multi-token surname particles (``de la Cruz``, ``van der Berg``)
     # as an additional alias when a provider supplies a leading given name.
     i = len(tokens) - 2
@@ -274,6 +292,13 @@ def _corporate_author_format_key(value: str) -> str:
     expansion, or fuzzy matching: distinct organizations retain distinct keys.
     """
     value = fold_bibliographic_text(value or "").lower()
+    # A COLON-introduced trailing number is a document locator the citing paper
+    # appended to the organization's name, not part of it: the ADA Standards of
+    # Care are cited as "American Diabetes Association Professional Practice
+    # Committee: 3", where 3 is the SECTION. Deliberately requires the colon -- a
+    # BARE trailing number can be the distinguishing designator of a numbered body
+    # ("Working Group 1" vs "Working Group 2"), so it is left in place.
+    value = re.sub(r"\s*:\s*\d+\s*$", "", value)
     # "&" is the typographic form of the conjunction "and" in institutional
     # names; folding it is a formatting equivalence, not a token change.
     value = re.sub(r"[&＆]", " and ", value)

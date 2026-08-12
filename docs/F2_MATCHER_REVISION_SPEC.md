@@ -1664,3 +1664,66 @@ in `_version_relation_evidence` is untouched, B29 stays `review_wrong_paper` /
 `preprint_shape_unconfirmed`, and 3-of-4 named rows is the accepted PASS. Resolving
 which section wins is ZD's decision and is **not** a defect of the version-chain
 rule. Deferred, not closed.
+
+**LR-5 — `has_confident_disagreement` excludes `doi_match`, so a DOI-disagreeing
+row can reach `match` (open, measured 2026-08-12).** The boolean wrong-paper signal
+in `flag_verdict` counts first author, author, year, and (below the near-identical
+title gate) volume/pages. It deliberately excludes `journal_match`; it also excludes
+`doi_match`, which is **not** documented as deliberate. A row whose DOIs
+CONFIDENTLY disagree can therefore take the clean-`match` short-circuit whenever the
+counted fields agree, leaving the audited population entirely. Surfaced by D4 below:
+correcting one first-author comparison was enough to drop seed-43
+`PMC8114883:b21-mjhid-13-1-e2021032` (`doi_match is False`, `journal_match is
+False`) into `match`.
+
+**The measured population (seed 43, ZD 2026-08-12).** Of that seed's `match` rows:
+
+| `match` rows | count | share |
+|---|---:|---:|
+| `doi_match=True` | 54,229 | 97.35% |
+| **`doi_match=False`** | **340** | **0.61%** |
+| `doi_match=None` (no DOI on one side — unknown, **not** a disagreement) | 1,137 | 2.04% |
+
+**Quotable form, and the only form this may be quoted in:** CRE currently classifies
+as correctly cited **340 references whose written DOI confidently disagrees with the
+DOI of the record their PMID resolves to** — 0.61% of `match` rows on seed 43. This
+is a **count**, and an **upper bound on one missed-positive population**. It is
+**not** a recall figure and must never be reported as one: nobody has adjudicated
+how those 340 would split between genuine wrong-paper and same-work quarantine, and
+the `None` bucket is unknown rather than disagreeing.
+
+Why the fix is not authorized: 340 against a flagged pool of 110 is up to **4× the
+review volume** (~7.5 hours of adjudication instead of ~1.8), with an unknown
+split. That is a redesign with its own spec, measurement and seed — not seed 43.
+The independently measured seed-37 frame agrees on the shape: 118 of 22,292 `match`
+rows (0.529%), which would take that frame's review pool from 300 to 418 (+39%).
+For scale, `journal_match is False` holds on 1,192 seed-37 `match` rows (5.3%), ten
+times larger, so counting venue disagreement is bigger again. Recorded, not fixed;
+tracked as `CONTRADICTIONS#F2-29`.
+
+**D1–D7 — first-author extraction and equivalence (seed 43, 2026-08-12).** Seven of
+the 21 confirmed seed-43 false positives carry a badly extracted or normalized
+written first author. Fixtures are pinned verbatim in
+`test_f2_first_author_extraction.py`. `first_author_equivalent` is a required
+conjunct of BOTH RULE A and RULE A2, so the line held throughout is: correcting how
+ONE name is NORMALIZED is in scope; extending what counts as a MATCH is not.
+
+| id | fixture | disposition |
+|---|---|---|
+| **D1** | `Keehoon Lee Donggeun Kim Sang Sun Yoona` / `Lee` | **declined** — an unparsed contributor RUN in one slot, given-name-first. Matching it means accepting any token in the run as the first author, conflating ROSTER overlap with POSITION agreement. The deciding question (one `<surname>` element vs several concatenated) needs `PMC10538001`'s source JATS, not available locally. |
+| **D2a** | `Association AD` / `American Diabetes Association` | **declined** — requires expanding an acronym against the other name's words, which `test_corporate_abbreviation_is_a_token_change_and_stays_high` forbids (`AAP` vs `American Academy of Pediatrics` must stay a conflict). A trailing-token-only restriction would thread it but still relaxes a RULE A/A2 conjunct. |
+| **D2b** | `…Professional Practice Committee: 3` / `…Professional Practice Committee` | **FIXED** — a colon-introduced trailing number is a document locator (the ADA Standards SECTION), stripped in `_corporate_author_format_key`. Requires the colon: a BARE trailing number can be a numbered body's designator. |
+| **D3** | `Anticancer` / `Mokbel` | **declined — publisher-side.** `PMC12414753:B34`'s reference text itself begins `"Anticancer Research . Breath of Danger: …"`; the citing paper put the JOURNAL in the author position and the source JATS tagged it as the author. |
+| **D4** | `Alimova` / `Kost-Alimova` | **implemented, measured, WITHHELD by ZD** — see LR-5. The fix is correct in isolation (a hyphenated compound is the same relation as the space-separated one already aliased); it is withheld because it drops a DOI-disagreeing row out of the audited pool, a recall loss in the matcher. |
+| **D5** | `Hanaich` / `Hanaichi` | **declined; wiring question SETTLED — not wired, deliberately.** `_first_author_typo`'s own contract is *"Narrow personal-surname typo signal; never a global author match"*, and it is used only as a gated signal inside `assess_same_work` (3 sites). Wiring it into `first_author_equivalent` would let JaroWinkler ≥ 0.91 satisfy RULE A and RULE A2 — similarity replacing identity. A narrower strict-prefix rule separates cleanly (this pair: prefix, min length 7; all five must-stay-`False` pairs: not prefixes, JW ≤ 0.78) but relaxes the same conjunct. |
+| **D6** | `` (empty) / `Humeniuk` | **already correct, no change.** `PMC12341016:REF2` carries no author at all (title + URL + PMID), so the parser extracted nothing and `first_author_match` is `None`. Tri-state contract honoured. |
+| **D7** | `Quiblier` / `Catherine` | **declined — upstream MEDLINE defect, verified via PubMed.** PMID 23891539's record has LastName/ForeName SWAPPED for every author (`last_name="Catherine" fore_name="Quiblier"`, `last_name="Susanna" fore_name="Wood"`, …). `lookup._au_surname` reads LastName and is behaving correctly; changing it would corrupt every well-formed record. |
+
+**Also recorded (pre-existing, measured at `aa118ca`, not introduced by the above).**
+`_first_author_aliases` adds `tokens[0]` as an alias to carry compound surnames
+(`Romeo` for `Romeo Casabona`), which also makes `Working Group 1` / `Working
+Group 2` and `Group A` / `Group AB` match **at the field level**. The verdicts stay
+`review_wrong_paper` (the corporate path and `_corporate_token_equivalent`'s
+minimum-truncation-length guard hold), so the acceptance rows are unaffected; only
+the field signal is loose. Narrowing the compound-surname alias is its own change
+with its own measurement.
