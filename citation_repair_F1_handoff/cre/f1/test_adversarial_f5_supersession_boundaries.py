@@ -33,6 +33,10 @@ def _contradiction():
         "cited_finding_span": "Drug X reduced disease Y",
         "candidate_contradiction_span": "Drug X did not reduce disease Y",
         "confidence": 0.9,
+        # Eleventh contract key (2026-08-12); "none" keeps every assertion in this
+        # file pinned to what it was written to pin -- the axis is recorded, never
+        # routed on.
+        "scope_mismatch_axis": "none",
     })
 
 

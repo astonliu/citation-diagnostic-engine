@@ -79,6 +79,10 @@ def contradiction_json(
     cited_finding_span=CITED_FINDING_SPAN,
     candidate_contradiction_span=CAND_CONTRA_SPAN,
     confidence=0.9,
+    # Eleventh key (2026-08-12). Defaults to "none" so every existing fixture keeps
+    # asserting what it was written to assert: the axis is RECORDED, never routed
+    # on, so adding it must not move any decision these tests pin.
+    scope_mismatch_axis="none",
 ):
     return json.dumps({
         "directional_contradiction": directional_contradiction,
@@ -91,6 +95,7 @@ def contradiction_json(
         "cited_finding_span": cited_finding_span,
         "candidate_contradiction_span": candidate_contradiction_span,
         "confidence": confidence,
+        "scope_mismatch_axis": scope_mismatch_axis,
     })
 
 

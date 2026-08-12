@@ -70,6 +70,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional, Sequence
@@ -118,6 +119,16 @@ _POPULATION_RELATION = frozenset(
      "encompassing_without_qualifying_direct_evidence", "narrower", "disjoint",
      "unclear"}
 )
+#: Which scope axis explains a non-comparable decision. A CLOSED checklist -- three
+#: independent taxonomies converge on this list -- so it is a constrained enum the
+#: strict parser can validate, not open-ended reasoning. Recorded per candidate;
+#: feeds NO routing decision.
+_SCOPE_MISMATCH_AXES = frozenset({
+    "species_or_strain", "population_subgroup", "dose_or_duration",
+    "route_or_administration", "endpoint_definition", "assay_or_study_design",
+    "clinical_setting", "time_period_new_knowledge", "endogenous_vs_exogenous",
+    "none", "unclear",
+})
 _COMPARABILITY = frozenset({"comparable", "not_comparable", "uncertain"})
 _NOTICE_KIND = frozenset({"none", "retraction", "correction", "eoc"})
 _NOTICE_RESOLUTION = frozenset({"resolved_clear", "flagged", "unresolved"})
@@ -157,7 +168,10 @@ class F5Policy:
     confidence_floor: Optional[float] = 0.25      # discovery: low / high-recall
     eoc_caps_at_path_b: bool = True
     deploy_path_a: bool = False                   # LOCKED off in this build
-    contradiction_prompt_version: str = "f5_contradiction_v1"
+    # v1 -> v2 (2026-08-12): the contradiction contract gained
+    # ``scope_mismatch_axis``. A key-set change is exactly what this version
+    # exists to signal, and the prompt text itself first shipped at v2.
+    contradiction_prompt_version: str = "f5_contradiction_v2"
     comparability_policy_version: str = "f5_comparability_v1"
     generator_model_id: str = ""
     verifier_model_id: str = ""
@@ -278,6 +292,15 @@ class RetrievalResult:
             raise ValueError(f"RetrievalResult.adequacy must be one of {sorted(_ADEQUACY)}")
         if self.status not in _STATUS:
             raise ValueError(f"RetrievalResult.status must be one of {sorted(_STATUS)}")
+        # One work must appear at most ONCE. A duplicate id is assessed twice, and
+        # two assessments of the same paper agreeing with each other reads as two
+        # independent candidates agreeing -- inflating apparent agreement exactly
+        # where the module is trying to measure it.
+        ids = [c.id for c in self.candidates]
+        if len(ids) != len(set(ids)):
+            duplicates = sorted({i for i in ids if ids.count(i) > 1})
+            raise ValueError(
+                f"RetrievalResult.candidates has duplicate work ids: {duplicates}")
         # Blueprint Sec 5: empty candidate list <=> adequacy=empty. An empty list
         # with any other adequacy (adequate OR inadequate), or adequacy=empty with
         # a nonempty list, is not a valid combination.
@@ -321,6 +344,12 @@ class NoticeStatus:
                 f"NoticeStatus.notice_resolution must be one of {sorted(_NOTICE_RESOLUTION)}")
         if self.date is not None and not isinstance(self.date, str):
             raise ValueError("NoticeStatus.date must be a string or None")
+        # PARSE it, do not merely type-check it. This date decides whether a notice
+        # is in force at as_of_date -- Bakker et al. document papers being retracted
+        # while reviews are in press -- so an unvalidated notice date silently
+        # disables that comparison rather than failing closed.
+        if self.date is not None:
+            _parse_date(self.date, "NoticeStatus.date")
 
 
 @dataclass(frozen=True)
@@ -368,12 +397,27 @@ class ContradictionJudgment:
     cited_finding_span: str
     candidate_contradiction_span: str
     confidence: float
+    #: Which scope axis explains a non-comparable decision (or ``none``). RECORDED
+    #: only -- it feeds no routing decision, so a wrong axis cannot change a
+    #: verdict, only the explanation attached to it.
+    scope_mismatch_axis: str = "unclear"
 
 
 # --------------------------------------------------------------------------
 # Deterministic date + comparability + independence primitives.
 # --------------------------------------------------------------------------
+#: YYYY-MM-DD and nothing else. ``date.fromisoformat`` is WIDER than its own error
+#: message here: on 3.11+ it also accepts ``20240101`` (basic format) and
+#: ``2024-W01-1`` (ISO week dates), so the gate advertised YYYY-MM-DD while letting
+#: two other calendars through. Dates decide the after_date window and whether a
+#: retraction is in force at as_of_date, so a silently reinterpreted one is a
+#: correctness bug, not a formatting nicety.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
 def _parse_date(value: str, name: str) -> datetime.date:
+    if not isinstance(value, str) or not _ISO_DATE_RE.match(value):
+        raise ValueError(f"{name} must be an ISO YYYY-MM-DD date: {value!r}")
     try:
         return datetime.date.fromisoformat(value)
     except (ValueError, TypeError) as exc:
@@ -480,7 +524,20 @@ def _reject_duplicate_keys(pairs) -> dict:
 _CONTRADICTION_KEYS = frozenset(
     {"directional_contradiction", "claim_match", "outcome_relation",
      "population_relation", "cited_direction", "candidate_direction", "magnitude",
-     "cited_finding_span", "candidate_contradiction_span", "confidence"}
+     "cited_finding_span", "candidate_contradiction_span", "confidence",
+     # Eleventh key (2026-08-12). The module already ROUTES scope mismatch
+     # correctly -- population_relation -> derive_comparability_decision ->
+     # not_comparable -> non-qualifying -- but nothing recorded WHICH axis fired,
+     # so a run could not answer "why did this pair not qualify", the one question
+     # the annotation queue exists to support. Rosemblat et al. 2019 (PMID
+     # 31473364) funnelled 2,236 candidate pairs to 58 apparent and 4 genuine with
+     # 42.6% lost to generic subjects; the axis makes that funnel auditable.
+     # It is carried on the CONTRACT rather than derived, because the axis list
+     # distinguishes species from dose from endpoint and population_relation's
+     # four values cannot encode that -- only the reading that produced the
+     # judgment knows it. Adding it bumps contradiction_prompt_version off
+     # f5_contradiction_v1, per the version's own purpose.
+     "scope_mismatch_axis"}
 )
 
 
@@ -523,6 +580,10 @@ def _parse_contradiction(text: str) -> ContradictionJudgment:
         raise ValueError("confidence must be a number")
     if not 0.0 <= float(confidence) <= 1.0:
         raise ValueError("confidence must be in [0, 1]")
+    scope_axis = obj["scope_mismatch_axis"]
+    if scope_axis not in _SCOPE_MISMATCH_AXES:
+        raise ValueError(
+            f"scope_mismatch_axis must be one of {sorted(_SCOPE_MISMATCH_AXES)}")
     return ContradictionJudgment(
         directional_contradiction=directional,
         claim_match=claim_match,
@@ -534,6 +595,7 @@ def _parse_contradiction(text: str) -> ContradictionJudgment:
         cited_finding_span=obj["cited_finding_span"],
         candidate_contradiction_span=obj["candidate_contradiction_span"],
         confidence=float(confidence),
+        scope_mismatch_axis=scope_axis,
     )
 
 
@@ -649,7 +711,13 @@ class TemporalAssessorRun:
             "attestation_date": None,
             "attestation_replacement_work_id": None,
             "attestation_conclusion_span": None,
-            "failed_replication_evidence": False,
+            # ``failed_replication_evidence`` was here, initialised False and never
+            # written or read anywhere in either repo. REMOVED 2026-08-12 rather
+            # than kept: nothing computes it, so a hard False asserted "we looked
+            # for failed-replication evidence and found none" when nothing had
+            # looked. Every sibling field is either genuinely written or None for
+            # unknown. If the signal is wanted it returns with the code that
+            # produces it.
             "path_a_eligible": False,
             "criteria_fired": [],
             "reason": None,
@@ -705,6 +773,10 @@ class TemporalAssessorRun:
         comparability = derive_comparability_decision(
             judgment.claim_match, judgment.outcome_relation, judgment.population_relation)
         cand["comparability_decision"] = comparability
+        # WHY this pair did not qualify, recorded next to the decision it explains.
+        # Read-only: no branch below reads it, so a wrong axis can change the
+        # explanation attached to a routing decision but never the decision.
+        cand["scope_mismatch_axis"] = judgment.scope_mismatch_axis
 
         # Verbatim span verification (each span against its OWN source; Sec 9-17).
         # Both spans must be NONBLANK (a blank/whitespace-only span would satisfy

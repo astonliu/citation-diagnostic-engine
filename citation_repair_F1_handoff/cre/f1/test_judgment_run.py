@@ -315,7 +315,7 @@ def test_f5_wired_through_runner_emits_temporal_finding(tmp_path, monkeypatch):
             "magnitude": "reversal",
             "cited_finding_span": "Drug X reduced outcome Y in adults",
             "candidate_contradiction_span": "Drug X did NOT reduce outcome Y in adults",
-            "confidence": 0.9})
+            "confidence": 0.9, "scope_mismatch_axis": "none"})
 
     f5_seams = dict(
         retrieve_superseding_candidates=f5_retrieve,

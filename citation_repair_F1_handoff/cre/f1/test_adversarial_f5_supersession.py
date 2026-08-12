@@ -14,7 +14,7 @@ def _contradiction():
                        "outcome_relation": "same", "population_relation": "equivalent",
                        "cited_direction": "down", "candidate_direction": "up", "magnitude": "reversal",
                        "cited_finding_span": "cited", "candidate_contradiction_span": "candidate",
-                       "confidence": 0.9})
+                       "confidence": 0.9, "scope_mismatch_axis": "none"})
 
 
 @pytest.mark.parametrize("raw", [_contradiction() + " trailing", _contradiction() + _contradiction()])
@@ -62,21 +62,22 @@ def test_f5_invokes_the_injected_contradiction_judgment_for_eligible_candidate()
     assert temporal.state.value == "QUALIFYING_CONTRADICTION"
 
 
-@pytest.mark.xfail(strict=True, reason="date.fromisoformat accepts non-YYYY-MM-DD forms")
+# FIXED 2026-08-12: _parse_date now gates on an explicit ^\\d{4}-\\d{2}-\\d{2}$
+# before delegating, so basic-format and ISO week dates are rejected.
 @pytest.mark.parametrize("date", ["20240101", "2024-W01-1"])
 def test_date_contract_rejects_non_yyyy_mm_dd_iso_forms(date):
     with pytest.raises(ValueError, match="YYYY-MM-DD"):
         f5._parse_date(date, "adversarial")
 
 
-@pytest.mark.xfail(strict=True, reason="NoticeStatus validates only the date field's type")
+# FIXED 2026-08-12: NoticeStatus.__post_init__ now PARSES the date, not just its type.
 def test_notice_status_rejects_invalid_date_text():
     with pytest.raises(ValueError):
         f5.NoticeStatus(notice_kind="correction", notice_resolution="flagged",
                         date="not-a-date")
 
 
-@pytest.mark.xfail(strict=True, reason="RetrievalResult permits duplicate work IDs")
+# FIXED 2026-08-12: RetrievalResult.__post_init__ rejects duplicate candidate ids.
 def test_version_chain_rejects_duplicate_candidate_work_ids():
     candidates = (
         f5.CandidateWork(id="W2", pub_date="2021-01-01"),
