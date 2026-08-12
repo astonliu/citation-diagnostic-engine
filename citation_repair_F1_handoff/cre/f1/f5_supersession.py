@@ -1,6 +1,14 @@
 """F5 (stale / superseded) discriminator -- the temporal-supersession detector
 for the typed F3--F7 judgment engine (blueprint ``F5_BLUEPRINT.md`` sha256
-``663edd69...``; implementation spec ``F5_SUPERSESSION_SPEC.md``).
+``663edd690796155bb260e42117c93704b4c58698a0ef5d287cf931f45a04fdea``;
+implementation spec ``F5_SUPERSESSION_SPEC.md``, sha256
+``f592f726f61cbdfc30fb5ec2589e9505b6440fecc89b6e70e581705d2a1f1c91``).
+
+Both digests are over the blueprint's own canonical form (UTF-8, LF, exactly one
+trailing newline -- see its "Freeze canonicalization" section; a copy with the final
+newline stripped differs by that one byte). The blueprint digest agrees three ways:
+the tracked blob at ``07477e3``, the working-tree file, and the head/tail
+(``663edd69`` / ``fdea``) recorded independently in that commit's own message.
 
 F5 is the citation-level instance of *medical reversal*: the cited paper is real,
 carries no formal retraction, and ONCE supported the claim, but its central
