@@ -30,10 +30,19 @@ changed deliberately rather than discovered inside a function.
 MEASURED ON SEED 45 (development only -- every constant above was set while looking
 at these rows, so no figure here is reportable; seed 47 must be drawn first):
 
-    input: f2_seed45_audited87_full.jsonl, 87 rows, FULL author rosters
-    baseline 69/87 = 0.7931 -> 67/71 = 0.9437, coverage 1.000
-    14 of 18 false positives reclassified; 2 TRUE_F2 (PMC9940543:R13,
-    PMC8845446:B49); entry mix language 8, subset 6, container 2
+    input: f2_seed45_audited87_full.jsonl
+           sha256 8b1207987922082063b43014119f13a3a417af78824a266f51c749e65ca033a9
+           87 rows, FULL author rosters
+
+    entries 1-3 : 69/87 = 0.7931 -> 67/71 = 0.9437, 14 of 18 FP reclassified
+    + entry 4   : 69/87 = 0.7931 -> 67/69 = 0.9710, 16 of 18 FP reclassified
+    coverage 1.000 throughout; 2 TRUE_F2 (PMC9940543:R13, PMC8845446:B49),
+    unchanged by entry 4; entry mix language 8, subset 6, container 2,
+    corporate 2 (PMC10011273:CR14, PMC9730128:bib13)
+
+    The two false positives entry 4 does NOT reach are the spec's own out-of-scope
+    rows: PMC9508853:B81 (stemming) and PMC10641984:gh2489-bib-0065 (thin address,
+    reaching it costs skaf392-B47). PMC9533381:ref10 is a label question.
 
 CORRECTION, recorded because the numbers in commit 77c4cb7's message are wrong and
 that commit is pushed. Those were measured against the blind adjudication
@@ -359,7 +368,7 @@ def _is_corporate(name: str) -> bool:
     return bool(set(toks) & _CORPORATE_TOKENS) or len(toks) >= _CORPORATE_MAX_WORDS
 
 
-def author_evidence(written_authors, resolved_authors) -> "bool | None":
+def author_evidence_detail(written_authors, resolved_authors) -> "tuple[bool | None, str]":
     """``True`` / ``False`` / ``None``, where None means NOT DISCRIMINATIVE.
 
     None drops the field from the address count rather than counting it as a
@@ -368,9 +377,9 @@ def author_evidence(written_authors, resolved_authors) -> "bool | None":
     author -- never first-author only."""
     left, right = _as_names(written_authors), _as_names(resolved_authors)
     if not left or not right:
-        return None
+        return None, "missing"
     if all(_is_corporate(n) for n in left) or all(_is_corporate(n) for n in right):
-        return None
+        return None, "corporate"
 
     left_tokens = [set(_tokens(n)) for n in left]
     right_tokens = [set(_tokens(n)) for n in right]
@@ -379,9 +388,9 @@ def author_evidence(written_authors, resolved_authors) -> "bool | None":
             if not lt or not rt:
                 continue
             if lt & rt:                                   # a shared surname token
-                return True
+                return True, "shared_token"
             if lt <= rt or rt <= lt:                      # compound surnames
-                return True
+                return True, "containment"
     for ln in left:
         for rn in right:
             a, b = _fold(ln), _fold(rn)
@@ -391,8 +400,15 @@ def author_evidence(written_authors, resolved_authors) -> "bool | None":
             # "Nagendrababu" is one space, which any token-sorted form destroys.
             if (fuzz.ratio(a, b) >= AUTHOR_FUZZ_MIN
                     or fuzz.ratio(a.replace(" ", ""), b.replace(" ", "")) >= AUTHOR_FUZZ_MIN):
-                return True
-    return False
+                return True, "fuzz"
+    return False, "disagree"
+
+
+def author_evidence(written_authors, resolved_authors) -> "bool | None":
+    """Tri-state only. :func:`author_evidence_detail` carries WHY, which entry 4
+    needs: ``None`` for ``corporate`` is evidence the field cannot discriminate,
+    ``None`` for ``missing`` is only a thin record."""
+    return author_evidence_detail(written_authors, resolved_authors)[0]
 
 
 # =====================================================================
@@ -439,6 +455,56 @@ def address_agreement(written: dict, resolved: dict) -> int:
     return n
 
 
+
+# =====================================================================
+# 4. entry_corporate -- the MIRROR of entries 1-3
+# =====================================================================
+def title_equivalent(written_title: str, resolved_title: str) -> "tuple[bool, str]":
+    """``(equivalent, path)`` -- ``exact`` or ``token_set``, else ``(False, "")``.
+
+    TITLE_SIM IS DELIBERATELY NOT A PATH. A similarity score above 0.95 survives a
+    swapped CONTENT word -- "adults" vs "children", "smoking" vs "alcohol" -- and
+    this entry has no title-shape evidence to fall back on the way entries 1-3 do:
+    there, something about the title itself (a translation, a container, a quoted
+    portion) explains the mismatch. Here the title IS the whole case, so it has to
+    be equal, not similar."""
+    w, r = _fold(written_title), _fold(resolved_title)
+    if not w or not r:
+        return False, ""
+    if w == r:
+        return True, "exact"
+    if set(_content_words(written_title)) == set(_content_words(resolved_title)):
+        return True, "token_set"
+    return False, ""
+
+
+def entry_corporate(written: dict, resolved: dict) -> "tuple[bool, dict]":
+    """The mirror image of entries 1-3: the TITLE is strong and the AUTHOR is
+    non-discriminative.
+
+    Entries 1-3 each describe a way the title became unusable. These rows have
+    perfect titles and sit in the wrong-paper band purely because two renderings of
+    one organization's name differ -- "Practice Committee of the American Society
+    for reproductive medicine" against the same string with different casing, or a
+    group name the citing article compressed ("National Institute of Neurological D
+    and Stroke rt PASSG").
+
+    Requires author_evidence to be None FOR REASON ``corporate``. Reason
+    ``missing`` must not fire it: an absent author list is a thin record, not
+    evidence that the author is uninformative, and accepting it would open the
+    entry to anything with a blank author slot. One-sided corporate qualifies -- a
+    corporate name against a person roster is still non-discriminative, and it is
+    the common shape."""
+    ok, path = title_equivalent(written.get("title"), resolved.get("title"))
+    if not ok:
+        return False, {"title_path": None, "author_reason": None}
+    value, reason = author_evidence_detail(
+        written.get("authors") or written.get("first_author"),
+        resolved.get("authors") or resolved.get("first_author"))
+    fires = value is None and reason == "corporate"
+    return fires, {"title_path": path, "author_reason": reason}
+
+
 # =====================================================================
 # 6. The decision
 # =====================================================================
@@ -453,6 +519,11 @@ def entry_for(written: dict, resolved: dict) -> "str | None":
         return "container"
     if entry_subset(wt, rt):
         return "subset"
+    # LAST on purpose: entries 1-3 each explain why the title is unusable, and this
+    # one requires the title to be perfect, so it can only ever claim rows the
+    # others left behind. Ordering is what keeps the 24 earlier fixtures fixed.
+    if entry_corporate(written, resolved)[0]:
+        return "corporate"
     return None
 
 

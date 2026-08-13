@@ -160,3 +160,67 @@ def test_seed43_doi_guards_report_their_presence(capsys):
     # because the count is the finding -- an assert over an empty set passes while
     # testing nothing, which is what this test exists to make visible.
     assert len(present) == 0
+
+
+# =====================================================================
+# Entry 4 -- corporate author. The MIRROR of entries 1-3: title strong,
+# author non-discriminative.
+# =====================================================================
+_CORP = json.load(open(
+    os.path.join(os.path.dirname(__file__), "f2_corporate_author_cases.json"),
+    encoding="utf-8"))
+
+
+@pytest.mark.parametrize("case", _CORP, ids=[c["id"] for c in _CORP])
+def test_corporate_acceptance_matrix(case):
+    verdict, entry, n = classify_samework(case["w"], case["r"])
+    assert entry == case["entry"], (
+        f"{case['id']}: expected entry {case['entry']!r}, got {entry!r} ({case['defends']})")
+    assert verdict == case["verdict"], (
+        f"{case['id']}: expected {case['verdict']}, got {verdict} "
+        f"(entry={entry}, address={n}) -- {case['defends']}")
+
+
+def test_corporate_fixture_file_is_complete():
+    assert len(_CORP) == 9 and len({c["id"] for c in _CORP}) == 9
+
+
+def test_title_sim_is_not_a_path_into_entry_4():
+    """The rule this entry most needs: a similarity score above 0.95 survives a
+    SWAPPED content word, and entry 4 has no title-shape evidence to fall back on."""
+    from cre.f1.biblio_match import title_sim
+    from cre.f1.f2_samework_rule import title_equivalent
+    a = "The effect of smoking on cardiovascular outcomes in older adults"
+    b = "The effect of alcohol on cardiovascular outcomes in older adults."
+    assert title_sim(a, b) >= 0.90          # similar by score...
+    assert title_equivalent(a, b)[0] is False   # ...and NOT equivalent
+
+
+def test_entry_4_requires_reason_corporate_not_merely_None():
+    """`missing` is a thin record, not evidence the author cannot discriminate.
+    Without this check the entry would accept any blank author slot."""
+    from cre.f1.f2_samework_rule import author_evidence_detail, entry_corporate
+    assert author_evidence_detail([], ["Turck"]) == (None, "missing")
+    fires, why = entry_corporate(
+        {"title": "Dietary reference values for sodium", "authors": []},
+        {"title": "Dietary reference values for sodium.", "authors": ["Turck"]})
+    assert fires is False and why["author_reason"] == "missing"
+
+
+def test_entry_4_leaves_disagreeing_personal_rosters_flagged():
+    """The most important negative: without the corporate-reason check this entry
+    would clear every row whose title matches and whose authors merely differ,
+    which is a large slice of real F2."""
+    from cre.f1.f2_samework_rule import entry_corporate
+    fires, why = entry_corporate(
+        {"title": "Outcomes after transcatheter aortic valve replacement", "authors": ["Smith", "Jones"]},
+        {"title": "Outcomes after transcatheter aortic valve replacement.", "authors": ["Nguyen", "Okonkwo"]})
+    assert fires is False and why["author_reason"] == "disagree"
+
+
+def test_entry_4_runs_last_so_it_cannot_move_the_earlier_fixtures():
+    from cre.f1.f2_samework_rule import entry_for
+    for case in _FIXTURES:
+        entry = entry_for(case["w"], case["r"])
+        if case["entry"] is not None:
+            assert entry == case["entry"], case["id"]
