@@ -26,6 +26,33 @@ TRUE_F2 to catch 1 false positive.
 
 Every threshold here is a named module-level constant so it can be found, cited and
 changed deliberately rather than discovered inside a function.
+
+MEASURED ON SEED 45 (development only -- every constant above was set while looking
+at these rows, so no figure here is reportable; seed 47 must be drawn first):
+
+    input: f2_seed45_audited87_full.jsonl, 87 rows, FULL author rosters
+    baseline 69/87 = 0.7931 -> 67/71 = 0.9437, coverage 1.000
+    14 of 18 false positives reclassified; 2 TRUE_F2 (PMC9940543:R13,
+    PMC8845446:B49); entry mix language 8, subset 6, container 2
+
+CORRECTION, recorded because the numbers in commit 77c4cb7's message are wrong and
+that commit is pushed. Those were measured against the blind adjudication
+workbook, which carries only ``first_author`` -- the ANNOTATOR'S STRIPPED ARTIFACT,
+not the rule's input. ``author_any`` therefore compared "Moune" against "Ellong"
+and scored False on a row whose full rosters share two surnames:
+
+    written  ['Moune', 'Bella-Hiag']
+    resolved ['Ellong', 'Ebana Mvogo', 'Nyouma Moune', 'Bella-Hiag']
+
+R13 recovers on the real input (address 4, language entry). The 14/18 and the
+coverage were unaffected -- none of those 14 turned on ``author_any`` -- but the
+TRUE_F2 count and both precision figures were, so 68/72 = 0.9444 must not be
+quoted. The remaining gap to the spec's 3 TRUE_F2 is PMC9533381:ref10 alone, whose
+label ZD is reviewing; the rule treats the label as authoritative either way.
+
+THE GENERAL HAZARD: the blind workbook is the convenient artifact and it looks
+complete until you check the field. Any future rule using ``author_any`` must read
+the reband file, not the workbook.
 """
 from __future__ import annotations
 
