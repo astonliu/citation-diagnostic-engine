@@ -9,6 +9,7 @@ from cre.f1.biblio_match import (
     VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE,
     VERDICT_SAME_WORK_VARIANT,
     VERDICT_WRONG_PAPER,
+    SAME_WORK_TITLE_SIM_MIN,
     field_agreement,
     flag_verdict,
     is_corporate_author,
@@ -92,6 +93,64 @@ def test_rule_s_real_living_chapters_ignore_revision_year(title, authors,
     # The comparison did not mutate the evidence stored on either input.
     assert claimed.title == title
     assert claimed.year == 2022 and resolved.year == 2026
+
+
+# ===========================================================================
+# RULE S may not hand near_identical_title a title it just shortened.
+#
+# PMC10932574:b26-inj-2346250-125 (seed 43, labelled TRUE_F2) was cleared to
+# review_same_work_variant via the PRE-EXISTING near_identical_title route: RULE S
+# strips the living-source container off the written title, title_sim rises
+# 0.9021 -> 0.9778, crosses SAME_WORK_TITLE_SIM_MIN, and the route fires on a row
+# whose author_match is False, first_author_match is False, and whose year,
+# journal, volume, pages and DOI are ALL None. A title-similarity route must not
+# override two explicit author disagreements with zero address corroboration --
+# especially when the similarity is an artifact of a transformation this matcher
+# performed itself.
+#
+# CONSTRAINT: a title MODIFIED by the living-source strip may not reach
+# near_identical_title unless at least one of {year, journal, volume, first_page,
+# doi} agrees.
+#
+# TITLE STRINGS BELOW ARE A SIGNATURE-MATCHED RECONSTRUCTION, NOT THE ROW'S TEXT.
+# The real strings live in the seed-43 frame, which is not in this checkout. They
+# reproduce the exact defect -- living-source pair, raw title_sim below the gate,
+# stripped title_sim above it, both author signals False, all five address fields
+# None -- and the same route. Swap in the real strings when the frame is in hand;
+# the assertion does not change.
+# ===========================================================================
+def test_living_source_strip_cannot_carry_a_row_into_near_identical_title():
+    claimed, resolved = _pair(
+        wt="Blunt Abdominal Trauma Injury. StatPearls. Treasure Island (FL)",
+        rt="Blunt Abdominal Trauma.",
+        wa=["Kwon"], ra=["Lotfollahzadeh", "Burns"])
+    verdict, result = flag_verdict(claimed, resolved)
+    f = result.fields
+    # The signature this guard is pinned to -- tri-state, never a falsy check.
+    assert f.author_match is False
+    assert f.first_author_match is False
+    assert (f.year_match, f.journal_match, f.volume_match,
+            f.pages_match, f.doi_match) == (None, None, None, None, None)
+    assert result.title_sim >= SAME_WORK_TITLE_SIM_MIN   # the strip lifted it
+    assert verdict == VERDICT_WRONG_PAPER, (
+        "PMC10932574:b26-inj-2346250-125", verdict, result.same_work_reason)
+
+
+def test_living_source_strip_still_allowed_when_one_address_field_agrees():
+    """The constraint is a corroboration floor, not a blanket kill on RULE S.
+
+    Same shape as the guard above with a single agreeing address field, which is
+    all the constraint asks for."""
+    claimed, resolved = _pair(
+        wt="Blunt Abdominal Trauma Injury. StatPearls. Treasure Island (FL)",
+        rt="Blunt Abdominal Trauma.",
+        wa=["Kwon"], ra=["Lotfollahzadeh", "Burns"],
+        wj="StatPearls", rj="StatPearls")
+    verdict, result = flag_verdict(claimed, resolved)
+    assert result.fields.journal_match is True
+    assert result.title_sim >= SAME_WORK_TITLE_SIM_MIN
+    assert verdict == VERDICT_SAME_WORK_VARIANT
+    assert result.same_work_reason == "near_identical_title"
 
 
 @pytest.mark.parametrize("row", [

@@ -41,7 +41,8 @@ from .work_identity import (assess_same_work, first_author_equivalent,
                             doi_equivalent, journal_equivalent,
                             is_distinctive_title, version_chain_same_work,
                             is_living_source_pair, strip_living_source_suffix,
-                            _strip_acronym_gloss, roman_conflict_suppressed)
+                            _strip_acronym_gloss, roman_conflict_suppressed,
+                            _first_pages_agree)
 from .f2_samework_rule import entry_language, entry_language_trigger
 from .journal_identity import journal_identity
 
@@ -1057,11 +1058,19 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     living_source = is_living_source_pair(claimed, cand)
     claimed_for_comparison = claimed
     cand_for_comparison = cand
+    # Whether the strip actually SHORTENED a title, not merely whether the pair is
+    # a living source. Only a title this matcher modified carries the artificial
+    # similarity the near-identical-title gate below has to discount; a living
+    # chapter cited without the container is untouched and keeps the ordinary gate.
+    living_strip_modified_title = False
     if living_source:
         claimed_for_comparison = replace(
             claimed, title=strip_living_source_suffix(claimed.title))
         cand_for_comparison = replace(
             cand, title=strip_living_source_suffix(cand.title))
+        living_strip_modified_title = (
+            claimed_for_comparison.title != claimed.title
+            or cand_for_comparison.title != cand.title)
 
     # C2/C4 repair applied ONCE, up front, so the field comparison and the identity
     # assessment below read the same author list (see repair_claimed_for_comparison).
@@ -1249,6 +1258,29 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
         m.same_work_reason = identity.reason
         m.identity_signals = identity.signals
         return VERDICT_SAME_WORK_VARIANT, m
+    # RULE S CORROBORATION FLOOR (seed-43 gate, PMC10932574:b26-inj-2346250-125).
+    # When the living-source strip SHORTENED a title, the similarity feeding the
+    # gate below is partly this matcher's own doing: on that row title_sim rose
+    # 0.9021 -> 0.9778 across the strip and crossed SAME_WORK_TITLE_SIM_MIN, and
+    # near_identical_title then cleared a labelled TRUE_F2 whose author_match and
+    # first_author_match were BOTH False and whose year, journal, volume, pages and
+    # DOI were all None. Title similarity alone must not outvote two explicit
+    # author disagreements backed by zero address evidence.
+    #
+    # So a strip-modified title reaches the gate only with at least one agreeing
+    # address field -- the coordinates a revision cannot silently change. Tri-state
+    # throughout: only ``is True`` corroborates, ``None`` never does. first_page is
+    # used rather than full pages_match because the constraint asks for the first
+    # page and a living chapter has no stable extent.
+    #
+    # This does NOT touch RULE S's own targets: a living chapter whose first author
+    # agrees is claimed upstream by ``living_chapter_revision`` in assess_same_work
+    # and never reaches this branch.
+    living_strip_corroborated = (
+        f.year_match is True or f.journal_match is True
+        or f.volume_match is True or f.doi_match is True
+        or _first_pages_agree(claimed, cand))
+
     # SAME_WORK_VARIANT quarantine -- checked FIRST. A near-identical title means
     # the PMID resolves to the same work, so author/year drift on it is a
     # revision / metadata-drift signature, not wrong-paper evidence. Requires a
@@ -1256,7 +1288,8 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     if (m.title_sim >= SAME_WORK_TITLE_SIM_MIN and has_confident_disagreement
             and is_distinctive_title(claimed.title)
             and is_distinctive_title(cand.title)
-            and not identity.blocked_by):
+            and not identity.blocked_by
+            and (not living_strip_modified_title or living_strip_corroborated)):
         m.same_work_reason = "near_identical_title"
         m.identity_signals = ("title_sim>=0.92",)
         return VERDICT_SAME_WORK_VARIANT, m
