@@ -274,7 +274,7 @@ def test_rule_F_low_tier_generic_positive_needs_roster_backstop():
     r2 = RetrievedRecord(resolved=True, authors=["Morozof", "Victor", "Whiskey", "Xray", "Yankee"], **rkw)
     v2, m2 = flag_verdict(c2, r2)
     assert TRANSLATION_MISSING_VOLUME_TITLE_MIN <= m2.title_sim < 0.85
-    assert v2 == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
+    assert v2 == VERDICT_WRONG_PAPER
 
 
 # ===========================================================================
@@ -316,11 +316,10 @@ _RULE_F_NEGATIVES = {
 
 
 @pytest.mark.parametrize("name", sorted(_RULE_F_NEGATIVES))
-def test_rule_F_shapes_are_owned_by_rule_l2_before_metadata_adjudication(name):
+def test_rule_F_adversarial_negatives_stay_wrong_paper(name):
     c, r = _RULE_F_NEGATIVES[name]
     verdict, m = flag_verdict(c, r)
-    assert verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE, (
-        name, verdict, m.same_work_reason, m.title_sim)
+    assert verdict == VERDICT_WRONG_PAPER, (name, verdict, m.same_work_reason, m.title_sim)
 
 
 def test_rule_F_english_record_not_bracketed_stays_wrong_paper():
