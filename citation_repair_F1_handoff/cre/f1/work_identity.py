@@ -179,6 +179,38 @@ def is_distinctive_title(text: str) -> bool:
     return value not in _GENERIC_TITLES and len(value) >= 18 and len(tokens) >= 2
 
 
+def is_living_source_pair(claimed: ClaimedRef,
+                          resolved: RetrievedRecord) -> bool:
+    """Whether either side identifies an in-place revised living source.
+
+    Source detection is deliberately separate from title comparison.  The
+    written title can contain the trailing ``StatPearls. Treasure Island``
+    container while the venue field is sparse; conversely MEDLINE can put the
+    source in the resolved journal.  No stored field is rewritten.
+    """
+    source = canonical_title(" ".join((
+        claimed.title or "", claimed.journal or "", claimed.raw or "",
+        resolved.title or "", resolved.journal or "",
+    )))
+    return any(token in source for token in _LIVING_SOURCES)
+
+
+_LIVING_TITLE_SUFFIX_RE = re.compile(
+    r"\s*[.:;]\s*(?=(?:statpearls|ncbi\s+bookshelf|bookshelf)\b)", re.I)
+
+
+def strip_living_source_suffix(title: str) -> str:
+    """Return the chapter title before a trailing living-source container.
+
+    This is comparison-time normalization only.  For example,
+    ``Ewing Sarcoma. StatPearls. Treasure`` compares as ``Ewing Sarcoma`` while
+    the artifact continues to emit the original written title verbatim.
+    """
+    value = title or ""
+    parts = _LIVING_TITLE_SUFFIX_RE.split(value, maxsplit=1)
+    return parts[0].strip() if len(parts) > 1 and parts[0].strip() else value
+
+
 def _norm_doi(value: str) -> str:
     value = (value or "").strip().lower()
     value = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", value)
@@ -1180,11 +1212,15 @@ def _reprint_recites_original(claimed: ClaimedRef, resolved: RetrievedRecord) ->
 
 
 def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
-                     title_similarity: float) -> WorkIdentityEvidence:
+                     title_similarity: float,
+                     living_source: bool | None = None) -> WorkIdentityEvidence:
     """Return a proof-backed same-work/ambiguous-family reason, if one exists."""
     ct, rt = canonical_title(claimed.title), canonical_title(resolved.title)
     if not ct or not rt:
         return WorkIdentityEvidence(False)
+
+    if living_source is None:
+        living_source = is_living_source_pair(claimed, resolved)
 
     # RULE A (exact shared DOI). A DOI is a globally unique work identifier: an
     # exact match on it, with the first-author POSITION agreeing and a
@@ -1219,6 +1255,21 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
             if anchored is not None:
                 return anchored
         return WorkIdentityEvidence(False, blocked_by=blocked)
+
+    # Living NCBI chapters are revised in place.  Their publisher/current-revision
+    # year is not the date the citing author read, and a trailing source/city
+    # segment has already been stripped on the comparison-time copies.  Route the
+    # exact/containment shape before generic title identity so every firing keeps
+    # the named, auditable living-source reason.
+    if (living_source
+            and ((first_author_equivalent(claimed, resolved)
+                  and len(ct.split()) >= 2 and (ct in rt or rt in ct))
+                 or ct == rt)):
+        return WorkIdentityEvidence(True, "living_chapter_revision",
+                                    ("living_source",
+                                     "first_author" if first_author_equivalent(
+                                         claimed, resolved) else "exact_title",
+                                     "title_containment"))
 
     # RULE A2 (exact shared DOI + boundary-tolerant content). RULE A above requires
     # the first-author POSITION to agree and a near-identical TITLE, so it cannot
@@ -1480,16 +1531,6 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
             and (doi or title_similarity >= 0.65)):
         return WorkIdentityEvidence(True, "corporate_title_prefix",
                                     ("institutional_document", "corporate_prefix"))
-
-    # Living NCBI chapters are revised in place and may be renamed between dates.
-    source = canonical_title(claimed.journal + " " + resolved.journal)
-    gap = abs((claimed.year or 0) - (resolved.year or 0)) if claimed.year and resolved.year else 99
-    if (any(token in source for token in _LIVING_SOURCES) and gap <= 3
-            and ((first_author and len(ct.split()) >= 2 and ct in rt) or ct == rt)):
-        return WorkIdentityEvidence(True, "living_chapter_revision",
-                                    ("living_source",
-                                     "first_author" if first_author else "exact_title",
-                                     "title_containment"))
 
     # Institutional declarations/guidelines with the same venue and several
     # distinctive anchors are edition-family ambiguity, not HIGH-confidence F2.

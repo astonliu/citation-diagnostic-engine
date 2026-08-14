@@ -78,10 +78,10 @@ def test_journal_authority_is_empty_and_inert():
         assert resolve_journal_id(j) is None
 
 
-def test_f2d_and_f2i_gated_off_in_frozen_config():
+def test_f2d_active_and_f2i_gated_off_in_current_config():
     from cre.f1.biblio_match import _F2D_STRICT_PREFIX_ENABLED
     from cre.f1.journal_identity import JOURNAL_AUTHORITY
-    assert _F2D_STRICT_PREFIX_ENABLED is False            # F2-D disabled (§11)
+    assert _F2D_STRICT_PREFIX_ENABLED is True             # F2-D review-only revival
     assert JOURNAL_AUTHORITY.is_empty() is True            # F2-I inert (§13)
     # The three inert codes are registered but must not be emitted while frozen.
     assert rr.NOT_EMITTED_IN_FROZEN_CONFIG <= set(rr.REASON_REGISTRY)
@@ -97,7 +97,7 @@ def _frozen_manifest(**overrides):
         "journal_authority_loaded": False,
         "journal_match_authoritative_rate": 0.0,
         "f2i_field_transposition_active": False,
-        "f2d_strict_prefix_active": False,
+        "f2d_strict_prefix_active": True,
         # Tracks REASON_REGISTRY_VERSION, bumped 5.2 -> 5.3 by the §15.2
         # version-chain code. This fixture's job is "a manifest AGREEING with the
         # loaded registry validates", which is version-independent; the STALE
@@ -120,9 +120,10 @@ def test_manifest_rate_without_loaded_is_contradiction():
         rr.validate_manifest(_frozen_manifest(journal_match_authoritative_rate=0.044))
 
 
-def test_manifest_active_flag_while_gated_off_is_contradiction():
+def test_manifest_active_f2d_flag_agrees_with_live_config():
+    rr.validate_manifest(_frozen_manifest(f2d_strict_prefix_active=True))
     with pytest.raises(ValueError):
-        rr.validate_manifest(_frozen_manifest(f2d_strict_prefix_active=True))
+        rr.validate_manifest(_frozen_manifest(f2d_strict_prefix_active=False))
     with pytest.raises(ValueError):
         rr.validate_manifest(_frozen_manifest(f2i_field_transposition_active=True))
 

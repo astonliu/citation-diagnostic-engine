@@ -18,14 +18,12 @@ introduced them; renaming is a breaking change to the artifact contract.
 """
 from __future__ import annotations
 
-REASON_REGISTRY_VERSION = "5.4"
+REASON_REGISTRY_VERSION = "5.5"
 
 # --- §5.6 A.1: same-work reasons -> route review_same_work_variant ------------
-# 20 from work_identity.py + 9 from biblio_match.py = 29. (Rev 5.2 registry added
-# ``translated_title_missing_volume_anchors``, which the code emits from
-# work_identity RULE F but the rev-5.2 draft's A.1 table omitted -- caught by the
-# equality test below. Rev 5.3 added ``version_chain_same_work``, the fifth
-# biblio_match code, taking this group from 24 to 25.)
+# Rev 5.5 activates strict-prefix review and adds the three corporate/DOI routes
+# specified before the seed-47 rescore.  Earlier registry revisions added the
+# missing-volume translation and version-chain reasons.
 SAME_WORK_REASONS = frozenset({
     # work_identity.py
     "mixed_identity_citation",
@@ -52,8 +50,11 @@ SAME_WORK_REASONS = frozenset({
     "near_identical_title",
     "physical_location_same_work",      # F2-C
     "preprint_published_version",       # F2-B, requires version evidence
-    "strict_prefix_title",              # F2-D, gated OFF (§11) -- never emitted frozen
+    "strict_prefix_title",              # F2-D, review-only revival
     "version_chain_same_work",          # §15.2, rev 5.3
+    "corporate_all_fields_identical",   # Rule A
+    "corporate_author_three_anchor",    # Rule K
+    "shared_doi_first_author_differs",   # Rule B
     # C1-C5 (rev 5.4). Each names WHICH repair took a row out of the wrong-paper
     # band, so a row that left it can never be read as "cleanly matched".
     "implausible_author_field",         # C2
@@ -95,7 +96,6 @@ REASON_ROUTE = {
 # §5.6 A.4: registered but NOT emitted in the frozen configuration. Registering
 # them is deliberate so activation never requires a schema change.
 NOT_EMITTED_IN_FROZEN_CONFIG = frozenset({
-    "strict_prefix_title",                       # F2-D disabled (§11)
     "field_transposition_journal_holds_title",   # F2-I inert (§13)
     "field_transposition_authors_hold_title",    # F2-I inert (§13)
 })
@@ -158,14 +158,15 @@ def validate_manifest(manifest: dict, *, check_live_config: bool = True) -> None
             f"{REASON_REGISTRY_VERSION!r}.")
 
     if check_live_config:
-        # Cross-check the declared _active flags against the SHIPPED configuration:
-        # a flag true while its rule is gated off in code is a contradiction.
+        # Cross-check the declared F2-D flag in BOTH directions against the
+        # shipped configuration. A stale false declaration on active code is as
+        # misleading as a true declaration on gated-off code.
         from .biblio_match import _F2D_STRICT_PREFIX_ENABLED
         from .journal_identity import JOURNAL_AUTHORITY
-        if f2d_active and not _F2D_STRICT_PREFIX_ENABLED:
+        if f2d_active != _F2D_STRICT_PREFIX_ENABLED:
             raise ValueError(
-                "manifest contradiction: f2d_strict_prefix_active is true while "
-                "F2-D is disabled in code (_F2D_STRICT_PREFIX_ENABLED is False).")
+                "manifest contradiction: f2d_strict_prefix_active does not match "
+                f"the loaded F2-D configuration ({_F2D_STRICT_PREFIX_ENABLED}).")
         if f2i_active and JOURNAL_AUTHORITY.is_empty():
             raise ValueError(
                 "manifest contradiction: f2i_field_transposition_active is true "

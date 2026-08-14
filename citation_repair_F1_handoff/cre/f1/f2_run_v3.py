@@ -127,11 +127,20 @@ def _write_run(records: list, *, out_dir: str, out_prefix: str, version: str,
 
     os.makedirs(out_dir, exist_ok=True)
     metric = high_band_rate_of_scoreable(records)
+    route_reason_counts: dict[str, int] = {}
+    for record in records:
+        reason = record.get("same_work_reason") or ""
+        if reason:
+            route_reason_counts[reason] = route_reason_counts.get(reason, 0) + 1
     summary = {
         "version": version,
         "seed": seed,
         "records_path": records_path,
         "n_records": len(records),
+        # Named counts make every review-band rescue visible in the run artifact;
+        # Rule L2 is reported separately by ``cross_language_excluded`` below via
+        # the shared metric because it intentionally has no same-work reason.
+        "route_reason_counts": dict(sorted(route_reason_counts.items())),
         **metric,
         **(extra or {}),
     }

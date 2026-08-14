@@ -70,6 +70,7 @@ import unicodedata
 
 from rapidfuzz import fuzz
 
+
 # =====================================================================
 # Thresholds -- every one named, none inline
 # =====================================================================
@@ -187,9 +188,20 @@ def _content_words(text: str) -> "list[str]":
 
 
 def _has_non_latin(text: str) -> bool:
-    for ch in str(text or ""):
-        if ch.isalpha() and not ("LATIN" in unicodedata.name(ch, "")):
-            return True
+    value = str(text or "")
+    for i, ch in enumerate(value):
+        name = unicodedata.name(ch, "")
+        if not ch.isalpha() or "LATIN" in name:
+            continue
+        # A lone Greek letter in an otherwise Latin biomedical title (β1, α-
+        # synuclein) is scientific notation, not Greek-language prose.  A Greek
+        # run of two or more letters remains script evidence.
+        if "GREEK" in name:
+            neighbors = value[max(0, i - 1):i] + value[i + 1:i + 2]
+            if not any(c.isalpha() and "GREEK" in unicodedata.name(c, "")
+                       for c in neighbors):
+                continue
+        return True
     return False
 
 

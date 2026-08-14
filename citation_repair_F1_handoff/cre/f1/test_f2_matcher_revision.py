@@ -291,23 +291,23 @@ def test_f2d_strict_prefix_helper_word_boundary():
                                 "Identical distinctive title here") is False
 
 
-def test_f2d_branch_is_disabled_in_revision_5():
-    # §11: F2-D is DEFERRED and disabled. A strict-prefix pair that WOULD have
-    # quarantined (below accept, no disagreement) must NOT band strict_prefix_title
-    # while the branch is off -- the helper still detects the prefix, but the
-    # verdict path never uses it.
+def test_f2d_branch_is_review_only_in_current_revision():
+    # §11 revival: a strict-prefix pair with guarded author/year corroboration
+    # qualifies for the audited same-work band, never match.
     from cre.f1.biblio_match import _F2D_STRICT_PREFIX_ENABLED, _strict_title_prefix
-    assert _F2D_STRICT_PREFIX_ENABLED is False
+    assert _F2D_STRICT_PREFIX_ENABLED is True
     short = "Tumor microenvironment signalling"
     long = (short + " in metastatic colorectal adenocarcinoma progression and "
             "immune checkpoint evasion mechanisms across an international "
             "multicenter prospective validation cohort with extended survival "
             "followup and molecular subtyping")
     assert _strict_title_prefix(short, long) is True       # helper retained
-    c = ClaimedRef(title=short, authors=[], journal="")
-    r = RetrievedRecord(resolved=True, title=long, authors=["Kim"], journal="")
-    v, m = flag_verdict(c, r)
-    assert m.same_work_reason != "strict_prefix_title"     # branch inert
+    c = ClaimedRef(title=short, authors=["Kim"], year=2020, journal="")
+    r = RetrievedRecord(resolved=True, title=long, authors=["Kim"], year=2020,
+                        journal="")
+    v, m = flag_verdict(c, r, accept=0.95)
+    assert v == VERDICT_SAME_WORK_VARIANT
+    assert m.same_work_reason == "strict_prefix_title"
 
 
 def test_f2d_drug_trial_family_prefix_stays_wrong_paper():

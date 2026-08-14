@@ -28,7 +28,8 @@ from cre.f1.biblio_match import (match_score, best_match, field_agreement,
                                  title_sim, retrieve_candidates,
                                  is_scoreable_title, flag_verdict,
                                  VERDICT_MATCH, VERDICT_WRONG_PAPER,
-                                 VERDICT_FORMATTING)
+                                 VERDICT_FORMATTING,
+                                 VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE)
 from cre.f1.lookup import compare_and_flag
 from cre.f1.run import process_reference
 from cre.f1.schema import Reference, ClaimedRef, RetrievedRecord
@@ -465,11 +466,11 @@ def test_flag_verdict_wrong_paper_band():
     assert v == VERDICT_WRONG_PAPER
 
 def test_flag_verdict_formatting_band():
-    """Cross-language same paper, author+year agree, no journal -> VERDICT_FORMATTING."""
+    """Rule L2 owns cross-language pairs before the formatting band."""
     c = _make_claimed("Haufigkeit und Verteilung von Schlafproblemen", ["Schlack"], 2013, "")
     r = _make_record("Frequency and distribution of sleep problems", ["Schlack"], 2013, "")
     v, m = flag_verdict(c, r)
-    assert v == VERDICT_FORMATTING
+    assert v == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
 
 # ── prefix-aware title_sim (de-prefixing can only RAISE the score) ─────────────
 

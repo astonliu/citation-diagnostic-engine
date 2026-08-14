@@ -23,7 +23,8 @@ from rapidfuzz import fuzz
 from .schema import Reference, RetrievedRecord
 from .ratelimit import NCBI, request_with_retry
 from .biblio_match import (match_score, flag_verdict, retrieve_candidates,
-                           best_match, VERDICT_SAME_WORK_VARIANT)
+                           best_match, VERDICT_SAME_WORK_VARIANT,
+                           VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE)
 from .unscoreable import classify_unscoreable
 from .textnorm import fold_bibliographic_text
 
@@ -183,7 +184,8 @@ def _parse_medline(text: str, pmid: str) -> RetrievedRecord:
     authors = [_au_surname(a) for a in fields.get("AU", [])]
     if not authors and fields.get("FAU"):       # fall back to full author names
         authors = [a.split(",")[0].strip() for a in fields["FAU"]]
-    authors += fields.get("CN", [])             # corporate/collective authors, raw
+    collective_authors = fields.get("CN", [])
+    authors += collective_authors               # corporate/collective authors, raw
 
     year, year_from_dep = _year_from_medline(fields)
     return RetrievedRecord(
@@ -202,6 +204,7 @@ def _parse_medline(text: str, pmid: str) -> RetrievedRecord:
         language=_first_nonempty(fields, "LA"),
         publication_types=list(fields.get("PT", [])),
         related_pmids=_related_pmids_from_medline(fields),
+        has_collective_author=bool(collective_authors),
     )
 
 
@@ -441,6 +444,11 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
             _record_author_tripwire(log, m, enabled=author_tripwire)
             log.same_work_reason = m.same_work_reason
             log.identity_signals = list(m.identity_signals)
+            if verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE:
+                log.mismatch_flagged = False
+                log.notes = ("Cross-language title pair; excluded from the F2 "
+                             "title-comparison population.")
+                return False
             if _live_quarantines_variant(
                     verdict, m, author_tripwire=author_tripwire):
                 log.mismatch_flagged = True
@@ -508,6 +516,12 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
     _record_author_tripwire(log, m, enabled=author_tripwire)
     log.same_work_reason = m.same_work_reason
     log.identity_signals = list(m.identity_signals)
+
+    if verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE:
+        log.mismatch_flagged = False
+        log.notes = ("Cross-language title pair; excluded from the F2 "
+                     "title-comparison population.")
+        return False
 
     # Proof-backed variants remain visible, but bypass the F1/F2 accusation
     # path.  ``process_reference`` sends them directly to ``decide``, which

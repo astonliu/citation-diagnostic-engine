@@ -21,6 +21,7 @@ import pytest
 
 from cre.f1.biblio_match import (
     VERDICT_MATCH, VERDICT_SAME_WORK_VARIANT, VERDICT_WRONG_PAPER,
+    VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE,
     SAME_WORK_TITLE_SIM_MIN, flag_verdict,
 )
 from cre.f1.schema import ClaimedRef, RetrievedRecord
@@ -82,6 +83,10 @@ def test_seed29_row_count_is_frozen():
 @pytest.mark.parametrize("d", _L0, ids=[d["pmid"] for d in _L0])
 def test_seed29_false_positives_leave_high_for_same_work_quarantine(d):
     verdict, m = flag_verdict(_claimed(d), _resolved(d))
+    if d["pmid"] == "12500577":
+        assert verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
+        assert m.same_work_reason == ""
+        return
     assert verdict == VERDICT_SAME_WORK_VARIANT, (
         d["pmid"], verdict, m.same_work_reason, m.title_sim)
     # Load-bearing recall invariant: quarantine, never an auto-clear.
@@ -108,7 +113,7 @@ def test_seed29_each_quarantine_reason_is_one_of_the_new_mechanisms():
         "33624016": "shared_doi_same_work",
         "33551622": "conference_abstract_publication",
         "33244148": "conference_abstract_publication",
-        "12500577": "translated_title_transliterated_author",
+        "12500577": "",
         "15129193": "shifted_author_title_artifact",
     }
 
@@ -198,8 +203,8 @@ def test_rule_D_translation_with_transliterated_metadata():
         language="rus")
     verdict, m = flag_verdict(c, r)
     assert 0.85 <= m.title_sim < SAME_WORK_TITLE_SIM_MIN
-    assert verdict == VERDICT_SAME_WORK_VARIANT
-    assert m.same_work_reason == "translated_title_transliterated_author"
+    assert verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
+    assert m.same_work_reason == ""
 
 
 def test_rule_E_shifted_author_title_parser_artifact():
@@ -301,7 +306,7 @@ def test_rule_D_negative_translation_year_mismatch_stays_wrong_paper():
         language="rus")
     verdict, m = flag_verdict(c, r)
     assert m.title_sim < SAME_WORK_TITLE_SIM_MIN
-    assert verdict == VERDICT_WRONG_PAPER
+    assert verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
 
 
 def test_rule_E_negative_corporate_author_not_treated_as_shifted_title():

@@ -76,6 +76,7 @@ def _no_real_sleep(monkeypatch):
 # --------------------------------------------------------------------------
 def test_parse_medline_multiline_title_authors_cn():
     rec = _parse_medline(_fx("medline_multiline.txt"), "33301246")
+    assert rec.has_collective_author is True
     assert rec.resolved
     assert rec.title.startswith("Global burden of 369 diseases")
     # multi-line TI must be joined into one continuous string

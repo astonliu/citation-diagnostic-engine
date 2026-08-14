@@ -255,6 +255,10 @@ class ClaimedRef:
     # type label) excised from ``title`` at parse time, kept verbatim so every edit
     # to the scored title is reviewable. Empty when no furniture was removed.
     written_title_excised: str = ""
+    # True only when the first written author came from a JATS <collab> element.
+    # This is provenance for corporate-author comparison; ``authors`` remains the
+    # verbatim evidence and is never rewritten by a matcher rule.
+    first_author_is_collab: bool = False
 
 
 @dataclass
@@ -285,6 +289,9 @@ class RetrievedRecord:
     language: str = ""
     publication_types: list[str] = field(default_factory=list)
     related_pmids: dict[str, list[str]] = field(default_factory=dict)
+    # MEDLINE CollectiveName (CN) provenance.  Old caches omit the field and read
+    # safely as False; newly written caches preserve the authoritative signal.
+    has_collective_author: bool = False
 
 
 @dataclass

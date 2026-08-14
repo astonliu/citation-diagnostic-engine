@@ -33,6 +33,7 @@ from .biblio_match import (
     is_scoreable_title, flag_verdict,
     VERDICT_MATCH, VERDICT_WRONG_PAPER, VERDICT_FORMATTING,
     VERDICT_SAME_WORK_VARIANT, VERDICT_UNSCOREABLE, VERDICT_UNRESOLVED,
+    VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE,
     SAME_WORK_TITLE_SIM_MIN,
 )
 from .biblio_rerank import rerank_stage2
@@ -63,6 +64,7 @@ __all__ = [
     "is_scoreable_title", "flag_verdict",
     "VERDICT_MATCH", "VERDICT_WRONG_PAPER", "VERDICT_FORMATTING",
     "VERDICT_SAME_WORK_VARIANT", "VERDICT_UNSCOREABLE", "VERDICT_UNRESOLVED",
+    "VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE",
     "SAME_WORK_TITLE_SIM_MIN",
     "rerank_stage2",
     "WorkIdentityEvidence", "assess_same_work", "canonical_title",

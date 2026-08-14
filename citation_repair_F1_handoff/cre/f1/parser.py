@@ -151,6 +151,31 @@ def _authors_from(node) -> list[str]:
     return authors or _surnames_under(node)
 
 
+def _first_author_is_collab(node) -> bool:
+    """Whether the first author contributor is represented by JATS ``<collab>``.
+
+    The boolean preserves structural provenance that is lost when ``_authors_from``
+    flattens surnames and collective names to strings.  Editor/translator groups
+    are skipped exactly as they are in ``_authors_from``.
+    """
+    groups = list(node.iter("person-group"))
+    containers = groups or [node]
+    for container in containers:
+        if groups:
+            ptype = (container.get("person-group-type") or "").strip().lower()
+            if ptype in _NON_AUTHOR_PERSON_GROUPS:
+                continue
+        for contributor in container.iter():
+            tag = _localname(contributor.tag)
+            if tag == "collab" and _text(contributor):
+                return True
+            if tag in ("name", "string-name"):
+                surname = contributor.find("surname")
+                if surname is not None and _text(surname):
+                    return False
+    return False
+
+
 def _pub_id(node, id_type: str) -> str:
     for pid in node.iter("pub-id"):
         if pid.get("pub-id-type") == id_type:
@@ -322,6 +347,7 @@ def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:
             volume=_direct_text(cit, "volume"),
             pages=_pages_from(cit),
             written_title_excised=excised,
+            first_author_is_collab=_first_author_is_collab(cit),
         )
         ref_id = ref.get("id") or f"ref{i}"
         reference = Reference(

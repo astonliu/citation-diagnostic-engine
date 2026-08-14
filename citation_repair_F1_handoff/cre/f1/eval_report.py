@@ -29,7 +29,8 @@ from typing import Optional
 from .schema import F1, F2, UNVERIFIABLE, UNSCOREABLE, ClaimedRef, RetrievedRecord
 from .biblio_match import (flag_verdict, VERDICT_MATCH,
                            VERDICT_WRONG_PAPER, VERDICT_SAME_WORK_VARIANT,
-                           VERDICT_UNSCOREABLE, VERDICT_UNRESOLVED)
+                           VERDICT_UNSCOREABLE, VERDICT_UNRESOLVED,
+                           VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE)
 from .unscoreable import classify_unscoreable
 
 
@@ -250,6 +251,7 @@ _F2_RECORD_KEYS = (
     "written_authors", "resolved_authors", "written_raw", "resolved_is_container",
     "resolved_alternate_titles", "resolved_language",
     "resolved_publication_types", "resolved_related_pmids",
+    "written_first_author_is_collab", "resolved_has_collective_author",
     # F2-G (spec §8.1): how journal_match was decided + whether that method is
     # authoritative enough for F2-C. Emitted on every record for a re-bandable frame.
     "journal_match_method", "journal_match_authoritative",
@@ -300,6 +302,10 @@ def _raw_fields(pmid: str, src_pmcid: str, claimed: ClaimedRef,
         "resolved_publication_types": list(
             getattr(resolved, "publication_types", [])),
         "resolved_related_pmids": dict(getattr(resolved, "related_pmids", {})),
+        "written_first_author_is_collab": bool(
+            getattr(claimed, "first_author_is_collab", False)),
+        "resolved_has_collective_author": bool(
+            getattr(resolved, "has_collective_author", False)),
     }
 
 
@@ -411,8 +417,10 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
         "volume_match": m.fields.volume_match,
         "pages_match": m.fields.pages_match,
         "doi_match": m.fields.doi_match,
-        "flag": verdict != VERDICT_MATCH,
-        "score_below_accept": m.score < accept,
+        "flag": (None if verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
+                 else verdict != VERDICT_MATCH),
+        "score_below_accept": (None if verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
+                               else m.score < accept),
         "verdict": verdict,
         "same_work_reason": m.same_work_reason,
         "identity_signals": list(m.identity_signals),
@@ -447,11 +455,15 @@ def high_band_rate_of_scoreable(records: list[dict]) -> dict:
                       if r.get("verdict") == VERDICT_UNSCOREABLE)
     unresolved = sum(1 for r in records
                      if r.get("verdict") == VERDICT_UNRESOLVED)
+    cross_language = sum(
+        1 for r in records
+        if r.get("verdict") == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE)
     # scoreable frame: has a verdict AND is neither an UNSCOREABLE nor an
     # UNRESOLVED row (both are structurally out of the scoreable-for-F2 frame).
     scoreable = [r for r in records if r.get("verdict")
                  and r.get("verdict") not in (VERDICT_UNSCOREABLE,
-                                              VERDICT_UNRESOLVED)]
+                                              VERDICT_UNRESOLVED,
+                                              VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE)]
     frame = [r for r in scoreable
              if r.get("verdict") != VERDICT_SAME_WORK_VARIANT]
     high = sum(1 for r in frame if r.get("verdict") == VERDICT_WRONG_PAPER)
@@ -462,6 +474,7 @@ def high_band_rate_of_scoreable(records: list[dict]) -> dict:
         "same_work_variant_excluded": len(scoreable) - n,
         "unscoreable_excluded": unscoreable,
         "resolved_unresolved_excluded": unresolved,
+        "cross_language_excluded": cross_language,
         "high_band_rate_of_scoreable": (high / n) if n else None,
     }
 
