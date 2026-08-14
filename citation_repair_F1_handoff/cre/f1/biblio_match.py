@@ -42,7 +42,7 @@ from .work_identity import (assess_same_work, first_author_equivalent,
                             is_distinctive_title, version_chain_same_work,
                             is_living_source_pair, strip_living_source_suffix,
                             _strip_acronym_gloss, roman_conflict_suppressed)
-from .f2_samework_rule import entry_language
+from .f2_samework_rule import entry_language, entry_language_trigger
 from .journal_identity import journal_identity
 
 # ``Claimed`` is the handoff's name for the claimed-reference metadata object.
@@ -93,6 +93,11 @@ class MatchResult:
     override_fired: bool = False       # strong-corroboration override floored the score
     same_work_reason: str = ""          # auditable identity rule used by flag_verdict
     identity_signals: tuple[str, ...] = ()
+    # RULE L2: the single enumerated trigger that excluded this pair from the F2
+    # population -- one of f2_samework_rule.LANGUAGE_TRIGGERS, or "" when the row
+    # is not a cross-language exclusion. An exclusion is a recall cost, so the
+    # cause is persisted per record rather than inferred from a generic signal.
+    cross_language_trigger: str = ""
     # F2-B (second defect): the claimed PMID resolved to a PREPRINT record while
     # the citation itself reads as an ordinary article. Evidence TOWARD a fault,
     # surfaced under its own reason (never folded into the same-work quarantine).
@@ -500,31 +505,6 @@ def _corporate_author_abbreviation_equivalent(claimed: Claimed,
         if not (lcompact == initials(rspan) or rcompact == initials(lspan)):
             return False
     return changed
-
-
-def _first_author_difference_is_structural(claimed: Claimed,
-                                           cand: RetrievedRecord,
-                                           f: FieldAgreement) -> bool:
-    """Whether Rule B's first-author difference has a specified parse shape.
-
-    This keeps an exact DOI from becoming a blanket relaxation: the written name
-    must be a coauthor named first, a corporate/title-boundary value, a punctuation
-    fragment (``listen?``), or the same surname with whitespace inserted.
-    """
-    if f.author_match is True or is_corporate_author(claimed, cand):
-        return True
-    if not claimed.authors or not cand.authors:
-        return False
-    written = claimed.authors[0].strip()
-    resolved = cand.authors[0].strip()
-    if re.search(r"[?!]", written):
-        return True
-    compact_written = re.sub(r"[^a-z0-9]", "", fold_bibliographic_text(
-        written).lower())
-    compact_resolved = re.sub(r"[^a-z0-9]", "", fold_bibliographic_text(
-        resolved).lower())
-    return (len(compact_written) >= 5
-            and compact_written == compact_resolved)
 
 
 def field_agreement(claimed: Claimed, cand: RetrievedRecord, *,
@@ -1050,15 +1030,26 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
 
     Compute F2 precision primarily over VERDICT_WRONG_PAPER.
     Call is_scoreable_title on both titles before calling this."""
-    # RULE L2 owns every cross-language title-string shape before scoring and
-    # before assess_same_work's older translation-specific identity routes.  The
-    # classifier takes exactly two strings and cannot read resolved.language.
-    if entry_language(claimed.title, cand.title):
-        ts = round(title_sim(claimed.title, cand.title), 4)
-        return (VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE,
-                MatchResult(score=ts, title_sim=ts, fields=FieldAgreement(),
-                            record=cand,
-                            identity_signals=("cross_language_title_strings",)))
+    # RULE L2 (cross-language exclusion) is computed HERE but applied BELOW, after
+    # assess_same_work has had first refusal.  Two changes, one rationale.
+    #
+    # The BRACKET arm is gone.  It read only the resolved side, so it could not
+    # tell "this record is a translation" from "this reference and this record are
+    # the same work in two languages" -- the record-side signal L2 was founded to
+    # avoid, in another costume.  Only script and stopword remain, and both read
+    # BOTH title strings.
+    #
+    # The check MOVED below assess_same_work.  As an early return it preempted the
+    # TRANSLATION_* identity routes (RULE D, RULE F, translated_title_metadata,
+    # translated_title_shared_anchors), which answer the same question with year,
+    # venue, volume, first-page and roster corroboration and name their answer.
+    # Those routes land a pair in review_same_work_variant -- AUDITED and NAMED --
+    # whereas L2 drops it out of the precision denominator with no reason
+    # recorded.  A wrongly excluded row inflates the F2 precision estimate and is
+    # never seen again, which is worse than a false positive an adjudicator clears
+    # in a minute.  So the named routes decide first and L2 claims only what they
+    # decline; for what they DO decline, L2 remains a HARD exclusion.
+    language_trigger = entry_language_trigger(claimed.title, cand.title)
 
     # RULE S comparison-time copies: retain original titles in every artifact,
     # but remove the living source's trailing publisher/city segment while title
@@ -1098,6 +1089,33 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     identity = assess_same_work(claimed, cand, title_similarity=m.title_sim,
                                 living_source=living_source)
 
+    # RULE L2 applied -- see the note at the top of this function for why it is
+    # here and not at the entry point.  assess_same_work has now had first
+    # refusal, so:
+    #   * a TRANSLATION_* (or any other) identity proof WINS and the pair is
+    #     quarantined under that route's own NAME, audited, excluded from the F2
+    #     count but recoverable from the stored frame;
+    #   * everything the identity rules DECLINE is a hard exclusion -- the pair is
+    #     outside F2's title-comparison population, not a wrong paper.
+    # Placed before the series-conflict pre-emption on purpose: a declined
+    # cross-language pair leaves as out_of_scope_cross_language, never as
+    # review_wrong_paper.
+    #
+    # BLOCKING GUARD (contract): neither arm may return VERDICT_MATCH. Moving this
+    # check below C2/C4, match_score and assess_same_work exposes cross-language
+    # pairs to the clean-match early return further down, which they could never
+    # reach as an entry-point return. Both arms below terminate, so no
+    # cross-language pair can fall through to it. test_f2_seed47_prerescore_rules
+    # asserts the count is zero.
+    if language_trigger:
+        if identity.same_work:
+            m.same_work_reason = identity.reason
+            m.identity_signals = identity.signals
+            return VERDICT_SAME_WORK_VARIANT, m
+        m.cross_language_trigger = language_trigger
+        m.identity_signals = ("cross_language_title_strings", language_trigger)
+        return VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE, m
+
     # A serial/part/edition conflict is affirmative distinct-work evidence and
     # pre-empts every new DOI/corporate/title-extension rescue.
     if identity.blocked_by == "series_ordinal_conflict":
@@ -1107,11 +1125,6 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     corporate_provenance = bool(
         getattr(_claimed_original, "first_author_is_collab", False)
         or getattr(cand, "has_collective_author", False))
-    corporate_block_override_allowed = (
-        identity.blocked_by != "corporate_author_conflict"
-        or corporate_provenance)
-    corporate_anchors = (f.journal_match, f.year_match, f.pages_match,
-                         f.doi_match)
 
     # RULE A: the collective-author comparator can disagree on two formatting
     # representations of the same organization.  Exact title and every physical
@@ -1130,42 +1143,31 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
         m.identity_signals = ("corporate_author", "canonical_title", "all_fields")
         return VERDICT_SAME_WORK_VARIANT, m
 
-    # RULE K: three of four independent anchors, with tri-state semantics.  None
-    # neither counts nor blocks; any explicit False blocks the same-work route.
-    if (corporate and not identity.same_work
-            and corporate_block_override_allowed
-            and (has_confident_disagreement or m.score < accept)):
-        if (f.journal_match is True and f.year_match is True
-                and f.pages_match is True and f.doi_match is False):
-            # Explicitly named disposition from the spec: this is a DOI metadata
-            # defect, not a same-work proof and not wrong-paper evidence.
-            m.identity_signals = ("corporate_author", "three_anchors",
-                                  "doi_disagrees")
-            return VERDICT_FORMATTING, m
-        if (sum(v is True for v in corporate_anchors) >= 3
-                and not any(v is False for v in corporate_anchors)):
-            m.same_work_reason = "corporate_author_three_anchor"
-            m.identity_signals = ("corporate_author", "three_of_four_anchors")
-            return VERDICT_SAME_WORK_VARIANT, m
-
-    # RULE B: an exact DOI plus exact year and venue is routed for review even
-    # when first-author position explicitly differs.  It never auto-clears to
-    # match, and the serial-conflict pre-emption above remains binding.
-    first_author_differs = f.first_author_match is False
-    if (not first_author_differs and f.first_author_match is None
-            and _claimed_original.authors and cand.authors):
-        first_author_differs = field_agreement(
-            _claimed_original, cand, repair=False,
-            living_source=living_source).first_author_match is False
-    if (not identity.same_work
-            and identity.blocked_by != "corporate_author_conflict"
-            and f.doi_match is True and first_author_differs
-            and f.year_match is True and f.journal_match is True):
-        if _first_author_difference_is_structural(_claimed_original, cand, f):
-            m.same_work_reason = "shared_doi_first_author_differs"
-            m.identity_signals = ("exact_doi", "year", "journal",
-                                  "first_author_differs", "structural_author_shape")
-            return VERDICT_SAME_WORK_VARIANT, m
+    # RULE K (corporate author, three of four anchors) was specified here and is
+    # CUT as of 2026-08-14, unimplemented rather than narrowed.  Measured exposure
+    # was 1/1, 1/1, 0/0 across seeds 37/43/45 -- two firings in three frames, and
+    # ZERO on seed 45, the seed whose corporate false positives motivated it --
+    # against five documented interaction defects: C4 dissolved the very conflict
+    # K arbitrated and K then pre-empted the C5 repair branch below so
+    # _repair_moved_it_out never ran; K's corporate predicate (is_corporate_author)
+    # is wider than both the identity block's and C4's, admitting any four-token
+    # author that _looks_like_personal_name rejects; K's DOI-disagreement arm
+    # routed a row the corporate block would have sent to WRONG_PAPER into
+    # FORMATTING, the lowest band; and K applied none of RULE A2's five
+    # refutations (_distinct_organizations and _roster_contradicted among them).
+    # Two firings does not buy five defects.  It can be re-specified against a
+    # FRESH seed if the frames later show large clean exposure -- never against
+    # seed 47 after adjudication.
+    #
+    # RULE B (exact shared DOI, first author differs) is likewise CUT, and no
+    # other DOI-anchored relaxation replaces it.  It cleared 6 rows across seeds
+    # 43 and 45 and 2 were labelled TRUE_F2: one clearing in three destroyed a
+    # real detection.  A DOI does not certify a work (DOI Handbook §2.3.2-2.3.3),
+    # and seed 45 holds eleven genuine F2 rows sharing DOI, volume, first page AND
+    # journal with the resolved record.  Rule B is an address rule, so no
+    # threshold separates those from the false positives and narrowing had no
+    # headroom.  Guarded by test_shared_doi_never_clears_a_wrong_paper_row.
+    #
     # A corporate-author or series/edition conflict is AFFIRMATIVE evidence that
     # these are distinct records (two organizations, or two editions of a
     # serial): never let a high composite assembled from shared bibliographic

@@ -1,5 +1,21 @@
 """cre/f1/f2_samework_rule.py -- the same-work rule (language / container / subset).
 
+RULE L IS SPECIFIED AND DELIBERATELY NOT IMPLEMENTED (decision 2026-08-14).
+``entry_for`` / ``classify_samework`` and everything they reach -- ``entry_container``,
+``entry_subset``, ``entry_corporate``, ``address_agreement`` -- have NO production
+caller. ``biblio_match`` imports exactly one name from this module,
+``entry_language_trigger``, and uses it as RULE L2. The rest is exercised only by
+test_f2_samework_rule.py.
+
+That is a decision, not an oversight, and it is recorded here because
+specified-but-never-handed-over is what produced the 4cfe932 rejection. Wiring a
+second same-work mechanism alongside the restored ``TRANSLATION_*`` pathway in
+``assess_same_work`` is precisely the "two mechanisms answering one question"
+overlap the seed-47 spec warned against, and it would be new, unmeasured behaviour
+introduced AFTER the seed-47 draw. If RULE L is ever wired, it needs its own
+measurement against a fresh seed and an explicit ruling on which mechanism owns the
+decision.
+
 Three distinct defects make the WRITTEN title an unusable comparison against the
 resolved record, and all three land in ``review_wrong_paper`` as false positives:
 
@@ -208,38 +224,73 @@ def _has_non_latin(text: str) -> bool:
 # =====================================================================
 # 1. entry_language
 # =====================================================================
-def entry_language(written_title: str, resolved_title: str) -> bool:
-    """Whether the written title is a TRANSLATION of the resolved one.
+# The closed enumeration of RULE L2 triggers.  Exactly ONE is reported per
+# excluded record, in the short-circuit order of ``entry_language_trigger``.
+#
+# A THIRD trigger, ``bracket`` (the resolved title wrapped in NLM's "[...]"
+# translated-title marker), was specified and implemented in 4cfe932 and is CUT
+# as of 2026-08-14.  It was out of contract: L2's founding constraint is that the
+# trigger is computed from the TWO TITLE STRINGS, written because the record-side
+# language field describes the RECORD and not the PAIR and was measured wrong on
+# 9 of 10 seed-45 language rows.  The bracket arm inspected ONLY the resolved
+# side, which is that same record-side signal in another costume: a bracketed
+# record means NLM translated THAT ARTICLE's title, and says nothing about
+# whether the reference describes the same work.
+# (Phrased without the field's literal name on purpose -- the module-source guard
+# in test_f2_samework_rule.py greps for it and strips docstrings, not comments.)
+#
+# Cutting it also restores the ``TRANSLATION_*`` pathway inside
+# ``assess_same_work``.  RULE D (translated_title_transliterated_author), RULE F
+# (translated_title_missing_volume_anchors) and translated_title_metadata all
+# gate on a PubMed-bracketed resolved title, so the bracket arm -- which
+# ``flag_verdict`` tests first, before ``assess_same_work`` is even called --
+# made all three unreachable.  Those rules route to review_same_work_variant,
+# which is AUDITED and NAMED; L2 routes to out_of_scope_cross_language, which is
+# dropped before the precision denominator with no same_work_reason at all.
+LANGUAGE_TRIGGERS = ("script", "stopword")
+
+
+def entry_language_trigger(written_title: str,
+                           resolved_title: str) -> "str | None":
+    """Which cross-language trigger fires -- ``script``, ``stopword`` or ``None``.
 
     Computed from the TITLE STRINGS ONLY. ``resolved_language`` and MEDLINE ``LA``
     are deliberately not read: a citing author can translate a title that PubMed
     holds only in English, and no record-side field shows that. Measured on seed
-    45, 4 of the 10 cross-language rows have ``LA - eng`` records."""
+    45, 4 of the 10 cross-language rows have ``LA - eng`` records.
+
+    First match wins, so the returned trigger is the single reportable cause even
+    when a pair would satisfy more than one arm."""
     w, r = str(written_title or ""), str(resolved_title or "")
     if not w or not r:
-        return False
+        return None
 
     # (a) script -- non-Latin on one side and not the other.
     if _has_non_latin(w) != _has_non_latin(r):
-        return True
+        return "script"
 
-    # (b) bracket -- NLM's marker for its own English translation.
-    rs = r.strip()
-    if rs.startswith("[") and "]" in rs[-3:]:
-        return True
-
-    # (c) stopword profile.
+    # (b) stopword profile.  (The former bracket arm sat here; see
+    # LANGUAGE_TRIGGERS for why it was cut.)
     wt = _tokens(w)
     if len(wt) < LANG_MIN_TOKENS:
-        return False
+        return None
     w_non = sum(1 for t in wt if t in _NON_ENGLISH_STOPWORDS and t not in _ENGLISH_STOPWORDS)
     w_eng = sum(1 for t in wt if t in _ENGLISH_STOPWORDS)
     if not (w_non >= LANG_MIN_STOPWORDS and w_non > w_eng):
-        return False
+        return None
     rt = _tokens(r)
     r_non = sum(1 for t in rt if t in _NON_ENGLISH_STOPWORDS and t not in _ENGLISH_STOPWORDS)
     r_eng = sum(1 for t in rt if t in _ENGLISH_STOPWORDS)
-    return r_eng > r_non
+    return "stopword" if r_eng > r_non else None
+
+
+def entry_language(written_title: str, resolved_title: str) -> bool:
+    """Whether the written title is a TRANSLATION of the resolved one.
+
+    Thin boolean view of ``entry_language_trigger`` -- one predicate, one
+    implementation, so the reported trigger can never disagree with the decision
+    that excluded the row."""
+    return entry_language_trigger(written_title, resolved_title) is not None
 
 
 # =====================================================================

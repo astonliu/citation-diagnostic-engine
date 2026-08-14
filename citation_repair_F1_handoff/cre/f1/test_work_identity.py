@@ -2,7 +2,6 @@
 import pytest
 from cre.f1.biblio_match import (
     VERDICT_MATCH, VERDICT_SAME_WORK_VARIANT, VERDICT_WRONG_PAPER,
-    VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE,
     field_agreement, flag_verdict, normalize_title,
 )
 from cre.f1.schema import ClaimedRef, RetrievedRecord
@@ -21,8 +20,8 @@ def test_bracketed_translation_with_year_and_venue_is_quarantined():
                         authors=["Bordoski"], year=1972,
                         journal="Vojnosanit Pregl")
     verdict, match = flag_verdict(c, r)
-    assert verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
-    assert match.same_work_reason == ""
+    assert verdict == VERDICT_SAME_WORK_VARIANT
+    assert match.same_work_reason == "translated_title_metadata"
 
 
 def test_translation_allows_joint_author_and_venue_transliteration_only():
@@ -34,8 +33,9 @@ def test_translation_allows_joint_author_and_venue_transliteration_only():
         title="[Polymorphism of the PRLR/AluI gene in pigs]",
         authors=["Mikhailov"], year=2014, journal="Tsitol Genet")
     verdict, match = flag_verdict(c, r)
-    assert verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
-    assert match.same_work_reason == ""
+    assert verdict == VERDICT_SAME_WORK_VARIANT
+    assert match.same_work_reason == "translated_title_metadata"
+    assert "transliterated_author_and_venue" in match.identity_signals
 
 
 def test_unbracketed_translation_requires_visible_shared_anchors():
@@ -52,8 +52,8 @@ def test_unbracketed_translation_requires_visible_shared_anchors():
         authors=["Silva AA Jr"], year=2012,
         journal="Rev Assoc Med Bras (1992)")
     verdict, match = flag_verdict(c, r)
-    assert verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
-    assert match.same_work_reason == ""
+    assert verdict == VERDICT_SAME_WORK_VARIANT
+    assert match.same_work_reason == "translated_title_shared_anchors"
 
 
 def test_greek_letters_fold_to_named_forms_but_keep_year_typo_visible():

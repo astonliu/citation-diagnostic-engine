@@ -23,8 +23,7 @@ import pytest
 
 from cre.f1.biblio_match import (
     VERDICT_MATCH, VERDICT_SAME_WORK_VARIANT, VERDICT_WRONG_PAPER,
-    VERDICT_UNSCOREABLE, VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE,
-    SAME_WORK_TITLE_SIM_MIN, flag_verdict,
+    VERDICT_UNSCOREABLE, SAME_WORK_TITLE_SIM_MIN, flag_verdict,
 )
 from cre.f1.eval_report import build_f2_record, high_band_rate_of_scoreable
 from cre.f1.unscoreable import classify_unscoreable
@@ -104,8 +103,8 @@ PREVIEW = [
         "ra": ["Biriukova", "Purlo", "Denisova", "Mondoev", "Levina", "Galstian"],
         "ry": 2005, "rj": "Anesteziol Reanimatol", "rv": "", "rp": "69-71",
         "rlang": "rus", "rpub": _RUS, "pmid": "15938103",
-        "expect_verdict": VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE,
-        "expect_reason": "",
+        "expect_verdict": VERDICT_SAME_WORK_VARIANT,
+        "expect_reason": "translated_title_missing_volume_anchors",
     },
     {  # Row 5: translated same work, PubMed has NO volume -> variant (high tier)
         "tag": "r97|12698653", "label": 0,
@@ -117,8 +116,8 @@ PREVIEW = [
         "rv": "", "rp": "50-4", "rlang": "rus", "rpub": _RUS,
         "ralt": ["Pankreonekroz i ego oslozhneniia, osnovnye printsipy khirurgicheskoi taktiki."],
         "pmid": "12698653",
-        "expect_verdict": VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE,
-        "expect_reason": "",
+        "expect_verdict": VERDICT_SAME_WORK_VARIANT,
+        "expect_reason": "translated_title_missing_volume_anchors",
     },
 ]
 
@@ -165,20 +164,19 @@ def test_quarantine_accounting_excludes_diverted_rows_from_high_band():
     # Only the two chemistry rows remain in the HIGH numerator / scoreable frame.
     assert metric["flagged_f2_high"] == 2
     assert metric["denominator_scoreable"] == 2
-    assert metric["same_work_variant_excluded"] == 0
-    assert metric["cross_language_excluded"] == 2         # r125, r97
+    assert metric["same_work_variant_excluded"] == 2      # r125, r97
     assert metric["unscoreable_excluded"] == 1            # R301
     assert metric["high_band_rate_of_scoreable"] == 1.0
     # No diverted row is an auto-clear.
     assert all(r["verdict"] not in _AUTO_CLEAR for r in records)
 
 
-def test_translated_variants_are_reported_out_of_scope_not_auto_cleared():
+def test_translated_variants_are_human_reviewed_not_auto_cleared():
     for tag in ("r125|15938103", "r97|12698653"):
         d = next(x for x in PREVIEW if x["tag"] == tag)
         rec = _record(d)
-        assert rec["verdict"] == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
-        assert rec["same_work_reason"] == ""
+        assert rec["verdict"] == VERDICT_SAME_WORK_VARIANT   # audited quarantine
+        assert rec["same_work_reason"] == "translated_title_missing_volume_anchors"
 
 
 # ===========================================================================
@@ -251,8 +249,8 @@ def test_rule_F_high_tier_generic_positive():
                         language="rus", publication_types=_RUS)
     verdict, m = flag_verdict(c, r)
     assert m.title_sim >= 0.85
-    assert verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
-    assert m.same_work_reason == ""
+    assert verdict == VERDICT_SAME_WORK_VARIANT
+    assert m.same_work_reason == "translated_title_missing_volume_anchors"
 
 
 def test_rule_F_low_tier_generic_positive_needs_roster_backstop():
@@ -266,8 +264,8 @@ def test_rule_F_low_tier_generic_positive_needs_roster_backstop():
     r = RetrievedRecord(resolved=True, authors=["Morozof", "Ivanova", "Fedorov", "Smirnov", "Kozlov"], **rkw)
     verdict, m = flag_verdict(c, r)
     assert TRANSLATION_MISSING_VOLUME_TITLE_MIN <= m.title_sim < 0.85
-    assert verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
-    assert m.same_work_reason == ""
+    assert verdict == VERDICT_SAME_WORK_VARIANT
+    assert m.same_work_reason == "translated_title_missing_volume_anchors"
 
     # roster containment < 0.60 (1 of 5) -> low-tier backstop keeps it wrong_paper
     c2 = ClaimedRef(authors=["Morozov", "Alpha", "Bravo", "Charlie", "Delta"], **kw)
@@ -299,8 +297,8 @@ def test_rule_F_base_shape_is_a_true_positive():
     # Sanity anchor: the base mid-band shape DOES fire, so each negative below
     # isolates the single precondition it removes.
     verdict, m = flag_verdict(*_mk())
-    assert verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
-    assert m.same_work_reason == ""
+    assert verdict == VERDICT_SAME_WORK_VARIANT
+    assert m.same_work_reason == "translated_title_missing_volume_anchors"
 
 
 _RULE_F_NEGATIVES = {
@@ -335,7 +333,7 @@ def test_rule_F_english_record_not_bracketed_stays_wrong_paper():
 # ===========================================================================
 # Regression preservation + helper guards.
 # ===========================================================================
-def test_seed29_translation_with_volume_is_now_owned_by_rule_l2():
+def test_seed29_translation_with_volume_still_owned_by_rule_D():
     # 12500577 shape: a bracketed translation with a Volume present on BOTH sides
     # routes via RULE D; RULE F's resolved-volume-absent precondition makes it
     # defer, so the volume guard stays intact.
@@ -346,8 +344,8 @@ def test_seed29_translation_with_volume_is_now_owned_by_rule_l2():
                         authors=["Kuznetzov"], year=2010, journal="Immunologiia", volume="48",
                         language="rus")
     verdict, m = flag_verdict(c, r)
-    assert verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
-    assert m.same_work_reason == ""
+    assert verdict == VERDICT_SAME_WORK_VARIANT
+    assert m.same_work_reason == "translated_title_transliterated_author"
 
 
 def test_journal_family_transliteration_matches_stem_and_rejects_generic():

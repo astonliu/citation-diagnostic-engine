@@ -101,9 +101,9 @@
  },
  {
   "id": "lang_cyrillic_dual_thin_address",
-  "entry": "language",
+  "entry": "subset",
   "verdict": "FLAG",
-  "defends": "entry fires, address too thin - KNOWN MISS, do not fix by lowering the threshold",
+  "defends": "VOIDED 2026-08-14: entry was 'language' via RULE L2's resolved-bracket arm, which is cut (resolved-side only, out of contract). Both titles are Latin script and the transliterated-Russian written title carries no profiled non-English function words, so no language arm fires and the row now classifies 'subset'. Verdict is UNCHANGED at FLAG -- the address was always too thin -- so only the entry label moved. KNOWN L2 non-coverage: transliterated-Latin source titles are outside all remaining arms by design. Do not add a trigger: first authors Tynybekov vs Stepanov are not a transliteration pair, so one-work identity is unproven and an adjudicator decides it.",
   "note": "",
   "w": {
    "title": "Zoonoznyye infektsii v ochagakh chumy Respubliki Kazakhstan [Zoonotic infections in plague foci of the Republic of Kazakhstan]",

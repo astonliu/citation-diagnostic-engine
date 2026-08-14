@@ -53,8 +53,15 @@ SAME_WORK_REASONS = frozenset({
     "strict_prefix_title",              # F2-D, review-only revival
     "version_chain_same_work",          # §15.2, rev 5.3
     "corporate_all_fields_identical",   # Rule A
-    "corporate_author_three_anchor",    # Rule K
-    "shared_doi_first_author_differs",   # Rule B
+    # DELIBERATELY ABSENT, and this comment is the record of why:
+    #   "corporate_author_three_anchor"  -- Rule K, CUT 2026-08-14 (two firings
+    #       across three frames, zero on the seed that motivated it, against five
+    #       documented interaction defects; see flag_verdict).
+    #   "shared_doi_first_author_differs" -- Rule B, CUT 2026-08-14 (cleared 2
+    #       labelled TRUE_F2 rows of the 6 it touched; no DOI-anchored relaxation
+    #       replaces it).
+    # A reason absent from this registry is rejected by the schema (§19.1), so
+    # re-adding either route means re-adding it here first, on purpose.
     # C1-C5 (rev 5.4). Each names WHICH repair took a row out of the wrong-paper
     # band, so a row that left it can never be read as "cleanly matched".
     "implausible_author_field",         # C2

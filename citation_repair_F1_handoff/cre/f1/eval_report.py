@@ -31,6 +31,7 @@ from .biblio_match import (flag_verdict, VERDICT_MATCH,
                            VERDICT_WRONG_PAPER, VERDICT_SAME_WORK_VARIANT,
                            VERDICT_UNSCOREABLE, VERDICT_UNRESOLVED,
                            VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE)
+from .f2_samework_rule import LANGUAGE_TRIGGERS
 from .unscoreable import classify_unscoreable
 
 
@@ -256,6 +257,12 @@ _F2_RECORD_KEYS = (
     # authoritative enough for F2-C. Emitted on every record for a re-bandable frame.
     "journal_match_method", "journal_match_authoritative",
     "verdict", "same_work_reason", "identity_signals",
+    # RULE L2: the single enumerated trigger that excluded the row from the F2
+    # population (script | stopword), "" on every other row. Present on every
+    # record so the schema stays uniform, and persisted rather than recomputed
+    # because an exclusion is a recall cost that has to stay attributable in the
+    # stored frame.
+    "cross_language_trigger",
     # F2_V3_1 Bug 1: the UNSCOREABLE bucket name, "" for scoreable rows. Present on
     # every record so the schema stays uniform (re-bandable + JSON round-trips).
     "unscoreable_reason",
@@ -367,6 +374,7 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
             "verdict": VERDICT_UNSCOREABLE,
             "same_work_reason": "",
             "identity_signals": [],
+            "cross_language_trigger": "",
             "unscoreable_reason": bucket,
         }
 
@@ -400,6 +408,7 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
             "verdict": VERDICT_UNRESOLVED,
             "same_work_reason": "",
             "identity_signals": [],
+            "cross_language_trigger": "",
             "unscoreable_reason": "resolved_unresolved",
         }
 
@@ -424,6 +433,7 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
         "verdict": verdict,
         "same_work_reason": m.same_work_reason,
         "identity_signals": list(m.identity_signals),
+        "cross_language_trigger": m.cross_language_trigger,
         "unscoreable_reason": "",
     }
 
@@ -455,9 +465,21 @@ def high_band_rate_of_scoreable(records: list[dict]) -> dict:
                       if r.get("verdict") == VERDICT_UNSCOREABLE)
     unresolved = sum(1 for r in records
                      if r.get("verdict") == VERDICT_UNRESOLVED)
-    cross_language = sum(
-        1 for r in records
-        if r.get("verdict") == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE)
+    cross_language_records = [
+        r for r in records
+        if r.get("verdict") == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE]
+    cross_language = len(cross_language_records)
+    # RULE L2's exclusion is the one declared, reported recall cost, so the
+    # summary breaks it down by the trigger that caused it rather than reporting
+    # a single opaque total. Every enumerated trigger is emitted even at zero, so
+    # a trigger that stops firing is visible as a 0 rather than as an absent key.
+    # "" collects any exclusion that reached the band without a trigger, which
+    # would be a defect; it is reported rather than hidden.
+    cross_language_by_trigger = {t: 0 for t in LANGUAGE_TRIGGERS}
+    for r in cross_language_records:
+        trigger = r.get("cross_language_trigger") or ""
+        cross_language_by_trigger[trigger] = (
+            cross_language_by_trigger.get(trigger, 0) + 1)
     # scoreable frame: has a verdict AND is neither an UNSCOREABLE nor an
     # UNRESOLVED row (both are structurally out of the scoreable-for-F2 frame).
     scoreable = [r for r in records if r.get("verdict")
@@ -475,6 +497,8 @@ def high_band_rate_of_scoreable(records: list[dict]) -> dict:
         "unscoreable_excluded": unscoreable,
         "resolved_unresolved_excluded": unresolved,
         "cross_language_excluded": cross_language,
+        "cross_language_excluded_by_trigger": dict(
+            sorted(cross_language_by_trigger.items())),
         "high_band_rate_of_scoreable": (high / n) if n else None,
     }
 
