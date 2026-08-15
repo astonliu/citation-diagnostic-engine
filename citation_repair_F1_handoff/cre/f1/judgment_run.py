@@ -807,7 +807,7 @@ def run_natural_judgment(
     chain_genesis: str = "",
     assistant_prefill: str = "", stop_sequences: tuple = (), temperature=None,
     code_commit: str = "", corpus_manifest_path: str = "",
-    require_full_coverage: bool = False,
+    require_full_coverage: bool = False, require_reportable: bool = False,
 ) -> dict:
     """Run the F3-F7 band end-to-end over a dir of natural PMC-OA citing papers.
 
@@ -854,6 +854,21 @@ def run_natural_judgment(
     ``code_commit`` / ``corpus_manifest_path``: bound into the manifest so a
     published number can be tied to the Band-2 tree and the frozen corpus bytes
     it was computed over.
+
+    REPORTABILITY (``require_reportable``). A run can complete cleanly and still
+    be unfit to publish: a development pass, a ``max_docs`` slice, a resumed
+    segment, a dict-injected fixture, a disposition built over a different
+    corpus. ``manifest["reportability"]`` records the verdict and every failed
+    clause on EVERY run; ``require_reportable=True`` additionally raises. The
+    production launcher sets it. Its clauses are listed in
+    ``preband_contract.reportability_report``; the two that are not obvious are
+    the corpus cross-binding (the disposition's corpus digest must EQUAL the
+    corpus actually judged -- recording both without comparing them lets a
+    disposition built over corpus A run against corpus B at full coverage) and
+    the single-segment rule (resume writes predictions per reference but
+    checkpoints per document, so an interrupted document is replayed and its
+    rows appended twice; both defects are pinned by strict xfails in
+    ``test_adversarial_judgment_run``).
     """
     # --- F4 configuration, validated up front (item 3): outside the per-pair
     # try/except, before any output file exists.
@@ -1315,9 +1330,22 @@ def run_natural_judgment(
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         manifest["f5_discovery_queue_path"] = f5_queue_path
         manifest["f5"]["queued_rows"] = len(f5_queue)
-    # The residual join failure the up-front domain check cannot see: every
-    # judged pair fell through to 'disposition missing'. The manifest is written
-    # FIRST so the evidence of the failed run survives the abort.
+    # Reportability is a STRICTER predicate than "completed without error", and
+    # it is evaluated on the finished manifest plus the predictions file, so it
+    # cannot be satisfied by intent. Recorded on every run -- a non-reportable
+    # run is a legitimate run that says so -- and ENFORCED when the caller asks.
+    manifest["reportability"] = pc.reportability_report(manifest, pred_path)
+
+    # The manifest is written FIRST so the evidence of a failed run survives
+    # every abort below.
     _write_json_atomic(manifest_path, manifest)
-    pc.enforce_join_reached(counts, total_records, DISP_EXCLUDED_PREBAND_MISSING)
+
+    # The residual join failure the up-front domain check cannot see: every pair
+    # that REACHED the pre-band gate fell through it. Structural exclusions never
+    # reached the join, so they do not dilute the denominator.
+    pc.enforce_join_reached(
+        counts, DISP_EXCLUDED_PREBAND_MISSING,
+        (DISP_EXCLUDED_NO_CITANCE, DISP_EXCLUDED_NO_CITED_PMID))
+    if require_reportable:
+        pc.assert_reportable_run(manifest, pred_path)
     return manifest

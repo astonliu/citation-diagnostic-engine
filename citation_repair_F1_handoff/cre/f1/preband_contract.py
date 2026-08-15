@@ -323,24 +323,148 @@ def enforce_join(acc: dict, *, disp: "Disposition | None",
             "full coverage was required for this run")
 
 
-def enforce_join_reached(counts: dict, total_records: int,
-                         missing_disposition_key: str) -> None:
-    """Every judged pair fell through the join -> hard failure.
+def enforce_join_reached(counts: dict, missing_disposition_key: str,
+                         structural_keys) -> None:
+    """Every pair that REACHED the pre-band gate fell through it -> hard failure.
 
     Distinct from the zero-overlap gate, which compares id DOMAINS before the
     run. This catches the residual case that gate cannot see: the disposition
-    overlaps the corpus, but every id it matched is structurally excluded (no
-    citance / no cited pmid) before the pre-band gate, so nothing that was
-    actually judged had a disposition entry. That run completes with records,
-    ``accounting_ok`` true, and an empty queue.
+    overlaps the corpus, but every id it matched is structurally excluded before
+    the pre-band gate, so nothing that was actually judged had an entry.
+
+    THE DENOMINATOR IS ELIGIBLE PAIRS, NOT ALL RECORDS. Comparing against the
+    record total was bypassable by any corpus holding a single structurally
+    excluded reference -- i.e. every real corpus: one ``excluded_no_citance``
+    plus one ``excluded_preband_disposition_missing`` gives 1 != 2 and the run
+    completes with ZERO pairs judged. Structural exclusions never reached the
+    join and must not dilute it.
 
     Deliberately NOT triggered by "the disposition cleared nothing". A corpus
     whose references are all genuinely F1/F2/F8 is a legitimate run with an
     empty queue, and failing it would be a false alarm on real data.
     """
-    if total_records > 0 and counts.get(missing_disposition_key, 0) == total_records:
+    eligible = sum(v for k, v in counts.items() if k not in set(structural_keys))
+    missing = counts.get(missing_disposition_key, 0)
+    if eligible > 0 and missing == eligible:
         raise PrebandContractError(
-            f"all {total_records} judged pair(s) are "
+            f"all {eligible} pair(s) that reached the pre-band gate are "
             f"'{missing_disposition_key}': the disposition overlapped the corpus "
             "id domain but covered nothing that was actually judged. This "
             "completes as a clean empty run and must not be reported.")
+
+
+# --------------------------------------------------------------------------
+# Reportability: the single gate a published number must pass
+# --------------------------------------------------------------------------
+#: A run may be perfectly valid and still not reportable -- a development pass,
+#: a ``max_docs`` slice, a dict-injected fixture. Reportability is a STRICTER
+#: predicate than "completed without error", and it is evaluated on the finished
+#: manifest plus the predictions file, so it cannot be satisfied by intent.
+def reportability_report(manifest: dict, predictions_path: str) -> dict:
+    """Return ``{"reportable": bool, "failures": [...], "checks": {...}}``.
+
+    Each clause exists because a specific run that FAILS it would still have
+    completed cleanly and produced a publishable-looking number.
+    """
+    failures: list = []
+    checks: dict = {}
+
+    def need(name: str, ok: bool, why: str) -> None:
+        checks[name] = bool(ok)
+        if not ok:
+            failures.append(f"{name}: {why}")
+
+    pb = manifest.get("preband") or {}
+    join = pb.get("join") or {}
+    corpus = manifest.get("corpus") or {}
+    adapter = manifest.get("adapter") or {}
+    params = manifest.get("params") or {}
+
+    need("status_complete", manifest.get("status") == "complete",
+         f"status is {manifest.get('status')!r}, not 'complete'")
+
+    # PRODUCTION ACCEPTS ONLY THE CANONICAL FILE ARTIFACT. A dict declares no
+    # schema, no digest and no producing commit, so it cannot bind a population.
+    need("canonical_disposition",
+         pb.get("canonical") is True and pb.get("source") == SOURCE_ARTIFACT,
+         "disposition was not a canonical preband_disposition_v1 artifact "
+         "(dict injection is test/development-only)")
+
+    need("full_coverage", join.get("missing_from_disposition") == 0,
+         f"{join.get('missing_from_disposition')} corpus citation_id(s) absent "
+         "from the disposition")
+
+    # The disposition's corpus and the corpus actually judged must be the SAME
+    # bytes. Recording both without comparing them lets a disposition built over
+    # corpus A be run against corpus B with full coverage and no complaint.
+    d_corpus = pb.get("corpus_manifest_sha256") or ""
+    r_corpus = corpus.get("manifest_sha256") or ""
+    need("corpus_cross_bound",
+         bool(d_corpus) and bool(r_corpus) and d_corpus == r_corpus,
+         f"disposition corpus digest {d_corpus[:12]!r} != run corpus digest "
+         f"{r_corpus[:12]!r} (or one is absent)")
+
+    need("code_commit_recorded", bool(manifest.get("code_commit")),
+         "no code_commit recorded")
+    need("model_recorded", bool(adapter.get("model")), "no adapter.model recorded")
+    need("temperature_recorded", "temperature" in adapter,
+         "no adapter.temperature recorded (DEC-046B pins 0)")
+
+    # Zero judged pairs is the clean-empty-run failure. Unconditional, so it
+    # needs no reasoning about which exclusions dilute which denominator.
+    need("pairs_judged", (manifest.get("scoreable_records") or 0) > 0,
+         "no scoreable pair was judged")
+
+    need("no_parse_failures", not (pb.get("preflight_parse_failures") or {}),
+         f"documents failed to parse: "
+         f"{sorted((pb.get('preflight_parse_failures') or {}))}")
+
+    need("modules_stable", manifest.get("module_sha256_stable") is True,
+         "a governing module changed during the run")
+
+    # SINGLE SEGMENT. Resume writes predictions per reference but checkpoints per
+    # document, so an interrupted document is replayed and its rows appended a
+    # second time; and the manifest counters cover only the final invocation.
+    # Both are pinned by strict xfails in test_adversarial_judgment_run.
+    need("single_segment", not params.get("chain_genesis"),
+         "run extends a prior segment; resumed runs are not reportable")
+
+    lines = _read_prediction_ids(predictions_path)
+    n = len(lines)
+    need("counters_match_file",
+         manifest.get("total_records") == n
+         and manifest.get("chain_record_count") == n,
+         f"manifest total_records={manifest.get('total_records')} / "
+         f"chain_record_count={manifest.get('chain_record_count')} vs "
+         f"{n} prediction row(s)")
+    dupes = sorted({cid for cid in lines if lines.count(cid) > 1})
+    need("unique_citation_ids", not dupes,
+         f"duplicate citation_id(s) in predictions: {dupes[:5]}")
+
+    return {"reportable": not failures, "failures": failures, "checks": checks}
+
+
+def _read_prediction_ids(path: str) -> list:
+    out: list = []
+    if not os.path.exists(path):
+        return out
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line).get("citation_id"))
+            except json.JSONDecodeError:
+                out.append(None)
+    return out
+
+
+def assert_reportable_run(manifest: dict, predictions_path: str) -> dict:
+    """Raise unless every reportability clause holds. Returns the report."""
+    report = reportability_report(manifest, predictions_path)
+    if not report["reportable"]:
+        raise PrebandContractError(
+            "this run is NOT reportable and its numbers must not be published:\n  - "
+            + "\n  - ".join(report["failures"]))
+    return report

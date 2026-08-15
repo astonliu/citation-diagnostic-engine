@@ -323,3 +323,40 @@ def test_a_corpus_yielding_zero_references_aborts(tmp_path, monkeypatch):
     err = _run_raw(tmp_path, monkeypatch,
                    parse=lambda path, source_pmcid=None: [])
     assert "ZERO references" in str(err)
+
+
+# ------------------------------------------- the reportability gate, end to end
+
+def test_codex_b2_bypass_is_blocked_end_to_end(tmp_path, monkeypatch):
+    """A has no citance (structurally excluded before the pre-band gate);
+    B is eligible but absent from the disposition, which contains only A.
+
+    Old behaviour: join matched 1/2, status=complete, accounting_ok=true,
+    queue=0, ZERO pairs judged -- a publishable-looking clean empty run."""
+    from . import preband_contract as pc
+    refs = [make_ref("PMC1:A", citance=""), make_ref("PMC1:B")]
+    with pytest.raises(pc.PrebandContractError, match="clean empty run"):
+        run(tmp_path, refs, extractor=extractor_of("Drug X reduces Y"),
+            coverage_judge=judge_established(True),
+            disposition={"PMC1:A": "cleared"}, monkeypatch=monkeypatch)
+
+
+def test_a_dict_run_records_itself_as_not_reportable(tmp_path, monkeypatch):
+    manifest, _ = run(tmp_path, [make_ref("c")],
+                      extractor=extractor_of("Drug X reduces Y"),
+                      coverage_judge=judge_established(True),
+                      disposition=CLEARED, monkeypatch=monkeypatch)
+    rep = manifest["reportability"]
+    assert rep["reportable"] is False
+    assert rep["checks"]["canonical_disposition"] is False
+    assert rep["checks"]["pairs_judged"] is True          # the run itself is fine
+
+
+def test_require_reportable_aborts_a_development_run(tmp_path, monkeypatch):
+    from . import preband_contract as pc
+    with pytest.raises(pc.PrebandContractError, match="NOT reportable"):
+        run(tmp_path, [make_ref("c")],
+            extractor=extractor_of("Drug X reduces Y"),
+            coverage_judge=judge_established(True),
+            disposition=CLEARED, monkeypatch=monkeypatch,
+            require_reportable=True)

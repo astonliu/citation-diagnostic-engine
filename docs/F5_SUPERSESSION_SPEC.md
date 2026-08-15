@@ -111,28 +111,32 @@ In `cre/f1/f5_supersession.py`:
 
 ## Pinned digests
 
-Both pins were written as eight hex characters, which is not collision-resistant and does not
-identify a file. Completed 2026-08-14 during Round 1 remediation. **The digests are recorded
-against the commit at which they were measured, not back-filled with today's value** — writing
-the current digest under the original truncated pin would assert a freeze that never held.
+Both pins were originally written as eight hex characters, which is not collision-resistant and
+does not identify a file. Completed during Round 1 remediation (2026-08-14), which revealed that
+both files had drifted from them. **ZD authorized the current hashes and retained the originals as
+history**; the guardrail above is measured against the ACTIVE pins.
 
-| file | pinned sha256 | measured at |
-|---|---|---|
-| `cre/f1/judgment_engine.py` | `671de1e55dc62614d0e8e02a7dfe4fc846910929263a52471ede7b90e29587a1` | `ff940fc207359ba730df13f4c83105350736cf07` (2026-07-16) |
-| `cre/f1/judgment_band.py` | `7d81e5e088b68c358e6c9b0f82d4025a431aef351508318d5a080adb99bfc8ee` | `ff940fc207359ba730df13f4c83105350736cf07` (2026-07-16) |
+### Active pins — authorized 2026-08-14 at `3a4292f420747bb9ae9c88d4d49a5bdb3474952f`
 
-**DRIFT — the "unchanged" guardrail above no longer holds.** Measured 2026-08-14 at
-`8e1737163b9a43cc0f445d238fe04406a659c6f6`, both files differ from their pins:
-
-| file | current sha256 |
+| file | sha256 |
 |---|---|
 | `cre/f1/judgment_engine.py` | `b8567a14b7ea8233027fe61b729f6b2a101cad60520df7a073a6c8b1121eebd4` |
 | `cre/f1/judgment_band.py` | `8f7c47b76e510e93c0d7f5b66fbfdd8ac496dfb0a380daa099ce7d43193fe0a8` |
 
-Neither file was modified by the Round 1 remediation — the drift predates it and was
-invisible while the pins were truncated. Whether the intervening edits were authorized, and
-whether the pins should be re-frozen at the current tip, is **ZD's call and is not decided
-here**; recorded in CONTRADICTIONS.
+Neither file was modified by the Round 1 remediation; the drift predates it and was invisible while
+the pins were truncated. Re-freezing here does not retroactively authorize the intervening edits —
+it fixes the pin so any FURTHER drift is detectable.
+
+### Historical pins — `ff940fc207359ba730df13f4c83105350736cf07` (2026-07-16), retained as history only
+
+| file | sha256 |
+|---|---|
+| `cre/f1/judgment_engine.py` | `671de1e55dc62614d0e8e02a7dfe4fc846910929263a52471ede7b90e29587a1` |
+| `cre/f1/judgment_band.py` | `7d81e5e088b68c358e6c9b0f82d4025a431aef351508318d5a080adb99bfc8ee` |
+
+These are the values the original `671de1e5…` / `7d81e5e0…` truncations referred to. They are **not**
+the freeze criterion any more. Between `ff940fc` and `3a4292f`, `judgment_band.py` gained 753 changed
+lines and `judgment_engine.py` 15.
 
 ## Definition of done
 - `python -m pytest cre/f1 -q` green (expect prior 683 with optional deps + the new F5 tests).

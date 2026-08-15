@@ -274,16 +274,158 @@ def test_all_judged_pairs_missing_disposition_fails_closed():
     pre-band gate, so nothing judged had an entry."""
     counts = {"excluded_preband_disposition_missing": 4}
     with pytest.raises(pc.PrebandContractError, match="clean empty run"):
-        pc.enforce_join_reached(counts, 4,
-                                "excluded_preband_disposition_missing")
+        pc.enforce_join_reached(
+            counts, "excluded_preband_disposition_missing",
+            ("excluded_no_citance", "excluded_no_cited_pmid"))
 
 
 def test_a_legitimately_all_excluded_run_is_not_flagged():
     """A corpus whose references are all genuinely F2 is a valid run with an
     empty queue. Failing it would be a false alarm on real data."""
     counts = {"excluded_preband": 4}
-    pc.enforce_join_reached(counts, 4, "excluded_preband_disposition_missing")
+    pc.enforce_join_reached(counts, "excluded_preband_disposition_missing",
+                            ("excluded_no_citance", "excluded_no_cited_pmid"))
 
 
 def test_zero_record_run_is_not_double_reported():
-    pc.enforce_join_reached({}, 0, "excluded_preband_disposition_missing")
+    pc.enforce_join_reached({}, "excluded_preband_disposition_missing",
+                            ("excluded_no_citance", "excluded_no_cited_pmid"))
+
+
+# =========================================================================
+# The reportability gate (Round 1 go/no-go remediation)
+# =========================================================================
+
+def test_the_structural_exclusion_bypass_is_closed():
+    """CODEX B2, verbatim. A has no citance (structurally excluded before the
+    pre-band gate), B is eligible but absent from the disposition.
+
+    Old arithmetic compared missing(1) to TOTAL records(2) -> 1 != 2 -> no
+    raise, status complete, accounting_ok true, queue 0, ZERO pairs judged.
+    Any corpus holding one structurally excluded reference bypassed the gate --
+    i.e. every real corpus. The denominator is now ELIGIBLE pairs."""
+    counts = {"excluded_no_citance": 1,
+              "excluded_preband_disposition_missing": 1}
+    with pytest.raises(pc.PrebandContractError, match="clean empty run"):
+        pc.enforce_join_reached(
+            counts, "excluded_preband_disposition_missing",
+            ("excluded_no_citance", "excluded_no_cited_pmid"))
+
+
+def test_structural_exclusions_alone_are_not_flagged():
+    """No pair reached the gate at all -> nothing to say about the join."""
+    pc.enforce_join_reached({"excluded_no_citance": 3},
+                            "excluded_preband_disposition_missing",
+                            ("excluded_no_citance", "excluded_no_cited_pmid"))
+
+
+def test_a_real_run_with_some_missing_is_not_flagged():
+    counts = {"excluded_no_citance": 1,
+              "excluded_preband_disposition_missing": 1,
+              "predicted": 2}
+    pc.enforce_join_reached(counts, "excluded_preband_disposition_missing",
+                            ("excluded_no_citance", "excluded_no_cited_pmid"))
+
+
+# ----------------------------------------------------------- the gate itself
+
+DIG_A = "a" * 64
+DIG_B = "b" * 64
+
+
+def good_manifest(**over):
+    m = {
+        "status": "complete",
+        "preband": {"canonical": True, "source": pc.SOURCE_ARTIFACT,
+                    "corpus_manifest_sha256": DIG_A,
+                    "preflight_parse_failures": {},
+                    "join": {"missing_from_disposition": 0}},
+        "corpus": {"manifest_sha256": DIG_A},
+        "adapter": {"model": "m", "temperature": 0},
+        "params": {"chain_genesis": ""},
+        "code_commit": "d90196a7be3fe64e1eb9225a17b2ce4a26e0ecd1",
+        "scoreable_records": 2,
+        "module_sha256_stable": True,
+        "total_records": 2,
+        "chain_record_count": 2,
+    }
+    m.update(over)
+    return m
+
+
+def preds(tmp_path, ids):
+    p = tmp_path / "judgment_predictions.jsonl"
+    p.write_text("".join(json.dumps({"citation_id": c}) + "\n" for c in ids),
+                 encoding="utf-8")
+    return str(p)
+
+
+def test_a_fully_bound_run_is_reportable(tmp_path):
+    r = pc.reportability_report(good_manifest(),
+                                preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
+    assert r["reportable"] is True, r["failures"]
+    pc.assert_reportable_run(good_manifest(),
+                             preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
+
+
+@pytest.mark.parametrize("over,clause", [
+    ({"status": "in_progress"}, "status_complete"),
+    ({"code_commit": ""}, "code_commit_recorded"),
+    ({"scoreable_records": 0}, "pairs_judged"),
+    ({"module_sha256_stable": False}, "modules_stable"),
+    ({"adapter": {"model": "", "temperature": 0}}, "model_recorded"),
+    ({"adapter": {"model": "m"}}, "temperature_recorded"),
+    ({"params": {"chain_genesis": "abc"}}, "single_segment"),
+    ({"corpus": {"manifest_sha256": DIG_B}}, "corpus_cross_bound"),
+])
+def test_each_clause_blocks_reportability(tmp_path, over, clause):
+    r = pc.reportability_report(good_manifest(**over),
+                                preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
+    assert r["reportable"] is False
+    assert r["checks"][clause] is False
+    assert any(f.startswith(clause) for f in r["failures"]), r["failures"]
+
+
+def test_dict_injection_is_never_reportable(tmp_path):
+    """CODEX B2 / governance: production accepts ONLY the canonical artifact."""
+    m = good_manifest()
+    m["preband"] = {**m["preband"], "canonical": False,
+                    "source": pc.SOURCE_DICT}
+    r = pc.reportability_report(m, preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
+    assert r["checks"]["canonical_disposition"] is False
+    with pytest.raises(pc.PrebandContractError, match="canonical_disposition"):
+        pc.assert_reportable_run(m, preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
+
+
+def test_partial_coverage_is_never_reportable(tmp_path):
+    m = good_manifest()
+    m["preband"] = {**m["preband"], "join": {"missing_from_disposition": 3}}
+    r = pc.reportability_report(m, preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
+    assert r["checks"]["full_coverage"] is False
+
+
+def test_a_parse_failure_blocks_reportability(tmp_path):
+    m = good_manifest()
+    m["preband"] = {**m["preband"], "preflight_parse_failures": {"PMC9": "bad"}}
+    r = pc.reportability_report(m, preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
+    assert r["checks"]["no_parse_failures"] is False
+
+
+def test_duplicate_prediction_ids_block_reportability(tmp_path):
+    """CODEX B1 detection. A resumed mid-document interrupt replays the
+    document and appends its rows a second time, giving [R1, R1, R2]. Those
+    duplicates corrupt any precision denominator silently."""
+    path = preds(tmp_path, ["PMC1:R1", "PMC1:R1", "PMC1:R2"])
+    r = pc.reportability_report(good_manifest(total_records=3,
+                                              chain_record_count=3), path)
+    assert r["checks"]["unique_citation_ids"] is False
+    assert any("PMC1:R1" in f for f in r["failures"])
+
+
+def test_counters_that_undercount_the_file_block_reportability(tmp_path):
+    """CODEX B1, second half: a resumed manifest's total_records covers only the
+    final invocation while the predictions file holds every segment's rows."""
+    path = preds(tmp_path, ["PMC1:R1", "PMC2:R1"])
+    r = pc.reportability_report(good_manifest(total_records=1,
+                                              chain_record_count=1), path)
+    assert r["checks"]["counters_match_file"] is False
