@@ -765,3 +765,52 @@ def test_a_real_run_queue_matches_its_scoreable_predictions(tmp_path, monkeypatc
     q = manifest["queue_audit"]
     assert q["matches"] is True
     assert q["queue_rows"] == q["scoreable_rows"] == manifest["scoreable_records"]
+
+
+# ------------------- the queue audit reads FILES, not its own bookkeeping
+
+def test_queue_audit_detects_a_short_queue_file(tmp_path):
+    """REGRESSION. The first version compared two in-memory lists appended in
+    the same branch, so it agreed with itself by construction and could never
+    fail. Both sides are now re-read from disk."""
+    pred = tmp_path / "p.jsonl"
+    queue = tmp_path / "q.jsonl"
+    pred.write_text("".join(json.dumps(
+        {"citation_id": c, "disposition": jr.DISP_PREDICTED}) + "\n"
+        for c in ("PMC1:B1", "PMC1:B2")), encoding="utf-8")
+    queue.write_text(json.dumps({"item_key": "PMC1:B1"}) + "\n",
+                     encoding="utf-8")   # one row short
+    audit = jr._queue_audit(str(pred), str(queue))
+    assert audit["matches"] is False
+    assert audit["queue_rows"] == 1
+    assert audit["scoreable_rows"] == 2
+    assert audit["symmetric_difference"] == ["PMC1:B2"]
+    assert audit["source"] == "files_on_disk"
+
+
+def test_queue_audit_ignores_non_scoreable_predictions(tmp_path):
+    pred = tmp_path / "p.jsonl"
+    queue = tmp_path / "q.jsonl"
+    pred.write_text(
+        json.dumps({"citation_id": "PMC1:B1",
+                    "disposition": jr.DISP_PREDICTED}) + "\n"
+        + json.dumps({"citation_id": "PMC1:B2",
+                      "disposition": jr.DISP_EXCLUDED_PREBAND}) + "\n",
+        encoding="utf-8")
+    queue.write_text(json.dumps({"item_key": "PMC1:B1"}) + "\n",
+                     encoding="utf-8")
+    assert jr._queue_audit(str(pred), str(queue))["matches"] is True
+
+
+def test_queue_audit_detects_an_id_swap(tmp_path):
+    """Same COUNT, different ids -- a count-only check would pass this."""
+    pred = tmp_path / "p.jsonl"
+    queue = tmp_path / "q.jsonl"
+    pred.write_text(json.dumps(
+        {"citation_id": "PMC1:B1", "disposition": jr.DISP_PREDICTED}) + "\n",
+        encoding="utf-8")
+    queue.write_text(json.dumps({"item_key": "PMC9:ZZ"}) + "\n",
+                     encoding="utf-8")
+    audit = jr._queue_audit(str(pred), str(queue))
+    assert audit["queue_rows"] == audit["scoreable_rows"] == 1
+    assert audit["matches"] is False

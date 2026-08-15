@@ -170,7 +170,7 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _IS_HEX(s: str) -> bool:
+def _is_hex(s: str) -> bool:
     return all(c in "0123456789abcdef" for c in s)
 
 
@@ -715,7 +715,7 @@ def _f7_manifest_block(f7_policy, f7_records) -> dict:
                  if tr.get("relation_component_result") is not None]
     real = [tr.get("prompt_sha256", {}).get("relation") for tr in attempted]
     real = [d for d in real
-            if isinstance(d, str) and len(d) == 64 and _IS_HEX(d)]
+            if isinstance(d, str) and len(d) == 64 and _is_hex(d)]
     digest_present = bool(attempted) and len(real) == len(attempted)
     outcomes: dict = {}
     for r in records:
@@ -753,6 +753,41 @@ def _f7_manifest_block(f7_policy, f7_records) -> dict:
             "comparator; when absent it stays None and this run is not F7-reportable. "
             "The version string is recorded separately and never stands in for a digest."
         ),
+    }
+
+
+def _queue_audit(pred_path: str, queue_path: str) -> dict:
+    """Audit the BLIND QUEUE FILE against the PREDICTIONS FILE.
+
+    Both sides are re-read from disk on purpose. An earlier version compared two
+    in-memory lists that were appended in the same branch, so it agreed with
+    itself by construction and proved nothing about what was written. The queue
+    is the annotation denominator: if it holds fewer rows than the run scored,
+    every per-fault rate is computed over a different population than the
+    manifest reports.
+    """
+    scoreable: list = []
+    for line in _read_jsonl_lines(pred_path):
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("disposition") in _SCOREABLE:
+            scoreable.append(rec.get("citation_id"))
+    queued: list = []
+    for line in _read_jsonl_lines(queue_path):
+        try:
+            queued.append(json.loads(line).get("item_key"))
+        except json.JSONDecodeError:
+            continue
+    return {
+        "queue_rows": len(queued),
+        "scoreable_rows": len(scoreable),
+        "matches": (len(queued) == len(scoreable)
+                    and set(queued) == set(scoreable)),
+        "symmetric_difference": sorted(
+            x for x in (set(queued) ^ set(scoreable)) if x is not None)[:10],
+        "source": "files_on_disk",
     }
 
 
@@ -921,6 +956,8 @@ def run_natural_judgment(
     checkpoint_path = os.path.join(out_dir, "judgment_run_checkpoint.jsonl")
     sidecar_path = os.path.join(out_dir, "judgment_run_record_hashes.jsonl")
 
+    corpus_bindings: dict = {}
+
     # --- THE JOIN, validated before any output file exists --------------
     # A wholesale id mismatch used to complete as status="complete" with
     # accounting_ok=true and an empty annotation queue -- indistinguishable from
@@ -956,11 +993,11 @@ def run_natural_judgment(
     # (after the compute is spent, and only if the caller asks). Checking up
     # front makes them mandatory rather than advisory.
     if production:
-        corpus_bindings = pc.assert_production_preflight(
+        corpus_bindings.update(pc.assert_production_preflight(
             disp=disp_obj, join_acc=join_acc,
             parse_failures=preflight_parse_failures,
             code_commit=code_commit, model=model,
-            corpus_manifest_path=corpus_manifest_path, xml_dir=xml_dir)
+            corpus_manifest_path=corpus_manifest_path, xml_dir=xml_dir))
 
     # Load-bearing module hashes, captured BEFORE execution so they describe the
     # bytes that actually ran. Read after the loop, they could describe a module
@@ -1003,10 +1040,7 @@ def run_natural_judgment(
     refs_seen = 0
     docs_processed = 0
     scoreable_records = 0
-    queue_rows = 0
     executed_ids: set = set()
-    queue_ids: list = []
-    scoreable_ids: list = []
     emitted_labels: dict = {}
     pubtype_cache: dict = {}
 
@@ -1051,11 +1085,8 @@ def run_natural_judgment(
             elif sr.get("reason") == "no_usable_abstract":
                 f4_counts["eligible_claims"] += 1
         if rec["disposition"] in _SCOREABLE:
-            nonlocal scoreable_records, queue_rows
+            nonlocal scoreable_records
             scoreable_records += 1
-            queue_rows += 1
-            scoreable_ids.append(rec["citation_id"])
-            queue_ids.append(rec["citation_id"])
             payload = jb.annotation_payload({
                 "item_key": rec["citation_id"],
                 "citing_sentence": rec["citing_sentence"],
@@ -1226,6 +1257,8 @@ def run_natural_judgment(
     status = "complete" if not remaining else "in_progress"
 
     total_records = sum(counts.values())
+    queue_audit = _queue_audit(pred_path, queue_path)
+    manifest_queue_rows = queue_audit["queue_rows"]
     manifest = {
         "layer": "F3-F7 natural-paper orchestration (judgment_run)",
         "status": status,
@@ -1361,14 +1394,7 @@ def run_natural_judgment(
         },
         # The blind queue is the annotation denominator; it must equal the
         # scoreable predictions exactly, by id, not just by count.
-        "queue_audit": {
-            "queue_rows": len(queue_ids),
-            "scoreable_rows": len(scoreable_ids),
-            "matches": (len(queue_ids) == len(scoreable_ids)
-                        and set(queue_ids) == set(scoreable_ids)),
-            "symmetric_difference": sorted(
-                set(queue_ids) ^ set(scoreable_ids))[:10],
-        },
+        "queue_audit": queue_audit,
         "emitted_labels": dict(sorted(emitted_labels.items())),
         **({"corpus_document_sha256": corpus_bindings.get("document_sha256", {})}
            if production else {}),
@@ -1383,7 +1409,7 @@ def run_natural_judgment(
         # preband.join accounting above carries the population check.
         "accounting_ok": total_records == refs_seen,
         "scoreable_records": scoreable_records,
-        "annotation_queue_rows": queue_rows,
+        "annotation_queue_rows": manifest_queue_rows,
         "predictions_path": pred_path,
         "annotation_queue_path": queue_path,
         "checkpoint_path": checkpoint_path,
