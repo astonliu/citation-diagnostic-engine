@@ -14,6 +14,7 @@ import json
 import pytest
 
 from . import judgment_run as jr
+from . import preband_contract as pc
 from .f4_strength import F4Policy
 from .schema import Reference, ClaimedRef
 
@@ -164,22 +165,48 @@ def test_preband_f2_is_excluded_without_coverage_call(tmp_path, monkeypatch):
     assert calls["n"] == 0                          # coverage never ran
 
 
-def test_missing_disposition_fails_closed(tmp_path, monkeypatch):
-    _, rows = run(
-        tmp_path, [make_ref("c")],
-        extractor=extractor_of("Drug X reduces Y"),
-        coverage_judge=judge_established(True),
-        disposition={}, monkeypatch=monkeypatch)     # id absent
-    assert rows[0]["disposition"] == jr.DISP_EXCLUDED_PREBAND_MISSING
+def test_empty_disposition_aborts_the_run(tmp_path, monkeypatch):
+    """CONTRACT CHANGE (Round 1 remediation, ledger items 2-3).
+
+    This used to complete: every pair got DISP_EXCLUDED_PREBAND_MISSING,
+    accounting_ok stayed true, the queue was empty, and the manifest said
+    'complete' -- indistinguishable from a successful run. A zero-overlap join
+    is now a run-level abort, raised BEFORE any output file exists."""
+    with pytest.raises(pc.PrebandContractError, match="ZERO overlap"):
+        run(tmp_path, [make_ref("c")],
+            extractor=extractor_of("Drug X reduces Y"),
+            coverage_judge=judge_established(True),
+            disposition={}, monkeypatch=monkeypatch)
 
 
-def test_none_disposition_excludes_everything(tmp_path, monkeypatch):
-    _, rows = run(
-        tmp_path, [make_ref("c")],
+def test_none_disposition_aborts_the_run(tmp_path, monkeypatch):
+    """Same contract change for 'no disposition supplied at all'."""
+    with pytest.raises(pc.PrebandContractError,
+                       match="no preband_disposition supplied"):
+        run(tmp_path, [make_ref("c")],
+            extractor=extractor_of("Drug X reduces Y"),
+            coverage_judge=judge_established(True),
+            disposition=None, monkeypatch=monkeypatch)
+
+
+def test_per_pair_fail_closed_survives_the_run_level_gate(tmp_path, monkeypatch):
+    """The per-pair fail-closed rule is UNCHANGED for a partially covered join.
+
+    One id present, one absent: the run proceeds (the join is real), the covered
+    pair is judged, and the uncovered pair is still excluded fail-closed rather
+    than judged."""
+    manifest, rows = run(
+        tmp_path, [make_ref("c"), make_ref("absent")],
         extractor=extractor_of("Drug X reduces Y"),
         coverage_judge=judge_established(True),
-        disposition=None, monkeypatch=monkeypatch)
-    assert rows[0]["disposition"] == jr.DISP_EXCLUDED_PREBAND_MISSING
+        disposition={"c": "cleared"}, monkeypatch=monkeypatch)
+    by_id = {r["citation_id"]: r for r in rows}
+    assert by_id["absent"]["disposition"] == jr.DISP_EXCLUDED_PREBAND_MISSING
+    assert by_id["c"]["preband_cleared"] is True
+    join = manifest["preband"]["join"]
+    assert join["matched"] == 1
+    assert join["missing_from_disposition"] == 1
+    assert join["missing_sample"] == ["absent"]
 
 
 def test_structural_exclusions(tmp_path, monkeypatch):

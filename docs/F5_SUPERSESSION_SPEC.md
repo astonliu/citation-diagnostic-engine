@@ -85,9 +85,10 @@ In `cre/f1/f5_supersession.py`:
 | `validate_f5_record` on a tampered stored record | raises (drift) |
 
 ## Guardrails (do NOT change)
-- **Frozen:** `judgment_engine.py` (sha256 `671de1e5…`), `judgment_band.py` (`7d81e5e0…`),
-  `coverage_v2`/`band_prompts.py` (presence-only lock), F2. F5 is a leaf that only *produces* a
-  `TemporalAssessment`; it never edits the engine.
+- **Frozen:** `judgment_engine.py`, `judgment_band.py` (full digests and their measurement
+  commit in [Pinned digests](#pinned-digests) below), `coverage_v2`/`band_prompts.py`
+  (presence-only lock), F2. F5 is a leaf that only *produces* a `TemporalAssessment`; it
+  never edits the engine.
 - **No network/paid I/O** in the module or its tests; all retrieval/model access is injected and faked.
 - **SUPPORTED-only** F5 target; `WEAKER_STRENGTH` is a documented deferred limitation (engine L397). The
   additive pinning test for L397 is a **separate, later, authorized** change — not in this spec.
@@ -105,7 +106,33 @@ In `cre/f1/f5_supersession.py`:
   **before** the F5 additions), **plus** the new `test_f5_supersession`.
 - F2 `WRONG_PAPER` guard PMIDs unaffected (they never enter the band): `31665581`, `16639420`, `18152150`,
   `27665045`, `25750229`, `32355637`, `22926653`.
-- `judgment_engine.py` sha256 unchanged (`671de1e5…`); `judgment_band.py` (`7d81e5e0…`) unchanged.
+- `judgment_engine.py` and `judgment_band.py` sha256 unchanged **relative to the measurement
+  commit recorded in [Pinned digests](#pinned-digests)** — see the drift note there.
+
+## Pinned digests
+
+Both pins were written as eight hex characters, which is not collision-resistant and does not
+identify a file. Completed 2026-08-14 during Round 1 remediation. **The digests are recorded
+against the commit at which they were measured, not back-filled with today's value** — writing
+the current digest under the original truncated pin would assert a freeze that never held.
+
+| file | pinned sha256 | measured at |
+|---|---|---|
+| `cre/f1/judgment_engine.py` | `671de1e55dc62614d0e8e02a7dfe4fc846910929263a52471ede7b90e29587a1` | `ff940fc207359ba730df13f4c83105350736cf07` (2026-07-16) |
+| `cre/f1/judgment_band.py` | `7d81e5e088b68c358e6c9b0f82d4025a431aef351508318d5a080adb99bfc8ee` | `ff940fc207359ba730df13f4c83105350736cf07` (2026-07-16) |
+
+**DRIFT — the "unchanged" guardrail above no longer holds.** Measured 2026-08-14 at
+`8e1737163b9a43cc0f445d238fe04406a659c6f6`, both files differ from their pins:
+
+| file | current sha256 |
+|---|---|
+| `cre/f1/judgment_engine.py` | `b8567a14b7ea8233027fe61b729f6b2a101cad60520df7a073a6c8b1121eebd4` |
+| `cre/f1/judgment_band.py` | `8f7c47b76e510e93c0d7f5b66fbfdd8ac496dfb0a380daa099ce7d43193fe0a8` |
+
+Neither file was modified by the Round 1 remediation — the drift predates it and was
+invisible while the pins were truncated. Whether the intervening edits were authorized, and
+whether the pins should be re-frozen at the current tip, is **ZD's call and is not decided
+here**; recorded in CONTRADICTIONS.
 
 ## Definition of done
 - `python -m pytest cre/f1 -q` green (expect prior 683 with optional deps + the new F5 tests).

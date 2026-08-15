@@ -483,17 +483,34 @@ def _parse_evidence(text: str) -> dict:
 
 
 def _validate_relation_comparison(out: object) -> dict:
-    """Schema D from the injected relation_comparator (a dict, not JSON text)."""
+    """Schema D from the injected relation_comparator (a dict, not JSON text).
+
+    The comparator MAY additionally report ``prompt_sha256``: the digest of the
+    schema-D prompt it built internally. This module cannot hash that text --
+    the prompt lives inside the injected callable -- so the digest can only come
+    from the comparator. It must be a real 64-hex sha256; a version string is
+    not a digest and is refused here rather than stored under a ``_sha256`` name.
+    """
     if not isinstance(out, dict):
         raise ValueError("relation_comparator must return a dict")
-    if frozenset(out) != _SCHEMA_D_KEYS:
+    keys = frozenset(out)
+    allowed = _SCHEMA_D_KEYS | {"prompt_sha256"}
+    if not (keys == _SCHEMA_D_KEYS or keys == allowed):
         raise ValueError(
             "schema D keys mismatch: "
-            f"missing={sorted(_SCHEMA_D_KEYS - frozenset(out))} "
-            f"extra={sorted(frozenset(out) - _SCHEMA_D_KEYS)}"
+            f"missing={sorted(_SCHEMA_D_KEYS - keys)} "
+            f"extra={sorted(keys - allowed)}"
         )
     result = {k: _require_enum(out[k], _REL_COMPONENT, f"relation.{k}") for k in _RELATION_TUPLE_KEYS}
     result["rationale"] = _clean_rationale(out["rationale"])
+    if "prompt_sha256" in out:
+        digest = out["prompt_sha256"]
+        if (not isinstance(digest, str) or len(digest) != 64
+                or any(c not in "0123456789abcdef" for c in digest)):
+            raise ValueError(
+                "relation prompt_sha256 must be a 64-hex sha256 digest, got "
+                f"{digest!r}; a prompt VERSION is not a prompt digest")
+        result["prompt_sha256"] = digest
     return result
 
 
@@ -912,6 +929,7 @@ class EntityAssessorRun:
             "proposed_corrected_label": None,
             "proposed_corrected_id": None,
             "prompt_sha256": {},
+            "prompt_version": {},
             "raw_responses": {},
         }
 
@@ -1050,7 +1068,14 @@ class EntityAssessorRun:
             self.relation_comparator(
                 claimed_tuple["relation"], evidence["relation"], call_llm=self.call_llm))
         tr["relation_component_result"] = comparison_d
-        tr["prompt_sha256"]["relation"] = self.policy.relation_prompt_version
+        # A VERSION is not a DIGEST. This slot used to hold
+        # `relation_prompt_version`, so an auditor reading `prompt_sha256` got a
+        # 64-hex digest for four schemas and the string "f7_relation_v1" for the
+        # fifth -- a false provenance record that cannot verify anything. The
+        # version now has its own field, and the digest slot holds the real
+        # digest when the injected comparator reports one, else None.
+        tr["prompt_version"]["relation"] = self.policy.relation_prompt_version
+        tr["prompt_sha256"]["relation"] = comparison_d.get("prompt_sha256")
         tr["raw_responses"]["relation"] = comparison_d
         if not all(comparison_d[k] == "match" for k in _RELATION_TUPLE_KEYS):
             return finish("UNJUDGEABLE", R_RELATION_MISMATCH)

@@ -73,6 +73,7 @@ import time
 from typing import Callable, Iterable, Optional
 
 from . import judgment_band as jb
+from . import preband_contract as pc
 from .judgment_engine import (
     DiscriminatorContractError,
     ProvenanceAssessment,
@@ -101,7 +102,14 @@ from .f3_provenance import (
     make_provenance_assessor,
 )
 from .f5_supersession import F5Policy, decide_f5
-from .f7_entity import F7Policy, make_entity_assessor
+from .f7_entity import (
+    F7Policy,
+    F7_ATTRIBUTION_PROMPT,
+    F7_EVIDENCE_PROMPT,
+    F7_TUPLES_PROMPT,
+    F7_VERIFIER_PROMPT,
+    make_entity_assessor,
+)
 # The opt-in full-text coverage path (DEC-030/032). Both live OUTSIDE the frozen
 # substrate for the same reason coverage_aggregate does: band_prompts.py cannot be
 # edited without drifting its pinned blob OID.
@@ -109,6 +117,7 @@ from .coverage_aggregate import no_usable_fulltext_dict
 from .coverage_prompts_v3 import (
     COVERAGE_PROMPT_VERSION_V3,
     RESPONSE_PARSER_VERSION as RESPONSE_PARSER_VERSION_V3)
+from .parser_versions import CLAIM_PARSER_VERSION, COVERAGE_PARSER_VERSION
 
 #: What the manifest and every full-text-scoped record call the evidence scope.
 #: Matches judgment_band's BAND_MODE_FULLTEXT marker so one run's two layers agree.
@@ -158,6 +167,10 @@ def _sha256_file(path: str) -> str:
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _IS_HEX(s: str) -> bool:
+    return all(c in "0123456789abcdef" for c in s)
 
 
 # --------------------------------------------------------------------------
@@ -287,26 +300,18 @@ def _recover_chain(out_dir: str, manifest_path: str, pred_path: str,
     return prev, len(side_lines), genesis
 
 
-def _load_disposition(preband_disposition) -> "dict[str, object] | None":
-    """Return a citation_id -> label map, or None when no disposition is supplied.
+def _load_disposition(preband_disposition) -> "pc.Disposition | None":
+    """Load and VALIDATE the disposition; ``None`` when none was supplied.
 
-    Accepts a dict (used verbatim) or a path to a JSONL whose rows carry
-    ``citation_id`` and ``label`` (e.g. run.py's log / prediction records)."""
-    if preband_disposition is None:
-        return None
-    if isinstance(preband_disposition, dict):
-        return dict(preband_disposition)
-    out: dict[str, object] = {}
-    with open(preband_disposition, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            rec = json.loads(line)
-            cid = rec.get("citation_id")
-            if cid:
-                out[cid] = rec.get("label")
-    return out
+    Delegates to ``preband_contract``. This used to be a permissive reader that
+    silently skipped falsy ids, accepted any label, accepted any id shape, and
+    resolved duplicates last-write-wins -- so an ``F2`` row followed by a
+    ``cleared`` row for one citation_id admitted a known wrong-paper into the
+    judgment band. A path is now loaded as a canonical, schema-versioned,
+    digest-bound artifact; a dict remains a developer/test injection and is
+    stamped non-canonical in the manifest.
+    """
+    return pc.load_disposition(preband_disposition)
 
 
 def _preband(citation_id: str, disp: "dict | None") -> "tuple[bool, str, object]":
@@ -622,6 +627,134 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
     return rec
 
 
+def _module_hashes(fulltext_path: bool, f5_seams, f7_seams) -> dict:
+    """Hash every module that can govern a number on THIS run's wiring.
+
+    Captured before execution, so the digests describe the bytes that ran. The
+    conditional blocks exist because the default abstract path's manifest bytes
+    are an opt-in guarantee: an unconditional key changes every default run.
+    """
+    names = ["cre.f1.judgment_band", "cre.f1.judgment_engine",
+             "cre.f1.band_prompts", "cre.f1.parser", "cre.f1.schema",
+             "cre.f1.f4_strength", "cre.f1.f3_provenance",
+             "cre.f1.judgment_run", "cre.f1.preband_contract"]
+    if fulltext_path:
+        names += ["cre.f1.coverage_prompts_v3", "cre.f1.coverage_aggregate",
+                  "cre.f1.fulltext_reader", "cre.f1.sentence_spans"]
+    if f5_seams is not None:
+        names += ["cre.f1.f5_supersession", "cre.f1.f5_contradiction_prompt",
+                  "cre.f1.f5_seams", "cre.f1.f5_discovery_queue"]
+    # F7 can OWN the published label (it rides highest in the engine ordering),
+    # so an F7 run that does not hash f7_entity records the governing module of
+    # its headline number nowhere. Same defect class the f5 block fixed.
+    if f7_seams is not None:
+        names.append("cre.f1.f7_entity")
+    out: dict = {}
+    for name in names:
+        try:
+            mod = __import__(name, fromlist=["x"])
+        except ImportError:
+            continue
+        f = getattr(mod, "__file__", None)
+        if f and os.path.exists(f):
+            out[os.path.basename(f)] = _sha256_file(f)
+    return out
+
+
+def _f3_manifest_block(f3_policy, discriminator_wired: bool) -> dict:
+    """The ``"f3"`` block: the EFFECTIVE policy, not the default it may not be.
+
+    F3's hop limit, trace sources and unresolved state govern whether a claim
+    can reach an F3 finding at all. They were recorded nowhere, so an F3 number
+    could move with no change visible in any artifact.
+    """
+    policy = f3_policy if f3_policy is not None else DEFAULT_F3_POLICY
+    return {
+        "wired": discriminator_wired,
+        "origin_sensitive_prompt_version": policy.origin_sensitive_prompt_version,
+        "v3_select_prompt_version": policy.v3_select_prompt_version,
+        "v4_prompt_version": policy.v4_prompt_version,
+        "trace_sources": list(policy.trace_sources),
+        "max_hop_count": policy.max_hop_count,
+        "unresolved_state": policy.unresolved_state,
+        "policy_sha256": _canonical_sha256({
+            "origin_sensitive_prompt_version": policy.origin_sensitive_prompt_version,
+            "v3_select_prompt_version": policy.v3_select_prompt_version,
+            "v4_prompt_version": policy.v4_prompt_version,
+            "trace_sources": list(policy.trace_sources),
+            "max_hop_count": policy.max_hop_count,
+            "unresolved_state": policy.unresolved_state,
+        }),
+    }
+
+
+def _f7_manifest_block(f7_policy, f7_records) -> dict:
+    """The ``"f7"`` block: policy, prompt digests, model ids, tallies.
+
+    F7 rides HIGHEST in the engine ordering, so it can determine the published
+    label outright -- and it previously emitted no module hash, no prompt hash,
+    no policy block and no model ids. This is the counterpart to ``"f4"`` and
+    ``"f5"``.
+
+    ``relation_prompt_sha256`` is the schema-D digest reported by the injected
+    relation comparator. The relation prompt is BUILT INSIDE that comparator, so
+    this module cannot hash its text; when the comparator does not report one the
+    value is ``None`` and ``relation_prompt_digest_present`` is False. It is never
+    filled with the version string -- a version is not a digest, and storing one
+    under a ``_sha256`` name is a false provenance record.
+    """
+    policy = f7_policy if f7_policy is not None else F7Policy()
+    records = list(f7_records or [])
+    # The per-tuple traces live at record["tuple_records"]; the relation digest
+    # is stamped there, not on the outer §9 packet.
+    traces = [tr for r in records for tr in (r.get("tuple_records") or [])]
+    # Only traces that ACTUALLY ran a relation comparison can carry a relation
+    # digest; one that short-circuited earlier never consulted that prompt.
+    attempted = [tr for tr in traces
+                 if tr.get("relation_component_result") is not None]
+    real = [tr.get("prompt_sha256", {}).get("relation") for tr in attempted]
+    real = [d for d in real
+            if isinstance(d, str) and len(d) == 64 and _IS_HEX(d)]
+    digest_present = bool(attempted) and len(real) == len(attempted)
+    outcomes: dict = {}
+    for r in records:
+        k = str(r.get("derived"))
+        outcomes[k] = outcomes.get(k, 0) + 1
+    return {
+        "wired": True,
+        # Reportable requires records AND that every relation comparison which
+        # actually ran reported its prompt digest. A run whose relation prompt
+        # cannot be identified cannot back a published F7 number.
+        "reportable": bool(records) and digest_present,
+        "attribution_prompt_version": policy.attribution_prompt_version,
+        "tuples_prompt_version": policy.tuples_prompt_version,
+        "evidence_prompt_version": policy.evidence_prompt_version,
+        "relation_prompt_version": policy.relation_prompt_version,
+        "verifier_prompt_version": policy.verifier_prompt_version,
+        "generator_model_id": policy.generator_model_id,
+        "verifier_model_id": policy.verifier_model_id,
+        "cross_ontology_lock": policy.cross_ontology_lock,
+        "authorities_sha256": _sha256_text(policy.authorities_json),
+        "prompt_sha256": {
+            "attribution": _sha256_text(F7_ATTRIBUTION_PROMPT),
+            "tuples": _sha256_text(F7_TUPLES_PROMPT),
+            "evidence": _sha256_text(F7_EVIDENCE_PROMPT),
+            "verifier": _sha256_text(F7_VERIFIER_PROMPT),
+        },
+        "relation_prompt_digest_present": digest_present,
+        "relation_prompt_sha256": sorted(set(real)) or None,
+        "relation_comparisons_attempted": len(attempted),
+        "records_emitted": len(records),
+        "outcome_counts": dict(sorted(outcomes.items())),
+        "note": (
+            "Schema D (relation) is built inside the INJECTED relation_comparator, "
+            "so its prompt text is not visible here. Its digest is reported by the "
+            "comparator; when absent it stays None and this run is not F7-reportable. "
+            "The version string is recorded separately and never stands in for a digest."
+        ),
+    }
+
+
 def _f5_manifest_block(f5_policy, f5_records) -> dict:
     """The ``"f5"`` manifest block: policy, retrieval protocol, tallies.
 
@@ -672,6 +805,9 @@ def run_natural_judgment(
     model: str = "", email: str = DEFAULT_EMAIL, api_key: str = "",
     max_docs: "int | None" = None, session=None,
     chain_genesis: str = "",
+    assistant_prefill: str = "", stop_sequences: tuple = (), temperature=None,
+    code_commit: str = "", corpus_manifest_path: str = "",
+    require_full_coverage: bool = False,
 ) -> dict:
     """Run the F3-F7 band end-to-end over a dir of natural PMC-OA citing papers.
 
@@ -694,6 +830,30 @@ def run_natural_judgment(
 
     ``chain_genesis``: the frozen chain tip of a prior COMPLETE segment, when this
     run extends it as a new segment (fresh out_dir). Empty for a first segment.
+
+    ADAPTER IDENTITY (``model`` / ``assistant_prefill`` / ``stop_sequences`` /
+    ``temperature``). Every number this layer emits is conditional on the adapter
+    that produced it, and this module makes no model call itself -- every one goes
+    through an injected callable -- so it cannot observe them and must be told.
+    They are RECORDED, never used. ``temperature`` takes ``None`` for absent
+    rather than ``""``: DEC-046B pins ``temperature=0``, and 0 is both a real value
+    and a falsy one, so a truthiness guard would drop exactly the pinned value it
+    exists to record. An unsupplied value is recorded as ABSENT, never guessed.
+    ``run_band`` gained these on 2026-08-12; this entry point -- the one that
+    produces every published F3-F7 number -- did not, which is the gap this
+    parameter set closes.
+
+    JOIN CONTRACT (``preband_disposition`` / ``require_full_coverage``). The
+    corpus id domain is collected by a PREFLIGHT parse before any output file
+    exists, the disposition is validated against it, and a zero-overlap or
+    no-disposition join ABORTS instead of completing as a clean empty run. Set
+    ``require_full_coverage`` to additionally abort when any corpus citation_id
+    is absent from the disposition. An empty corpus, or one whose every document
+    fails to parse, aborts for the same reason.
+
+    ``code_commit`` / ``corpus_manifest_path``: bound into the manifest so a
+    published number can be tied to the Band-2 tree and the frozen corpus bytes
+    it was computed over.
     """
     # --- F4 configuration, validated up front (item 3): outside the per-pair
     # try/except, before any output file exists.
@@ -724,22 +884,47 @@ def run_natural_judgment(
             "abstract-scoped prompt, or fetch a body nothing reads")
     fulltext_path = fetch_fulltext is not None
 
-    os.makedirs(out_dir, exist_ok=True)
     pred_path = os.path.join(out_dir, "judgment_predictions.jsonl")
     queue_path = os.path.join(out_dir, "judgment_band_annotation_queue.jsonl")
     manifest_path = os.path.join(out_dir, "judgment_run_manifest.json")
     checkpoint_path = os.path.join(out_dir, "judgment_run_checkpoint.jsonl")
     sidecar_path = os.path.join(out_dir, "judgment_run_record_hashes.jsonl")
 
+    # --- THE JOIN, validated before any output file exists --------------
+    # A wholesale id mismatch used to complete as status="complete" with
+    # accounting_ok=true and an empty annotation queue -- indistinguishable from
+    # a successful run. So the disposition is validated, the corpus id domain is
+    # collected by a preflight parse, and the join is enforced UP FRONT, in the
+    # same place and for the same reason as the F4/F5/full-text config gates.
+    disp_obj = _load_disposition(preband_disposition)
+    disp = disp_obj.mapping if disp_obj is not None else None
+
+    files = sorted(fn for fn in os.listdir(xml_dir)
+                   if fn.endswith((".xml", ".nxml")))
+    # Resume-safe: only the docs this segment will actually process define the
+    # expected id domain, so accounting stays honest across a resumed run.
+    done = jb._load_checkpoint(checkpoint_path)
+    pending = [fn for fn in files if jb._pmcid_from_filename(fn) not in done]
+    to_process = pending[:max_docs] if max_docs is not None else pending
+    expected_ids, expected_per_doc, preflight_parse_failures = (
+        pc.collect_expected_ids(xml_dir, to_process, parse_pmc_xml,
+                                jb._pmcid_from_filename))
+    join_acc = pc.join_accounting(disp_obj, expected_ids)
+    pc.enforce_join(join_acc, disp=disp_obj,
+                    require_full_coverage=require_full_coverage)
+
+    # Load-bearing module hashes, captured BEFORE execution so they describe the
+    # bytes that actually ran. Read after the loop, they could describe a module
+    # edited mid-run -- provenance for code that never executed.
+    module_hashes = _module_hashes(fulltext_path, f5_seams, f7_seams)
+
+    os.makedirs(out_dir, exist_ok=True)
+
     # Resume gate: exact chain replay against sidecar + manifest anchor. Raises
     # on complete/tamper/torn state; a fresh dir starts at the genesis link.
     prev_link, chain_count, genesis = _recover_chain(
         out_dir, manifest_path, pred_path, sidecar_path, chain_genesis)
 
-    # Drive-first, resume-safe: skip docs already recorded in the checkpoint and
-    # append so a dropped runtime costs one doc, never the whole (paid) run.
-    done = jb._load_checkpoint(checkpoint_path)
-    disp = _load_disposition(preband_disposition)
     counts: dict[str, int] = {}          # one entry per emitted record; sums to refs_seen
     preband_by_label: dict[str, int] = {}  # auxiliary funnel; NOT summed into totals
     f4_counts = {"eligible_claims": 0, "generator_calls": 0, "verifier_calls": 0}
@@ -766,10 +951,10 @@ def run_natural_judgment(
     # sidecar; it is only ever advanced over chain-validated records.
     _write_json_atomic(manifest_path, progress_manifest())
 
-    files = sorted(fn for fn in os.listdir(xml_dir)
-                   if fn.endswith((".xml", ".nxml")))
     refs_seen = 0
     docs_processed = 0
+    scoreable_records = 0
+    queue_rows = 0
     pubtype_cache: dict = {}
 
     pred_fh = open(pred_path, "a", encoding="utf-8")
@@ -781,10 +966,15 @@ def run_natural_judgment(
     # tallies. Collected at emit so it follows the same crash invariant as the
     # predictions themselves.
     f5_records_all: list = []
+    # F7's audit records, collected at emit for the same reason: F7 can own the
+    # published label, so its provenance block must be built from what actually
+    # ran, not from the policy alone.
+    f7_records_all: list = []
 
     def emit(rec: dict) -> None:
         nonlocal prev_link, chain_count
         f5_records_all.extend(rec.get("f5_records") or [])
+        f7_records_all.extend(rec.get("f7_records") or [])
         # Write order pins the crash invariant: predictions >= sidecar >= manifest.
         pred_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         pred_fh.flush()
@@ -806,6 +996,9 @@ def run_natural_judgment(
             elif sr.get("reason") == "no_usable_abstract":
                 f4_counts["eligible_claims"] += 1
         if rec["disposition"] in _SCOREABLE:
+            nonlocal scoreable_records, queue_rows
+            scoreable_records += 1
+            queue_rows += 1
             payload = jb.annotation_payload({
                 "item_key": rec["citation_id"],
                 "citing_sentence": rec["citing_sentence"],
@@ -913,20 +1106,12 @@ def run_natural_judgment(
         ckpt_fh.close()
         side_fh.close()
 
-    # Load-bearing module hashes, read at run time (the precision claim is
-    # conditional on these + the prompt versions/templates + the models). This
-    # pins the coverage substrate AND the F4/F3 discriminators and orchestrator.
-    module_hashes = {}
-    for mod in (jb, __import__("cre.f1.judgment_engine", fromlist=["x"]),
-                __import__("cre.f1.band_prompts", fromlist=["x"]),
-                __import__("cre.f1.parser", fromlist=["x"]),
-                __import__("cre.f1.schema", fromlist=["x"]),
-                __import__("cre.f1.f4_strength", fromlist=["x"]),
-                __import__("cre.f1.f3_provenance", fromlist=["x"]),
-                __import__("cre.f1.judgment_run", fromlist=["x"])):
-        f = getattr(mod, "__file__", None)
-        if f and os.path.exists(f):
-            module_hashes[os.path.basename(f)] = _sha256_file(f)
+    # Module hashes were captured BEFORE execution (see `_module_hashes` at the
+    # top of this function): read here, they could describe a module edited
+    # mid-run, i.e. provenance for bytes that never executed. Re-read now and
+    # compare, so a mid-run edit is DETECTED rather than silently recorded.
+    module_hashes_after = _module_hashes(fulltext_path, f5_seams, f7_seams)
+    module_hashes_stable = module_hashes_after == module_hashes
 
     prompt_hashes = {
         "F4_STRENGTH_PROMPT": _sha256_text(F4_STRENGTH_PROMPT),
@@ -943,13 +1128,6 @@ def run_natural_judgment(
     # coverage number is conditional on the reader, the v3 prompt and the span
     # resolver, so with the path wired all three are recorded.
     if fulltext_path:
-        for mod in (__import__("cre.f1.coverage_prompts_v3", fromlist=["x"]),
-                    __import__("cre.f1.coverage_aggregate", fromlist=["x"]),
-                    __import__("cre.f1.fulltext_reader", fromlist=["x"]),
-                    __import__("cre.f1.sentence_spans", fromlist=["x"])):
-            f = getattr(mod, "__file__", None)
-            if f and os.path.exists(f):
-                module_hashes[os.path.basename(f)] = _sha256_file(f)
         from .coverage_prompts_v3 import COVERAGE_PROMPT_V3
         prompt_hashes["COVERAGE_PROMPT_V3"] = _sha256_text(COVERAGE_PROMPT_V3)
 
@@ -960,15 +1138,6 @@ def run_natural_judgment(
     # manifest bytes are an opt-in guarantee: an unconditional key, even a
     # zero-valued one, changes every default run.
     if f5_seams is not None:
-        for name in ("cre.f1.f5_supersession", "cre.f1.f5_contradiction_prompt",
-                     "cre.f1.f5_seams", "cre.f1.f5_discovery_queue"):
-            try:
-                mod = __import__(name, fromlist=["x"])
-            except ImportError:
-                continue
-            f = getattr(mod, "__file__", None)
-            if f and os.path.exists(f):
-                module_hashes[os.path.basename(f)] = _sha256_file(f)
         from .f5_contradiction_prompt import F5_CONTRADICTION_PROMPT
         prompt_hashes["F5_CONTRADICTION_PROMPT"] = _sha256_text(F5_CONTRADICTION_PROMPT)
 
@@ -1009,7 +1178,19 @@ def run_natural_judgment(
         ),
         "trust_boundary": _TRUST_BOUNDARY,
         "model": model,
+        # PARSER CONTRACTS, both axes, on EVERY path. DEC-022 makes prompt version
+        # and parser version independent: relaxing a strict loader is a parser bump
+        # with no prompt change. The abstract path recorded neither, so a contract
+        # move was invisible in the artifact.
         "claim_extract_prompt_version": CLAIM_EXTRACT_PROMPT_VERSION,
+        "claim_extract_parser_version": CLAIM_PARSER_VERSION,
+        "coverage_parser_version": (RESPONSE_PARSER_VERSION_V3 if fulltext_path
+                                    else COVERAGE_PARSER_VERSION),
+        # The scope the run ACTUALLY judged at, on every path. Recorded
+        # unconditionally because "absent" was indistinguishable from "unknown"
+        # to any reader who did not already know the opt-in convention.
+        "evidence_scope_effective": (EVIDENCE_SCOPE_FULLTEXT if fulltext_path
+                                     else EVIDENCE_SCOPE_ABSTRACT),
         # The scope the run ACTUALLY judged at. Defaults to the frozen abstract
         # version, so a default run stamps exactly what it stamped before.
         "coverage_prompt_version": (COVERAGE_PROMPT_VERSION_V3 if fulltext_path
@@ -1031,7 +1212,48 @@ def run_natural_judgment(
                 "and never falls back to abstract scope."
             )} if fulltext_path else {}),
         "module_sha256": module_hashes,
+        "module_sha256_stable": module_hashes_stable,
+        "module_sha256_capture": "before_execution",
+        **({"module_sha256_after": module_hashes_after}
+           if not module_hashes_stable else {}),
         "prompt_sha256": prompt_hashes,
+        # --- POPULATION PROVENANCE ------------------------------------------
+        # The disposition defines which citations were judged AT ALL, so it
+        # defines the denominator of every rate downstream. Recording only
+        # "supplied: true" and a collapsed size made a result impossible to tie
+        # back to the population it was computed over.
+        "preband": {
+            **(disp_obj.provenance() if disp_obj is not None
+               else {"source": None, "canonical": False}),
+            "join": join_acc,
+            "require_full_coverage": require_full_coverage,
+            "expected_docs": len(expected_per_doc),
+            "expected_refs_per_doc": expected_per_doc,
+            "preflight_parse_failures": preflight_parse_failures,
+        },
+        "corpus": {
+            "xml_dir": xml_dir,
+            "documents_in_scope": len(to_process),
+            **({"manifest_path": corpus_manifest_path,
+                "manifest_sha256": _sha256_file(corpus_manifest_path)}
+               if corpus_manifest_path else {}),
+        },
+        "code_commit": code_commit,
+        # --- ADAPTER IDENTITY, verbatim -------------------------------------
+        # Absent when unsupplied: a defaulted value would be a fabricated
+        # provenance record. `temperature` uses `is not None`, NOT truthiness --
+        # DEC-046B pins temperature=0 and 0 is falsy, so a truthiness guard would
+        # drop exactly the pinned value this exists to record.
+        "adapter": {
+            **({"model": model} if model else {}),
+            **({"assistant_prefill": assistant_prefill}
+               if assistant_prefill else {}),
+            **({"stop_sequences": list(stop_sequences)} if stop_sequences else {}),
+            **({"temperature": temperature} if temperature is not None else {}),
+        },
+        "f3": _f3_manifest_block(f3_policy, discriminator_call_llm is not None),
+        **({"f7": _f7_manifest_block(f7_policy, f7_records_all)}
+           if f7_seams is not None else {}),
         "f4": {
             "mode": eff_f4_policy.mode,
             "reportable": f4_reportable,
@@ -1053,6 +1275,9 @@ def run_natural_judgment(
             "email": email, "api_key_present": bool(api_key),
             "preband_disposition_supplied": disp is not None,
             "preband_disposition_size": len(disp) if disp is not None else 0,
+            "preband_disposition_arg": (
+                preband_disposition if isinstance(preband_disposition, str)
+                else f"<{type(preband_disposition).__name__}>"),
             "pubtypes_lookup_wired": pubtypes_lookup is not None,
             "fetch_reflist_wired": fetch_reflist is not None,
             "f4_verifier_wired": f4_verifier_call_llm is not None,
@@ -1063,8 +1288,13 @@ def run_natural_judgment(
         "docs_processed": docs_processed,
         "refs_seen": refs_seen,
         "total_records": total_records,
-        # Every pair is accounted for exactly once.
+        # Every pair is accounted for exactly once. NOTE this is an internal
+        # bookkeeping identity ONLY: it is true of a run that excluded every
+        # pair, which is why it is no longer sufficient on its own and the
+        # preband.join accounting above carries the population check.
         "accounting_ok": total_records == refs_seen,
+        "scoreable_records": scoreable_records,
+        "annotation_queue_rows": queue_rows,
         "predictions_path": pred_path,
         "annotation_queue_path": queue_path,
         "checkpoint_path": checkpoint_path,
@@ -1085,5 +1315,9 @@ def run_natural_judgment(
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         manifest["f5_discovery_queue_path"] = f5_queue_path
         manifest["f5"]["queued_rows"] = len(f5_queue)
+    # The residual join failure the up-front domain check cannot see: every
+    # judged pair fell through to 'disposition missing'. The manifest is written
+    # FIRST so the evidence of the failed run survives the abort.
     _write_json_atomic(manifest_path, manifest)
+    pc.enforce_join_reached(counts, total_records, DISP_EXCLUDED_PREBAND_MISSING)
     return manifest
