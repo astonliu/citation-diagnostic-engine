@@ -783,42 +783,46 @@ def test_unwired_generator_never_reportable(tmp_path, monkeypatch):
     assert manifest["f4"]["generator_calls"] == 0
 
 
-def test_formal_without_verifier_aborts_before_any_output(tmp_path, monkeypatch):
+def test_formal_without_verifier_now_runs(tmp_path, monkeypatch):
+    """CONTRACT CHANGE (DEC-072). Formal mode no longer requires a distinct
+    verifier callable, because DEC-063 fixes the project on ONE model and the
+    old clause made F4 permanently unreportable."""
     (tmp_path / "PMC1.xml").write_text("<x/>")
     monkeypatch.setattr(jr, "parse_pmc_xml",
                         lambda path, source_pmcid=None: [make_ref("c")])
     out_dir = tmp_path / "out"
-    with pytest.raises(ValueError):
-        jr.run_natural_judgment(
-            str(tmp_path), str(out_dir),
-            extractor=extractor_of("Drug X reduces outcome Y"),
-            coverage_judge=judge_established(True), fetch_abstract=abstract_ok,
-            preband_disposition={"c": "cleared"},
-            discriminator_call_llm=disc_llm(f4=f4_json()),
-            f4_policy=F4Policy(mode="formal", generator_model_id="g",
-                               verifier_model_id="v"),
-            model="m")
-    # Aborted the WHOLE run before any output file (not per-pair quarantine).
-    assert not out_dir.exists()
+    manifest = jr.run_natural_judgment(
+        str(tmp_path), str(out_dir),
+        extractor=extractor_of("Drug X reduces outcome Y"),
+        coverage_judge=judge_established(True), fetch_abstract=abstract_ok,
+        preband_disposition={"c": "cleared"},
+        discriminator_call_llm=disc_llm(f4=f4_json()),
+        f4_policy=F4Policy(mode="formal", generator_model_id="claude-opus-5"),
+        model="claude-opus-5")
+    assert out_dir.exists()
+    assert manifest["f4"]["mode"] == "formal"
+    assert manifest["f4"]["self_verification"]["self_verified"] is True
 
 
-def test_formal_with_identical_verifier_callable_aborts(tmp_path, monkeypatch):
+def test_formal_with_identical_verifier_callable_now_runs(tmp_path, monkeypatch):
+    """DEC-072: one callable serves both roles. The circularity is recorded in
+    f4.self_verification, not prevented."""
     (tmp_path / "PMC1.xml").write_text("<x/>")
     monkeypatch.setattr(jr, "parse_pmc_xml",
                         lambda path, source_pmcid=None: [make_ref("c")])
     out_dir = tmp_path / "out"
     call = disc_llm(f4=f4_json())
-    with pytest.raises(ValueError):
-        jr.run_natural_judgment(
-            str(tmp_path), str(out_dir),
-            extractor=extractor_of("Drug X reduces outcome Y"),
-            coverage_judge=judge_established(True), fetch_abstract=abstract_ok,
-            preband_disposition={"c": "cleared"},
-            discriminator_call_llm=call,
-            f4_verifier_call_llm=call,             # same callable -> formal defect
-            f4_verifier_model_id="ver-model",
-            model="m")
-    assert not out_dir.exists()
+    manifest = jr.run_natural_judgment(
+        str(tmp_path), str(out_dir),
+        extractor=extractor_of("Drug X reduces outcome Y"),
+        coverage_judge=judge_established(True), fetch_abstract=abstract_ok,
+        preband_disposition={"c": "cleared"},
+        discriminator_call_llm=call,
+        f4_verifier_call_llm=call,             # DEC-072: one model, both roles
+        f4_verifier_model_id="claude-opus-5",
+        model="claude-opus-5")
+    assert out_dir.exists()
+    assert manifest["f4"]["self_verification"]["self_verified"] is True
 
 
 def test_module_imports_no_network_client():

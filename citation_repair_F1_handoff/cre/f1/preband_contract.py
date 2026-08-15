@@ -397,6 +397,42 @@ def corpus_inventory(manifest: dict) -> dict:
     return out
 
 
+def build_corpus_manifest(xml_dir: str, out_path: str, *,
+                          schema: str = "frozen_corpus_v1") -> dict:
+    """Emit ``{"documents": {filename: sha256}}`` for every XML in ``xml_dir``.
+
+    ``corpus_inventory`` and ``verify_corpus_contents`` require this file and
+    match it against the directory EXACTLY, but nothing in the repo wrote it --
+    so the frozen-corpus binding had a consumer and no producer.
+
+    DETERMINISTIC BY CONSTRUCTION: filenames sorted, ``sort_keys=True``, fixed
+    separators, trailing newline. The same directory must always produce
+    byte-identical output, because the disposition binds this file by its own
+    sha256 (``preband_disposition.write_disposition``); non-deterministic
+    ordering would move that digest between runs and break the binding for no
+    real reason.
+    """
+    names = sorted(fn for fn in os.listdir(xml_dir)
+                   if fn.endswith((".xml", ".nxml")))
+    if not names:
+        raise PrebandContractError(
+            f"refusing to write an EMPTY corpus manifest: {xml_dir} contains no "
+            ".xml/.nxml documents")
+    manifest = {
+        "schema": schema,
+        "document_count": len(names),
+        "documents": {fn: _sha256_file(os.path.join(xml_dir, fn))
+                      for fn in names},
+    }
+    tmp = out_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2, sort_keys=True,
+                  separators=(",", ": "))
+        f.write("\n")
+    os.replace(tmp, out_path)
+    return manifest
+
+
 def verify_corpus_contents(xml_dir: str, inventory: dict) -> dict:
     """Verify the corpus dir matches the inventory EXACTLY. Raise on any drift.
 

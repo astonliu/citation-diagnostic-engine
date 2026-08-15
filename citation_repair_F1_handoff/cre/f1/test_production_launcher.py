@@ -86,16 +86,27 @@ def test_family_detection():
 
 # --------------------------------------------- clean HEAD and runtime bytes
 
+def _git_stub(toplevel, head, *, status=""):
+    """A _git double that also answers --show-toplevel (Change 6)."""
+    def fake(repo, *a):
+        if a[0] == "status":
+            return status
+        if len(a) > 1 and a[1] == "--show-toplevel":
+            return str(toplevel)
+        return head
+    return fake
+
+
 def test_a_dirty_tree_refuses(tmp_path, monkeypatch):
-    monkeypatch.setattr(pl, "_git", lambda repo, *a: (
-        " M cre/f1/judgment_run.py" if a[0] == "status" else "a" * 40))
+    monkeypatch.setattr(pl, "_git", _git_stub(tmp_path, "a" * 40,
+                                              status=" M cre/f1/judgment_run.py"))
     with pytest.raises(LaunchRefused, match="DIRTY"):
         pl.verify_tree(str(tmp_path), str(tmp_path))
 
 
 def test_untracked_files_do_not_count_as_dirty(tmp_path, monkeypatch):
-    monkeypatch.setattr(pl, "_git", lambda repo, *a: (
-        "?? scratch.md" if a[0] == "status" else "b" * 40))
+    monkeypatch.setattr(pl, "_git", _git_stub(tmp_path, "b" * 40,
+                                              status="?? scratch.md"))
     out = pl.verify_tree(str(tmp_path), str(tmp_path))
     assert out["code_commit"] == "b" * 40
 
@@ -106,8 +117,7 @@ def test_runtime_bytes_differing_from_the_commit_refuse(tmp_path, monkeypatch):
     pkg.mkdir()
     (pkg / "judgment_run.py").write_text("edited after checkout",
                                          encoding="utf-8")
-    monkeypatch.setattr(pl, "_git", lambda repo, *a: (
-        "" if a[0] == "status" else "c" * 40))
+    monkeypatch.setattr(pl, "_git", _git_stub(tmp_path, "c" * 40))
 
     class R:
         stdout = b"the committed bytes"
@@ -118,8 +128,7 @@ def test_runtime_bytes_differing_from_the_commit_refuse(tmp_path, monkeypatch):
 
 def test_the_head_is_read_not_supplied(tmp_path, monkeypatch):
     """The caller never gets to assert the commit."""
-    monkeypatch.setattr(pl, "_git", lambda repo, *a: (
-        "" if a[0] == "status" else "d" * 40))
+    monkeypatch.setattr(pl, "_git", _git_stub(tmp_path, "d" * 40))
     assert pl.verify_tree(str(tmp_path), str(tmp_path))["code_commit"] == "d" * 40
 
 
@@ -412,3 +421,166 @@ def test_the_receipt_still_checks_the_model_on_the_unsupported_path():
 def test_an_empty_receipt_still_refuses_on_the_unsupported_path():
     with pytest.raises(LaunchRefused, match="ZERO calls"):
         pl.verify_receipt(Receipt([]), model="claude-opus-5", temperature=UNSUP)
+
+
+# =====================================================================
+# DEC-071: assistant_prefill governance
+# =====================================================================
+PUNSUP = pl.PREFILL_UNSUPPORTED
+
+
+def test_only_first_party_measurements_are_in_the_prefill_table():
+    assert pl.PREFILL_REJECTING_MODELS == frozenset({"claude-opus-5"})
+    assert pl.prefill_support("claude-opus-5") == PUNSUP
+    assert pl.prefill_support("claude-sonnet-4-5") == "supported"
+
+
+def test_a_prefill_on_a_rejecting_model_is_refused():
+    """The false provenance record: judgment_run writes assistant_prefill
+    verbatim into manifest["adapter"] and never transmits it, so on opus-5 a
+    non-empty string claims a prefill that could not have been sent."""
+    with pytest.raises(LaunchRefused, match="REJECTS assistant prefill"):
+        pl.verify_prefill_governance(model="claude-opus-5",
+                                     assistant_prefill="{")
+
+
+@pytest.mark.parametrize("value", ["", PUNSUP])
+def test_a_rejecting_model_records_unsupported(value):
+    g = pl.verify_prefill_governance(model="claude-opus-5",
+                                     assistant_prefill=value)
+    assert g["recorded_value"] == PUNSUP
+    assert g["sent_to_provider"] is False
+    assert g["path"] == "not_sent_unsupported"
+    assert g["governing_decision"] == "DEC-071"
+
+
+def test_a_supporting_model_cannot_opt_into_the_prefill_escape_hatch():
+    with pytest.raises(LaunchRefused, match="SUPPORTS assistant prefill"):
+        pl.verify_prefill_governance(model="claude-sonnet-4-5",
+                                     assistant_prefill=PUNSUP)
+
+
+def test_a_supporting_model_records_the_prefill_verbatim():
+    g = pl.verify_prefill_governance(model="claude-sonnet-4-5",
+                                     assistant_prefill="{")
+    assert g["recorded_value"] == "{"
+    assert g["sent_to_provider"] is True
+    assert g["path"] == "sent"
+
+
+def test_an_omitted_prefill_is_not_recorded_at_all():
+    """Third state: distinguishable from both the string and 'unsupported'."""
+    g = pl.verify_prefill_governance(model="claude-opus-5",
+                                     assistant_prefill=None)
+    assert g["recorded_value"] is None
+    assert g["path"] == "not_recorded"
+
+
+def test_a_non_string_prefill_is_refused():
+    with pytest.raises(LaunchRefused, match="must be a string"):
+        pl.verify_prefill_governance(model="claude-sonnet-4-5",
+                                     assistant_prefill=123)
+
+
+# =====================================================================
+# Change 4: the receipt is refused BEFORE the run
+# =====================================================================
+
+def test_a_receipt_without_calls_is_refused_up_front():
+    with pytest.raises(LaunchRefused, match="exposes no .calls"):
+        pl.assert_receipt_shape(object())
+
+
+def test_a_missing_receipt_is_refused_up_front():
+    with pytest.raises(LaunchRefused, match="no adapter_receipt"):
+        pl.assert_receipt_shape(None)
+
+
+def test_a_non_list_calls_is_refused_up_front():
+    class Bad:
+        calls = {"a": 1}
+    with pytest.raises(LaunchRefused, match="must be a list"):
+        pl.assert_receipt_shape(Bad())
+
+
+def test_an_empty_but_well_shaped_receipt_passes_the_early_gate():
+    """It cannot check call CONTENTS -- there are none yet -- and must not
+    pretend to. verify_receipt still catches the empty case after the run."""
+    pl.assert_receipt_shape(Receipt([]))
+
+
+def test_launch_refuses_a_malformed_receipt_before_the_run(monkeypatch):
+    """Ordering: the refusal must precede run_natural_judgment, not follow it."""
+    called = {"ran": False}
+    monkeypatch.setattr(pl, "run_natural_judgment",
+                        lambda *a, **k: called.__setitem__("ran", True))
+    with pytest.raises(LaunchRefused, match="exposes no .calls"):
+        pl.launch(**base(model="claude-opus-5",
+                         authorized_models=["claude-opus-5"],
+                         temperature=None, adapter_receipt=object()))
+    assert called["ran"] is False
+
+
+# =====================================================================
+# Change 6: the repo_dir footgun
+# =====================================================================
+
+def test_a_non_toplevel_repo_dir_names_its_own_cause(tmp_path, monkeypatch):
+    """Pointed at a subdirectory, every rel is unresolvable and all thirteen
+    modules read as mismatched -- an integrity failure that is really a
+    configuration error."""
+    def fake_git(repo, *a):
+        if a[0] == "status":
+            return ""
+        if a[0] == "rev-parse" and a[1] == "HEAD":
+            return "e" * 40
+        if a[0] == "rev-parse" and a[1] == "--show-toplevel":
+            return str(tmp_path)          # toplevel differs from repo_dir
+        return ""
+    sub = tmp_path / "citation_repair_F1_handoff"
+    sub.mkdir()
+    monkeypatch.setattr(pl, "_git", fake_git)
+    with pytest.raises(LaunchRefused, match="is not the git toplevel"):
+        pl.verify_tree(str(sub), str(sub))
+
+
+def test_unresolvable_paths_are_not_reported_as_an_integrity_failure(
+        tmp_path, monkeypatch):
+    pkg = tmp_path / "f1"
+    pkg.mkdir()
+    (pkg / "judgment_run.py").write_text("x", encoding="utf-8")
+
+    def fake_git(repo, *a):
+        if a[0] == "status":
+            return ""
+        if a[1] == "--show-toplevel":
+            return str(tmp_path)
+        return "f" * 40
+    monkeypatch.setattr(pl, "_git", fake_git)
+
+    class Empty:
+        stdout = b""                       # git show resolves to nothing
+    monkeypatch.setattr(pl.subprocess, "run", lambda *a, **k: Empty())
+    with pytest.raises(LaunchRefused, match="configuration error, NOT an integrity"):
+        pl.verify_tree(str(tmp_path), str(pkg))
+
+
+def test_a_genuine_edit_still_refuses(tmp_path, monkeypatch):
+    """The integrity check itself is unchanged."""
+    pkg = tmp_path / "f1"
+    pkg.mkdir()
+    (pkg / "judgment_run.py").write_text("edited after checkout", encoding="utf-8")
+
+    def fake_git(repo, *a):
+        if a[0] == "status":
+            return ""
+        if a[1] == "--show-toplevel":
+            return str(tmp_path)
+        return "a" * 40
+    monkeypatch.setattr(pl, "_git", fake_git)
+
+    class R:
+        stdout = b"the committed bytes"
+    monkeypatch.setattr(pl.subprocess, "run", lambda *a, **k: R())
+    with pytest.raises(LaunchRefused, match="differ from the recorded commit"):
+        pl.verify_tree(str(tmp_path), str(pkg))

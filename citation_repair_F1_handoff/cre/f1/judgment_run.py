@@ -1257,15 +1257,24 @@ def run_natural_judgment(
 
     # "F4 actually evaluated" is mechanically defined by the counters; reportable
     # additionally requires the formal wiring end-to-end.
+    # DEC-072 retired the two clauses that required a DISTINCT verifier callable
+    # and a DIFFERENT verifier model id. DEC-063 fixes the project on one model,
+    # so those made F4 permanently unreportable. Everything else stands --
+    # retiring two clauses is not retiring the gate.
     f4_reportable = (
         eff_f4_policy.mode == "formal"
         and discriminator_call_llm is not None
-        and f4_verifier_call_llm is not None
-        and f4_verifier_call_llm is not discriminator_call_llm
         and bool(eff_f4_policy.generator_model_id.strip())
-        and bool(eff_f4_policy.verifier_model_id.strip())
-        and eff_f4_policy.generator_model_id != eff_f4_policy.verifier_model_id
         and f4_counts["generator_calls"] > 0
+    )
+    # Was the verifier a genuinely independent model, or the generator again?
+    # Recorded per run, because under one model the verifier confirms premises
+    # the same model produced, and a reader must not have to infer that.
+    f4_self_verified = (
+        f4_verifier_call_llm is None
+        or f4_verifier_call_llm is discriminator_call_llm
+        or (eff_f4_policy.verifier_model_id or eff_f4_policy.generator_model_id)
+        == eff_f4_policy.generator_model_id
     )
 
     # Clean end == the input dir is exhausted; a max_docs-bounded pass leaves the
@@ -1380,6 +1389,26 @@ def run_natural_judgment(
             "eligible_claims": f4_counts["eligible_claims"],
             "generator_calls": f4_counts["generator_calls"],
             "verifier_calls": f4_counts["verifier_calls"],
+            # THE RESIDUAL RISK DEC-072 ACCEPTS, made visible in the artifact
+            # rather than only in the vault. Formal mode no longer requires an
+            # independent verifier, so under one model the verifier confirms
+            # premises the same model produced. Nothing in code replaces the
+            # retired guard; the answer is a human-adjudicated sample.
+            "self_verification": {
+                "self_verified": f4_self_verified,
+                "independent_verifier": not f4_self_verified,
+                "governing_decision": "DEC-072",
+                "note": (
+                    "F4 ran with the generator as its own verifier (DEC-072 "
+                    "retired the distinct-verifier requirement; DEC-063 fixes "
+                    "the project on one model). The verifier confirms premises "
+                    "the same model produced -- a real circularity that NOTHING "
+                    "in code checks. An F4 precision figure requires a "
+                    "human-adjudicated sample of F4 rows."
+                    if f4_self_verified else
+                    "F4 ran with a verifier distinct from the generator."
+                ),
+            },
         },
         **({"f5": _f5_manifest_block(f5_policy, f5_records_all)}
            if f5_seams is not None else {}),
@@ -1413,6 +1442,34 @@ def run_natural_judgment(
         # scoreable predictions exactly, by id, not just by count.
         "queue_audit": queue_audit,
         "emitted_labels": dict(sorted(emitted_labels.items())),
+        # WIRED IS NOT FIRED. Omitting discriminator_call_llm silently disables
+        # F3 AND F4; unwired F5/F7 seams do the same. Without this block a run
+        # that never checked reads exactly like one that checked and found
+        # nothing -- the same defect class as the tautological queue audit.
+        # NOT a refusal: an unwired seam is a legitimate development
+        # configuration. It just may not be silent.
+        "seam_status": {
+            "F3": {"wired": discriminator_call_llm is not None,
+                   "fired": emitted_labels.get("F3", 0),
+                   "gate": "discriminator_call_llm"},
+            "F4": {"wired": discriminator_call_llm is not None,
+                   "fired": emitted_labels.get("F4", 0),
+                   "gate": "discriminator_call_llm",
+                   "assessed_claims": f4_counts["eligible_claims"]},
+            "F5": {"wired": f5_seams is not None and f5_evidence_builder is not None,
+                   "fired": emitted_labels.get("F5", 0),
+                   "gate": "f5_seams AND f5_evidence_builder"},
+            "F7": {"wired": f7_seams is not None and f7_evidence_builder is not None,
+                   "fired": emitted_labels.get("F7", 0),
+                   "gate": "f7_seams AND f7_evidence_builder"},
+            "F6": {"wired": True, "fired": emitted_labels.get("F6", 0),
+                   "gate": "always live (coverage)"},
+            "note": (
+                "'wired' is whether the seam could fire at all; 'fired' is how "
+                "many labels it produced. An unwired seam reporting fired=0 has "
+                "NOT found zero faults -- it was never asked."
+            ),
+        },
         **({"corpus_document_sha256": corpus_bindings.get("document_sha256", {})}
            if production else {}),
         "counts": counts,

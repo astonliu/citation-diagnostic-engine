@@ -432,3 +432,58 @@ def test_counters_that_undercount_the_file_block_reportability(tmp_path):
     r = pc.reportability_report(good_manifest(total_records=1,
                                               chain_record_count=1), path)
     assert r["checks"]["counters_match_file"] is False
+
+
+# =====================================================================
+# The corpus-manifest builder (the consumer had no producer)
+# =====================================================================
+
+def _xml(tmp_path, names):
+    for i, n in enumerate(names):
+        (tmp_path / n).write_text(f"<x>{i}</x>", encoding="utf-8")
+
+
+def test_the_builder_output_parses_as_an_inventory(tmp_path):
+    _xml(tmp_path, ["PMC1.xml", "PMC2.nxml"])
+    out = str(tmp_path / "frozen_manifest.json")
+    m = pc.build_corpus_manifest(str(tmp_path), out)
+    assert m["document_count"] == 2
+    inv = pc.corpus_inventory(json.load(open(out, encoding="utf-8")))
+    assert set(inv) == {"PMC1.xml", "PMC2.nxml"}
+    assert all(len(d) == 64 for d in inv.values())
+
+
+def test_the_builder_is_byte_deterministic(tmp_path):
+    """The disposition binds this file by its own sha256; non-deterministic
+    ordering would move that digest between runs and break the binding."""
+    _xml(tmp_path, ["PMC3.xml", "PMC1.xml", "PMC2.xml"])
+    a = str(tmp_path / "a.json")
+    b = str(tmp_path / "b.json")
+    pc.build_corpus_manifest(str(tmp_path), a)
+    pc.build_corpus_manifest(str(tmp_path), b)
+    assert open(a, "rb").read() == open(b, "rb").read()
+    assert pc._sha256_file(a) == pc._sha256_file(b)
+
+
+def test_the_builder_round_trips_through_verify_corpus_contents(tmp_path):
+    _xml(tmp_path, ["PMC1.xml", "PMC2.xml"])
+    out = str(tmp_path / "frozen_manifest.json")
+    pc.build_corpus_manifest(str(tmp_path), out)
+    inv = pc.corpus_inventory(json.load(open(out, encoding="utf-8")))
+    digests = pc.verify_corpus_contents(str(tmp_path), inv)
+    assert set(digests) == {"PMC1.xml", "PMC2.xml"}
+
+
+def test_the_builder_output_detects_a_later_edit(tmp_path):
+    _xml(tmp_path, ["PMC1.xml"])
+    out = str(tmp_path / "frozen_manifest.json")
+    pc.build_corpus_manifest(str(tmp_path), out)
+    (tmp_path / "PMC1.xml").write_text("<x>edited</x>", encoding="utf-8")
+    inv = pc.corpus_inventory(json.load(open(out, encoding="utf-8")))
+    with pytest.raises(pc.PrebandContractError, match="content differs"):
+        pc.verify_corpus_contents(str(tmp_path), inv)
+
+
+def test_the_builder_refuses_an_empty_directory(tmp_path):
+    with pytest.raises(pc.PrebandContractError, match="EMPTY corpus manifest"):
+        pc.build_corpus_manifest(str(tmp_path), str(tmp_path / "m.json"))

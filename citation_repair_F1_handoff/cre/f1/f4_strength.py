@@ -46,13 +46,26 @@ TWO-CALL ARCHITECTURE (positive-evidence precision gate)
     never re-derives or overrides toward F4.
 
 MODES (fail-closed default)
-    ``F4Policy.mode == "formal"`` (default): ``verifier_call_llm`` MUST be
-    provided and MUST be a different callable than ``call_llm`` (a distinct
-    verifier model), and both model-id strings must be nonblank and different;
-    otherwise ``ValueError`` before any model call. Only formal-mode results are
-    reportable. ``mode == "development"``: ``verifier_call_llm`` may be ``None``
-    (reuse ``call_llm``) for offline tests / dry runs only; every record is
-    stamped ``reportable=False``. Same-model reuse never yields reportable F4.
+    ``F4Policy.mode == "formal"`` (default): the generator model id must be
+    nonblank, and a wired ``verifier_call_llm`` must carry a nonblank verifier
+    model id; otherwise ``ValueError`` before any model call. Only formal-mode
+    results are reportable. ``mode == "development"``: for offline tests and dry
+    runs; every record is stamped ``reportable=False``.
+
+    ONE MODEL, AND WHAT THAT COSTS (DEC-072, 2026-08-15). Formal mode used to
+    require a verifier that was a DIFFERENT callable with a DIFFERENT model id.
+    That clause was a self-verification guard: it stopped the model that
+    proposed "this claim was overstated" from also confirming it. DEC-063 fixes
+    the project on ONE model, so the guard was unsatisfiable and F4 was
+    permanently unreportable -- the corpus run yielded either no F4 or no
+    reportable number at all. The clause is retired.
+
+    **The circularity is now real and nothing in code replaces it.** Under one
+    model the verifier confirms premises the same model produced. This is the
+    same shape as DEC-069's residual risk and is handled the same way: it is
+    surfaced in the run manifest (``f4.self_verification``) rather than left
+    invisible, and the answer to it is a HUMAN-ADJUDICATED SAMPLE of F4 rows,
+    owed before any F4 precision figure. It is not a second model family.
 
 AUDIT RECORD
     Every assessed claim yields a plain JSON-serializable dict inlining the raw
@@ -174,21 +187,16 @@ def validate_f4_config(
     if verifier_call_llm is not None and not callable(verifier_call_llm):
         raise ValueError("verifier_call_llm must be callable when provided")
     if policy.mode == "formal":
-        if verifier_call_llm is None:
-            raise ValueError(
-                "formal mode requires a distinct verifier_call_llm; pass "
-                "mode='development' (non-reportable) to reuse call_llm")
-        if call_llm is not None and verifier_call_llm is call_llm:
-            raise ValueError(
-                "formal mode requires verifier_call_llm to be a DIFFERENT "
-                "callable than call_llm (a distinct verifier model)")
+        # DEC-072 retired THREE clauses that together required two distinct
+        # models: a mandatory verifier_call_llm, a verifier callable distinct
+        # from call_llm, and generator_model_id != verifier_model_id. One model
+        # runs both roles now. See the MODES section above for what that costs.
         if not policy.generator_model_id.strip():
             raise ValueError("formal mode requires a nonblank generator_model_id")
-        if not policy.verifier_model_id.strip():
-            raise ValueError("formal mode requires a nonblank verifier_model_id")
-        if policy.generator_model_id == policy.verifier_model_id:
+        if verifier_call_llm is not None and not policy.verifier_model_id.strip():
             raise ValueError(
-                "formal mode requires generator_model_id != verifier_model_id")
+                "a wired verifier_call_llm requires a nonblank verifier_model_id; "
+                "an unrecorded verifier is a call nothing can reconstruct")
 
 
 # --------------------------------------------------------------------------

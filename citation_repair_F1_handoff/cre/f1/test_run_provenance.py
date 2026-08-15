@@ -866,3 +866,87 @@ def test_reportability_accepts_unsupported_but_not_a_stray_string(tmp_path):
     assert pc.reportability_report(m, p)["checks"]["temperature_legal"] is True
     m["adapter"] = {"model": "claude-opus-5", "temperature": "0"}
     assert pc.reportability_report(m, p)["checks"]["temperature_legal"] is False
+
+
+# =====================================================================
+# DEC-072: F4 on one model, and the residual risk made visible
+# =====================================================================
+
+def _f4_run(tmp_path, monkeypatch, **over):
+    kw = dict(extractor=extractor_of("Drug X reduces Y"),
+              coverage_judge=judge_established(True),
+              disposition=CLEARED, monkeypatch=monkeypatch)
+    kw.update(over)
+    return run(tmp_path, [make_ref("c")], **kw)
+
+
+def test_f4_is_reportable_on_one_model(tmp_path, monkeypatch):
+    """THE DEFECT. f4_reportable required a distinct verifier callable AND a
+    different verifier model id, so under DEC-063's one model the corpus run
+    yielded either no F4 or no reportable number at all."""
+    from .f4_strength import F4Policy
+    call = disc_llm(f4=f4_json(), v2=ORIGINATES)
+    manifest, _ = _f4_run(
+        tmp_path, monkeypatch, discriminator_call_llm=call,
+        f4_policy=F4Policy(mode="formal", generator_model_id="claude-opus-5",
+                           verifier_model_id="claude-opus-5"),
+        f4_verifier_call_llm=call)
+    assert manifest["f4"]["reportable"] is True
+    assert manifest["f4"]["generator_calls"] > 0
+
+
+def test_the_self_verification_risk_is_in_the_manifest(tmp_path, monkeypatch):
+    """DEC-072 accepts a real circularity; it must be visible in the artifact,
+    not only in the vault."""
+    from .f4_strength import F4Policy
+    call = disc_llm(f4=f4_json(), v2=ORIGINATES)
+    manifest, _ = _f4_run(
+        tmp_path, monkeypatch, discriminator_call_llm=call,
+        f4_policy=F4Policy(mode="formal", generator_model_id="claude-opus-5",
+                           verifier_model_id="claude-opus-5"),
+        f4_verifier_call_llm=call)
+    sv = manifest["f4"]["self_verification"]
+    assert sv["self_verified"] is True
+    assert sv["independent_verifier"] is False
+    assert sv["governing_decision"] == "DEC-072"
+    assert "human-adjudicated sample" in sv["note"]
+
+
+def test_development_mode_is_still_not_reportable(tmp_path, monkeypatch):
+    call = disc_llm(f4=f4_json(), v2=ORIGINATES)
+    manifest, _ = _f4_run(tmp_path, monkeypatch, discriminator_call_llm=call)
+    assert manifest["f4"]["mode"] == "development"
+    assert manifest["f4"]["reportable"] is False
+
+
+def test_zero_generator_calls_is_still_not_reportable(tmp_path, monkeypatch):
+    """Retiring two clauses is not retiring the gate."""
+    from .f4_strength import F4Policy
+    manifest, _ = _f4_run(
+        tmp_path, monkeypatch, discriminator_call_llm=None,
+        f4_policy=F4Policy(mode="formal", generator_model_id="claude-opus-5"))
+    assert manifest["f4"]["generator_calls"] == 0
+    assert manifest["f4"]["reportable"] is False
+
+
+# ------------------------------- wired is not fired (Change 5)
+
+def test_an_unwired_discriminator_is_marked_wired_false(tmp_path, monkeypatch):
+    """A run that never checked must not read like one that checked and found
+    nothing -- the same defect class as the tautological queue audit."""
+    manifest, _ = _f4_run(tmp_path, monkeypatch)
+    st = manifest["seam_status"]
+    assert st["F3"]["wired"] is False and st["F3"]["fired"] == 0
+    assert st["F4"]["wired"] is False and st["F4"]["fired"] == 0
+    assert st["F5"]["wired"] is False
+    assert st["F7"]["wired"] is False
+    assert st["F6"]["wired"] is True
+
+
+def test_a_wired_discriminator_is_marked_wired_true(tmp_path, monkeypatch):
+    call = disc_llm(f4=f4_json(), v2=ORIGINATES)
+    manifest, _ = _f4_run(tmp_path, monkeypatch, discriminator_call_llm=call)
+    st = manifest["seam_status"]
+    assert st["F3"]["wired"] is True
+    assert st["F4"]["wired"] is True
+    assert st["F4"]["assessed_claims"] >= 0

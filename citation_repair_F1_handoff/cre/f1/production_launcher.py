@@ -108,7 +108,20 @@ def verify_tree(repo_dir: str, pkg_dir: str) -> dict:
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         raise LaunchRefused(f"could not read a 40-hex HEAD from {repo_dir}")
 
+    # repo_dir MUST be the git toplevel. Point it at a subdirectory and every
+    # `rel` below is unresolvable, `git show` returns empty under check=False,
+    # and all thirteen governing modules read as mismatched -- sending the
+    # operator hunting corruption that does not exist.
+    toplevel = _git(repo_dir, "rev-parse", "--show-toplevel")
+    if os.path.realpath(toplevel) != os.path.realpath(repo_dir):
+        raise LaunchRefused(
+            f"repo_dir {repo_dir!r} is not the git toplevel (that is "
+            f"{toplevel!r}). Every path would resolve outside the repo and every "
+            "governing module would read as mismatched -- an integrity failure "
+            "that is really a configuration error. Pass the toplevel.")
+
     mismatched: list = []
+    unresolvable: list = []
     digests: dict = {}
     for name in GOVERNING_MODULES:
         path = os.path.join(pkg_dir, name)
@@ -121,8 +134,20 @@ def verify_tree(repo_dir: str, pkg_dir: str) -> dict:
             ("git", "-C", repo_dir, "show", f"{head}:{rel}"),
             capture_output=True, check=False).stdout
         digests[name] = hashlib.sha256(on_disk).hexdigest()
-        if on_disk != committed:
+        if not committed:
+            # The file exists on disk but the commit yields nothing for that
+            # path: a path-resolution problem, not tampering. Named separately
+            # so it is never reported as an integrity failure.
+            unresolvable.append(rel)
+        elif on_disk != committed:
             mismatched.append(name)
+    if unresolvable:
+        raise LaunchRefused(
+            f"{len(unresolvable)} governing module(s) exist on disk but resolve "
+            f"to nothing in commit {head[:12]} (e.g. {unresolvable[:3]}). This "
+            "is a path/repo_dir configuration error, NOT an integrity failure: "
+            f"check that repo_dir ({repo_dir!r}) and pkg_dir ({pkg_dir!r}) are "
+            "the git toplevel and the package directory inside it.")
     if mismatched:
         raise LaunchRefused(
             "on-disk module bytes differ from the recorded commit "
@@ -252,6 +277,91 @@ def verify_temperature_governance(*, model: str, temperature) -> dict:
             "defaults -- see DEC-070's re-measurement obligation."
             if recorded != 0 else
             "temperature=0 was sent and is pinned by DEC-046B."
+        ),
+    }
+
+
+#: Same sentinel, same three-state discipline, for ``assistant_prefill``.
+PREFILL_UNSUPPORTED = "unsupported"
+
+#: FIRST-PARTY MEASUREMENTS ONLY (DEC-071), same rule as the temperature table.
+#: ``claude-opus-5`` -- measured: HTTP 400 ``invalid_request_error: "This model
+#: does not support assistant message prefill. The conversation must end with a
+#: user message."`` (request id ``req_011Ce3sXfjxuLxxwAd1VHQAy``). Nothing else
+#: goes in; an unlisted model is treated as supporting, so the failure mode is a
+#: loud 400 rather than a silently dropped setting.
+PREFILL_REJECTING_MODELS = frozenset({
+    "claude-opus-5",
+})
+
+
+def prefill_support(model: str) -> str:
+    """``"unsupported"`` if the provider rejects assistant prefill, else supported."""
+    return (PREFILL_UNSUPPORTED
+            if (model or "").strip() in PREFILL_REJECTING_MODELS
+            else "supported")
+
+
+def verify_prefill_governance(*, model: str, assistant_prefill) -> dict:
+    """Resolve the prefill path. Chosen by the MODEL, never by the caller.
+
+    ``judgment_run`` writes ``assistant_prefill`` verbatim into
+    ``manifest["adapter"]`` and never transmits it -- the adapter does. So on a
+    model that REJECTS prefill, a non-empty string there is a false provenance
+    record: the manifest claims a prefill was used on calls that could not have
+    carried one. Nothing caught that before this gate existed.
+
+    Three distinguishable states, as with temperature: the actual string (sent),
+    ``"unsupported"`` (not sent, provider rejects it), key absent (never
+    recorded).
+    """
+    support = prefill_support(model)
+    if assistant_prefill is None:
+        recorded = None                      # never recorded; key stays absent
+    elif support == PREFILL_UNSUPPORTED:
+        if assistant_prefill in ("", PREFILL_UNSUPPORTED):
+            recorded = PREFILL_UNSUPPORTED
+        else:
+            raise LaunchRefused(
+                f"model {model!r} REJECTS assistant prefill (DEC-071), but "
+                f"assistant_prefill={assistant_prefill!r} was supplied. On a "
+                "rejecting model it is not sent and is recorded as "
+                f"{PREFILL_UNSUPPORTED!r}; recording a prefill string for calls "
+                "that never carried one is a false provenance record.")
+    else:
+        if assistant_prefill == PREFILL_UNSUPPORTED:
+            raise LaunchRefused(
+                f"model {model!r} SUPPORTS assistant prefill, so "
+                f"{PREFILL_UNSUPPORTED!r} is not an available answer for it. "
+                "Pass the actual prefill string, or omit it entirely.")
+        if not isinstance(assistant_prefill, str):
+            raise LaunchRefused(
+                f"assistant_prefill must be a string, {PREFILL_UNSUPPORTED!r}, "
+                f"or omitted; got {assistant_prefill!r}")
+        recorded = assistant_prefill
+    return {
+        "model": model,
+        "provider_support": support,
+        "support_evidence": (EVIDENCE_MEASURED_REJECTS
+                             if support == PREFILL_UNSUPPORTED
+                             else EVIDENCE_ASSUMED_ACCEPTS),
+        "path": ("not_recorded" if recorded is None
+                 else "not_sent_unsupported" if recorded == PREFILL_UNSUPPORTED
+                 else "sent"),
+        "recorded_value": recorded,
+        "sent_to_provider": bool(recorded) and recorded != PREFILL_UNSUPPORTED,
+        "governing_decision": ("DEC-071" if recorded == PREFILL_UNSUPPORTED
+                               else "DEC-068"),
+        "note": (
+            "The prefill was NOT SENT: this model rejects it provider-side. It "
+            "existed only because an earlier model fenced its JSON; three "
+            "first-party draws on claude-opus-5 with the prefill removed parsed "
+            "every time. That was a trivial two-key prompt -- it shows the model "
+            "does not fence unprompted, and is NOT a quarantine-rate measurement."
+            if recorded == PREFILL_UNSUPPORTED else
+            "assistant_prefill was sent and is recorded verbatim."
+            if recorded else
+            "assistant_prefill was not supplied and is not recorded."
         ),
     }
 
@@ -391,6 +501,32 @@ def verify_judge_governance(*, model: str, judge_model: str,
     }
 
 
+def assert_receipt_shape(receipt) -> None:
+    """Refuse a mis-shaped receipt BEFORE the run, not after it.
+
+    ``verify_receipt`` runs after ``run_natural_judgment`` returns, so every
+    receipt-shape error was otherwise discovered at maximum cost -- a whole
+    corpus run burned before the refusal. This checks only what is knowable up
+    front: the object exists, exposes ``.calls``, and ``.calls`` is a list. It
+    deliberately does NOT inspect call contents; there are none yet, and
+    pretending to check them here would be the same false assurance this
+    codebase keeps removing.
+    """
+    if receipt is None:
+        raise LaunchRefused(
+            "no adapter_receipt supplied; a reportable run must be able to show "
+            "what it actually sent")
+    calls = getattr(receipt, "calls", None)
+    if calls is None:
+        raise LaunchRefused(
+            f"adapter_receipt {type(receipt).__name__} exposes no .calls "
+            "attribute; verify_receipt reads .calls after the run, and a "
+            "mis-shaped receipt would burn the whole run before refusing")
+    if not isinstance(calls, list):
+        raise LaunchRefused(
+            f"adapter_receipt.calls must be a list, got {type(calls).__name__}")
+
+
 def verify_receipt(receipt, *, model: str, temperature) -> dict:
     """Every recorded call agrees with what the run DECLARED.
 
@@ -439,7 +575,7 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
            model: str, authorized_models, adapter_receipt,
            judge_model: str = "", preregistration_amendment: str = "",
            preregistration_scope_ruling=None,
-           temperature=None, **run_kwargs) -> dict:
+           temperature=None, assistant_prefill=None, **run_kwargs) -> dict:
     """Verify every precondition, run in production mode, verify the receipt.
 
     Returns the run manifest with a ``launch_receipt`` block. Raises
@@ -461,6 +597,14 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         model=model, temperature=temperature)
     resolved_temperature = temperature_governance["recorded_value"]
 
+    # --- assistant_prefill governance (DEC-071) -------------------------
+    prefill_governance = verify_prefill_governance(
+        model=model, assistant_prefill=assistant_prefill)
+    resolved_prefill = prefill_governance["recorded_value"]
+
+    # --- the receipt must be usable BEFORE the run, not after it --------
+    assert_receipt_shape(adapter_receipt)
+
     # --- judge governance (DEC-065 / PREREGISTRATION §6) ----------------
     judge_governance = verify_judge_governance(
         model=model, judge_model=judge_model,
@@ -475,7 +619,10 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         preband_disposition=preband_disposition,
         corpus_manifest_path=corpus_manifest_path,
         code_commit=tree["code_commit"], model=model,
-        temperature=resolved_temperature, production=True, **run_kwargs)
+        temperature=resolved_temperature,
+        **({"assistant_prefill": resolved_prefill}
+           if resolved_prefill is not None else {}),
+        production=True, **run_kwargs)
 
     receipt = verify_receipt(adapter_receipt, model=model,
                              temperature=resolved_temperature)
@@ -489,6 +636,7 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         "model": model,
         "judge_governance": judge_governance,
         "temperature_governance": temperature_governance,
+        "prefill_governance": prefill_governance,
         "adapter_receipt": receipt,
         "limitation": (
             "The receipt is produced by the adapter under test. It proves what "

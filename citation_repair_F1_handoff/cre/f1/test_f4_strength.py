@@ -576,46 +576,69 @@ def test_verifier_prompt_isolated_from_generator_reasoning():
 # --------------------------------------------------------------------------
 # Modes: formal (fail-closed default) vs development (non-reportable).
 # --------------------------------------------------------------------------
-def test_formal_mode_missing_verifier_raises_before_any_model_call():
+def test_formal_mode_without_a_verifier_now_runs(DEC_072=None):
+    """CONTRACT CHANGE (DEC-072). Formal mode used to require a verifier that
+    was a DIFFERENT callable with a DIFFERENT model id. DEC-063 fixes the
+    project on ONE model, so that clause was unsatisfiable and F4 was
+    permanently unreportable. It is retired at this site and in
+    judgment_run's f4_reportable."""
     calls = {"n": 0}
 
     def gen(_prompt):
         calls["n"] += 1
         return f4_json()
 
-    with pytest.raises(ValueError):
-        refine_support_strength(
-            CLAIMS, (supported(),), EVIDENCE, call_llm=gen, policy=FORMAL_POLICY
-        )
-    assert calls["n"] == 0
+    refine_support_strength(
+        CLAIMS, (supported(),), EVIDENCE, call_llm=gen, policy=FORMAL_POLICY
+    )
+    assert calls["n"] > 0
 
 
-def test_formal_mode_identical_verifier_callable_raises():
+def test_formal_mode_accepts_one_callable_for_both_roles():
+    """DEC-072: one model runs generator and verifier. The circularity this
+    admits is real, is not checked in code, and is surfaced in the run
+    manifest as f4.self_verification -- see test_run_provenance."""
     llm = const_llm(f4_json())
-    with pytest.raises(ValueError):
-        refine_support_strength(
-            CLAIMS,
-            (supported(),),
-            EVIDENCE,
-            call_llm=llm,
-            verifier_call_llm=llm,
-            policy=FORMAL_POLICY,
-        )
+    refine_support_strength(
+        CLAIMS,
+        (supported(),),
+        EVIDENCE,
+        call_llm=llm,
+        verifier_call_llm=llm,
+        policy=FORMAL_POLICY,
+    )
 
 
-@pytest.mark.parametrize(
-    "gen_id,ver_id",
-    [("", "ver-model"), ("gen-model", ""), ("same-model", "same-model")],
-)
-def test_formal_mode_bad_model_ids_raise(gen_id, ver_id):
+@pytest.mark.parametrize("gen_id,ver_id", [("", "ver-model"), ("", "")])
+def test_formal_mode_still_requires_a_generator_model_id(gen_id, ver_id):
+    """SURVIVING GUARD. Retiring two clauses is not retiring the gate."""
     policy = F4Policy(mode="formal", generator_model_id=gen_id, verifier_model_id=ver_id)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="nonblank generator_model_id"):
         refine(f4_json(), policy=policy)
+
+
+def test_identical_model_ids_are_now_accepted():
+    """DEC-072, the clause that made F4 unreportable under one model."""
+    policy = F4Policy(mode="formal", generator_model_id="claude-opus-5",
+                      verifier_model_id="claude-opus-5")
+    refine(f4_json(), policy=policy)
+
+
+def test_a_wired_verifier_still_needs_a_recorded_model_id():
+    """SURVIVING GUARD, tightened: an unrecorded verifier is a call nothing can
+    reconstruct."""
+    policy = F4Policy(mode="formal", generator_model_id="claude-opus-5",
+                      verifier_model_id="")
+    llm = const_llm(f4_json())
+    with pytest.raises(ValueError, match="nonblank verifier_model_id"):
+        refine_support_strength(CLAIMS, (supported(),), EVIDENCE,
+                                call_llm=llm, verifier_call_llm=llm,
+                                policy=policy)
 
 
 def test_default_policy_mode_is_formal_and_fails_closed():
     # F4Policy() defaults to formal with blank model ids -> unusable until the
-    # caller supplies real ids and a distinct verifier. Never silently green.
+    # caller supplies a real generator model id. Never silently green.
     assert F4Policy().mode == "formal"
     with pytest.raises(ValueError):
         refine(f4_json(), policy=F4Policy())
