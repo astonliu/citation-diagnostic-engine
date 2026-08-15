@@ -8,7 +8,7 @@ were all enumerated in the spec; ``route_reason`` was the only controlled
 vocabulary with no enumeration, so a schema author had nothing to close the enum
 against and a rule could be renamed with no spec diff. This module is the single
 machine-readable source of truth; ``test_reason_registry.py`` statically scans the
-three emitter modules and asserts the emitted literals equal ``REASON_REGISTRY``
+emitter modules and asserts the emitted literals equal ``REASON_REGISTRY``
 exactly, so the spec can never drift behind the code again.
 
 The registry is CLOSED (§5.6 A.4): a new reason code requires a spec amendment in
@@ -18,7 +18,7 @@ introduced them; renaming is a breaking change to the artifact contract.
 """
 from __future__ import annotations
 
-REASON_REGISTRY_VERSION = "5.5"
+REASON_REGISTRY_VERSION = "5.6"
 
 # --- §5.6 A.1: same-work reasons -> route review_same_work_variant ------------
 # Rev 5.5 activates strict-prefix review and adds the three corporate/DOI routes
@@ -76,6 +76,20 @@ WRONG_PAPER_REASONS = frozenset({
     "resolved_preprint_target",         # F2-B resolved-side signal
 })
 
+# --- §5.6 A.2b: retraction reasons -> route f8_retracted ----------------------
+# Rev 5.6 adds the F8 retraction gate (RESEARCH_PLAN_v2.2 §4.3), the first
+# deterministic Band-1 route that is neither a same-work variant nor a wrong-paper
+# call: the resolved record itself is retracted. Emitted by ``decide.py`` when the
+# existence layer's retraction tri-state (``StageLog.retracted``) is True.
+#
+# The code is named for the PubMed publication type that produces it,
+# "Retracted Publication" -- NOT "Retraction of Publication", which marks the
+# notice retracting some other paper and must never route here.
+RETRACTION_REASONS = frozenset({
+    # decide.py
+    "retracted_publication",
+})
+
 # --- §5.6 A.3: unscoreable buckets -> route unscoreable -----------------------
 UNSCOREABLE_BUCKETS = frozenset({
     "resolved_book_container",
@@ -91,12 +105,14 @@ UNSCOREABLE_BUCKETS = frozenset({
     "regulatory_code",
 })
 
-REASON_REGISTRY = SAME_WORK_REASONS | WRONG_PAPER_REASONS | UNSCOREABLE_BUCKETS
+REASON_REGISTRY = (SAME_WORK_REASONS | WRONG_PAPER_REASONS
+                   | RETRACTION_REASONS | UNSCOREABLE_BUCKETS)
 
 # reason -> route (the machine-contract mapping).
 REASON_ROUTE = {
     **{r: "review_same_work_variant" for r in SAME_WORK_REASONS},
     **{r: "review_wrong_paper" for r in WRONG_PAPER_REASONS},
+    **{r: "f8_retracted" for r in RETRACTION_REASONS},
     **{r: "unscoreable" for r in UNSCOREABLE_BUCKETS},
 }
 

@@ -20,6 +20,7 @@ from .lookup import fetch_pubmed, compare_and_flag
 from .llm_filter import llm_filter
 from .confirm import confirm
 from .decide import decide
+from .ncbi_meta import ncbi_pubtypes, is_retracted
 from .ratelimit import configure_ncbi
 from . import eval_report
 
@@ -83,20 +84,72 @@ def make_completer(model: str, api_key: str = "", *, max_tokens: int = 400,
     return complete
 
 
+def retraction_state(ref: Reference, *, ncbi_key: str = "", session=None,
+                     cache: dict | None = None) -> "bool | None":
+    """The F8 retraction TRI-STATE for a reference's resolved record.
+
+    True = the resolved PMID's PubMed publication types include
+    ``Retracted Publication``; False = the types were fetched and it is absent;
+    ``None`` = UNKNOWN (no resolved PMID to look up, or the EFetch failed).
+
+    The lookup lives here, in the existence layer, and NOT in ``decide`` -- that
+    module is a pure function over accumulated evidence and must stay one.
+
+    A network failure must never read as "not retracted", so ``ncbi_pubtypes``
+    returning None yields None. An EMPTY type list is also unknown: every live
+    MEDLINE record carries at least one ``PT`` line, so an empty parse is a
+    failure to read the field, not a record that has none.
+
+    ``cache`` (PMID -> state), when given, is read and written for KNOWN states
+    only. The unknown state is deliberately NOT cached: caching it would freeze a
+    transient outage into every later reference to the same PMID in the run.
+    """
+    if not ref.retrieved.resolved:
+        return None
+    pmid = (ref.retrieved.pmid or ref.claimed.claimed_pmid or "").strip()
+    if not pmid:
+        return None
+    if cache is not None and pmid in cache:
+        return cache[pmid]
+    pubtypes = ncbi_pubtypes(pmid, ncbi_key, session=session)
+    if not pubtypes:                     # None (failure) or [] (nothing parsed)
+        return None
+    state = is_retracted(pubtypes)
+    if cache is not None:
+        cache[pmid] = state
+    return state
+
+
 def process_reference(ref: Reference, complete, *, ncbi_key="",
                       crossref_mailto="", openalex_mailto="",
                       sim_threshold=85.0, match_threshold=85.0,
-                      author_tripwire=True, session=None) -> Reference:
+                      author_tripwire=True, session=None,
+                      retraction_cache: dict | None = None) -> Reference:
     # cheap path. With a claimed PMID: EFetch + metadata compare. Without one:
     # compare_and_flag runs the structured no-ID bibliographic lookup itself.
     if ref.claimed.claimed_pmid:
         ref.retrieved = fetch_pubmed(ref.claimed.claimed_pmid, ncbi_key,
                                      session=session)
+    # F8 existence gate (§4.3): record the retraction tri-state BEFORE the
+    # comparison runs, so it is on the log for every resolved reference no matter
+    # which branch decide() ends up taking. The no-ID path never reaches here with
+    # a PMID (fuzzy_biblio_lookup's record always has ``.pmid == ""``), so it
+    # honestly records "unknown" rather than a lookup it could not perform.
+    ref.log.retracted = retraction_state(ref, ncbi_key=ncbi_key, session=session,
+                                         cache=retraction_cache)
     flagged = compare_and_flag(ref, sim_threshold,
                                author_tripwire=author_tripwire, session=session)
 
     # Not flagged -> cleared / unverifiable (both the PMID and no-ID paths).
     if not flagged:
+        return decide(ref, flagged, None, None, match_threshold)
+
+    # A retracted source is decided deterministically in the existence layer
+    # (§4.3), so do not pay for an LLM call and three confirmation searches on a
+    # row whose label they cannot change: decide()'s F8 branch precedes every use
+    # of llm_verdict and db_hits, and decide() enforces the UNSCOREABLE-first
+    # precedence itself. Mirrors the same-work short-circuit below.
+    if ref.log.retracted is True:
         return decide(ref, flagged, None, None, match_threshold)
 
     # Identity-proven variants are audited, not accused.  Avoid paying for an
@@ -128,13 +181,17 @@ def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
 
     prediction_records, log_records = [], []
     counts: dict[str, int] = {}
+    # PMID -> retraction state, shared across the run so a PMID cited by many
+    # references costs one EFetch. Known states only (see ``retraction_state``).
+    retraction_cache: dict = {}
     for ref in stream:
         process_reference(ref, complete, ncbi_key=ncbi_key,
                           crossref_mailto=crossref_mailto,
                           openalex_mailto=openalex_mailto,
                           sim_threshold=sim_threshold,
                           match_threshold=match_threshold,
-                          author_tripwire=author_tripwire, session=session)
+                          author_tripwire=author_tripwire, session=session,
+                          retraction_cache=retraction_cache)
         counts[ref.label] = counts.get(ref.label, 0) + 1
         log_records.append(ref.to_log_record())
         # unverifiable AND unscoreable refs are dropped from the prediction set

@@ -1,7 +1,7 @@
 """§5.6 registry ⇄ code equality (the drift guard), + frozen-config + manifest.
 
 The equality test is the one that keeps the spec from drifting behind the code:
-it statically scans the three emitter modules for reason-string literals and
+it statically scans the emitter modules for reason-string literals and
 asserts they equal REASON_REGISTRY exactly. It already caught one omission
 (``translated_title_missing_volume_anchors``) in the rev-5.2 draft's §5.6 table.
 """
@@ -12,15 +12,17 @@ import re
 
 import pytest
 
-from cre.f1 import work_identity, biblio_match, unscoreable, reason_registry as rr
+from cre.f1 import (work_identity, biblio_match, unscoreable, decide,
+                    reason_registry as rr)
 
 
 def _emitted_reason_literals() -> set:
-    """Every reason-code string literal the three emitters can produce, scanned
+    """Every reason-code string literal the emitters can produce, scanned
     from source (so a renamed/added literal is detected without running rules)."""
     wi = inspect.getsource(work_identity)
     bm = inspect.getsource(biblio_match)
     un = inspect.getsource(unscoreable)
+    de = inspect.getsource(decide)
     reasons = set()
     # work_identity: WorkIdentityEvidence(True, "reason", (...))
     reasons |= set(re.findall(r'WorkIdentityEvidence\(\s*True,\s*"([^"]+)"', wi))
@@ -34,6 +36,10 @@ def _emitted_reason_literals() -> set:
     reasons |= set(re.findall(r'repair_reason\s*=\s*"([^"]+)"', bm))
     # unscoreable: return ("bucket", ...)
     reasons |= set(re.findall(r'return\s*\(\s*"([a-z0-9_]+)"\s*,', un))
+    # decide (rev 5.6): the F8 retraction route. Its reason code names the route
+    # the row took, assigned where the branch is taken, so the drift guard covers
+    # the fourth emitter the same way it covers the other three.
+    reasons |= set(re.findall(r'retraction_reason\s*=\s*"([^"]+)"', de))
     return reasons
 
 
@@ -46,18 +52,23 @@ def test_registry_equals_emitted_literals_exactly():
 
 
 def test_registry_partitions_cleanly():
-    # The three route groups are disjoint and cover the whole registry.
-    assert rr.SAME_WORK_REASONS.isdisjoint(rr.WRONG_PAPER_REASONS)
-    assert rr.SAME_WORK_REASONS.isdisjoint(rr.UNSCOREABLE_BUCKETS)
-    assert rr.WRONG_PAPER_REASONS.isdisjoint(rr.UNSCOREABLE_BUCKETS)
-    assert (rr.SAME_WORK_REASONS | rr.WRONG_PAPER_REASONS
-            | rr.UNSCOREABLE_BUCKETS) == set(rr.REASON_REGISTRY)
+    # The four route groups are pairwise disjoint and cover the whole registry.
+    groups = (rr.SAME_WORK_REASONS, rr.WRONG_PAPER_REASONS,
+              rr.RETRACTION_REASONS, rr.UNSCOREABLE_BUCKETS)
+    for i, a in enumerate(groups):
+        for b in groups[i + 1:]:
+            assert a.isdisjoint(b), f"overlap: {sorted(a & b)}"
+    union = set()
+    for g in groups:
+        union |= set(g)
+    assert union == set(rr.REASON_REGISTRY)
 
 
 def test_route_mapping_is_total_and_correct():
     assert set(rr.REASON_ROUTE) == set(rr.REASON_REGISTRY)
     assert rr.route_for("physical_location_same_work") == "review_same_work_variant"
     assert rr.route_for("resolved_preprint_target") == "review_wrong_paper"
+    assert rr.route_for("retracted_publication") == "f8_retracted"
     assert rr.route_for("single_word_title") == "unscoreable"
     assert rr.is_registered("near_identical_title")
     assert not rr.is_registered("not_a_real_reason")

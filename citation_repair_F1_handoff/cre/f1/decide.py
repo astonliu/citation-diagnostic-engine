@@ -8,7 +8,7 @@ Precision-first: anything ambiguous goes to human_review or cleared, never F1.
 """
 from __future__ import annotations
 
-from .schema import (Reference, F1, F2, CLEARED, UNVERIFIABLE, HUMAN_REVIEW,
+from .schema import (Reference, F1, F2, F8, CLEARED, UNVERIFIABLE, HUMAN_REVIEW,
                      UNSCOREABLE, V_FORMATTING, V_UNCERTAIN)
 from .confirm import found_anywhere, all_errored
 
@@ -31,6 +31,31 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
                          f"({log.unscoreable_reason}); excluded from the F2 "
                          f"numerator and reported as UNSCOREABLE.")
         log.decided_by = "unscoreable"
+        return ref
+
+    # F8: the citation points at a RETRACTED source (RESEARCH_PLAN_v2.2 §4.3 --
+    # "F8 is deterministic (retraction flag from PubMed / Retraction Watch) and is
+    # routed through the existence-check layer with F1/F2, never reaching the human
+    # classifier"). ``log.retracted`` is the tri-state the existence layer recorded
+    # in run.process_reference; this branch is a pure read of it, so decide() makes
+    # no network call.
+    #
+    # Placement is load-bearing in BOTH directions. It sits BELOW the UNSCOREABLE
+    # branch (a non-title comparison carries no citation to judge at all) and ABOVE
+    # the same-work quarantine and every F1/F2 path: a resolved record marked
+    # retracted is F8 regardless of what the same-work rule concluded about title
+    # identity, and regardless of whether the metadata comparison flagged.
+    #
+    # ``is True`` is mandatory. False means "types fetched, not retracted"; None
+    # means "we never learned" (no resolved PMID, or the lookup failed) and is NOT
+    # an accusation -- precision-first, an unknown falls through to the normal path.
+    if log.retracted is True:
+        log.retraction_reason = "retracted_publication"
+        ref.label, ref.confidence = F8, "HIGH"
+        ref.rationale = ("Resolved record carries the PubMed publication type "
+                         "'Retracted Publication': the cited source has been "
+                         "retracted.")
+        log.decided_by = "retracted_publication_pubtype"
         return ref
 
     # A deterministic identity rule found evidence of a translation, correction,

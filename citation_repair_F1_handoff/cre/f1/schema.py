@@ -326,6 +326,23 @@ class StageLog:
     # Set when the (claimed, resolved) pair is not a scoreable title comparison
     # (see UNSCOREABLE). Names the reason; routes the ref out of the F2 numerator.
     unscoreable_reason: Optional[str] = None
+    # F8 -- retracted source (RESEARCH_PLAN_v2.2 §4.3). TRI-STATE, never a bare
+    # bool:
+    #   True  -- the resolved record's PubMed publication types include
+    #            "Retracted Publication"
+    #   False -- the types were fetched and that type is absent
+    #   None  -- UNKNOWN: no resolved PMID to look up, or the lookup failed
+    # Test with ``is True`` / ``is False``, the same discipline as author_match. A
+    # falsy check would read an EFetch outage as "not retracted" and let a
+    # retracted source clear -- the same defect class as ``resolver_error`` in the
+    # F3-F7 full-text path: an absence of signal must stay distinguishable from a
+    # signal of absence. An unknown state is never an F8 (precision-first).
+    retracted: Optional[bool] = None
+    # The §5.6 reason code carried by an F8 row; "" on every other row. Set by
+    # decide() at the point the row takes the F8 route, so it names the ROUTE
+    # taken rather than merely restating ``retracted`` (a retracted row that the
+    # UNSCOREABLE branch claims first keeps retracted=True and this field "").
+    retraction_reason: str = ""
     llm_verdict: Optional[str] = None
     db_hits: dict = field(default_factory=dict)
     decided_by: str = ""
@@ -381,6 +398,8 @@ class Reference:
                 "identity_signals": self.log.identity_signals,
                 "author_tripwire": self.log.author_tripwire,
                 "unscoreable_reason": self.log.unscoreable_reason,
+                "retracted": self.log.retracted,
+                "retraction_reason": self.log.retraction_reason,
                 "llm_verdict": self.log.llm_verdict,
                 "db_hits": self.log.db_hits,
                 "decided_by": self.log.decided_by,
