@@ -22,12 +22,13 @@ WHAT IT VERIFIES, none of it taken from the caller:
 * **Temperature governance.** Two paths, chosen by the MODEL and never by the
   caller's preference. A model that supports the parameter is still pinned to
   ``0`` (DEC-046B), checked with ``is not None`` and ``== 0``, never truthiness.
-  A model that REJECTS it -- Claude Opus 4.7 onward, which 400s with
+  A model measured to REJECT it -- ``claude-opus-5`` 400s with
   ``"temperature is deprecated for this model."`` -- does not send it and
   records the string ``"unsupported"`` (DEC-070), never ``0``. Three states stay
   distinguishable in the manifest: ``0``, ``"unsupported"``, and the key being
-  absent. The relaxation is bounded by a measured model table, so it can never
-  widen into "any temperature is fine".
+  absent. The relaxation is bounded by a FIRST-PARTY-MEASURED model table, so it
+  can never widen into "any temperature is fine"; the receipt also records
+  whether the answer was measured or merely assumed.
 * **Adapter receipt.** The adapter must record, per call, the model and
   temperature it actually sent. After the run the launcher verifies at least one
   call happened and that EVERY call used the authorized model at temperature 0.
@@ -134,31 +135,67 @@ def verify_tree(repo_dir: str, pkg_dir: str) -> dict:
 #: absent (which means "not recorded at all"). Three states, all distinguishable.
 TEMPERATURE_UNSUPPORTED = "unsupported"
 
-#: Models measured to REJECT ``temperature`` outright (HTTP 400
-#: ``invalid_request_error: "temperature is deprecated for this model."``).
-#: DEC-070, from a live pre-flight against ``claude-opus-5``
-#: (request id ``req_011Ce3qbp97tLCSVL2rRZtYP``); deprecated provider-side from
-#: Claude Opus 4.7 onward.
+#: FIRST-PARTY MEASUREMENTS ONLY (DEC-070). A model enters this table when THIS
+#: project has observed it reject the parameter, not when a third party reports
+#: it and not by inference from a neighbouring version.
 #:
-#: EXPLICIT MEMBERSHIP ONLY -- no version-range matching. The two errors are not
-#: symmetric. Mistaking a REJECTING model for a supporting one sends the
-#: parameter and earns a loud 400 before any compute is spent. Mistaking a
-#: SUPPORTING model for a rejecting one silently omits the pin and lets the
-#: provider default decide sampling, which is a quiet wrong number. So a new
-#: model is treated as supporting (and must be pinned to 0) until a DECISION
-#: adds it here on measured evidence.
+#: * ``claude-opus-5`` -- measured, first-party: HTTP 400
+#:   ``invalid_request_error: "temperature is deprecated for this model."``
+#:   (request id ``req_011Ce3qbp97tLCSVL2rRZtYP``).
+#: * ``claude-opus-4-7`` -- reported by three independent third-party bug
+#:   reports, NOT measured here, so it stays OUT.
+#: * ``claude-opus-4-8`` -- was asserted by inference from the 4.7 reports and
+#:   nothing else; that assertion is WITHDRAWN, so it stays OUT.
+#:
+#: THE ASYMMETRY THAT GOVERNS THIS TABLE (DEC-070). The two errors are not
+#: equally bad. Wrongly listing a model as REJECTING is the SILENT failure: the
+#: pin is dropped, the parameter is never sent, and the provider default quietly
+#: decides sampling. Wrongly listing one as SUPPORTING is the LOUD failure: the
+#: parameter is sent and the provider 400s before any compute is spent. So the
+#: table is deliberately under-inclusive -- an unlisted model is treated as
+#: supporting (and must be pinned to 0) until a DECISION adds it on first-party
+#: measured evidence.
 TEMPERATURE_REJECTING_MODELS = frozenset({
-    "claude-opus-4-7",
-    "claude-opus-4-8",
     "claude-opus-5",
 })
 
+#: Measured first-party to ACCEPT the parameter. Behaviourally identical to an
+#: unlisted model -- both are pinned to 0 -- but it keeps "we measured this" and
+#: "we assume this" from reading the same in a receipt.
+TEMPERATURE_ACCEPTING_MODELS = frozenset({
+    "claude-sonnet-4-5",
+})
+
+EVIDENCE_MEASURED_REJECTS = "measured_first_party_rejects"
+EVIDENCE_MEASURED_ACCEPTS = "measured_first_party_accepts"
+EVIDENCE_ASSUMED_ACCEPTS = "unmeasured_assumed_accepts"
+
 
 def temperature_support(model: str) -> str:
-    """``"unsupported"`` if the provider rejects the parameter, else ``"supported"``."""
+    """``"unsupported"`` if the provider rejects the parameter, else ``"supported"``.
+
+    Binary on purpose: this answers what the launcher must DO. The strength of
+    the evidence behind the answer is a separate question -- see
+    ``temperature_evidence`` -- and must not blur the behavioural one.
+    """
     return (TEMPERATURE_UNSUPPORTED
             if (model or "").strip() in TEMPERATURE_REJECTING_MODELS
             else "supported")
+
+
+def temperature_evidence(model: str) -> str:
+    """How well the support answer is EVIDENCED -- three tiers, not two.
+
+    'Measured to accept' and 'assumed to accept because nobody looked' produce
+    the same behaviour and must not read the same in a receipt. Same discipline
+    as the manifest's 0 / "unsupported" / absent split.
+    """
+    m = (model or "").strip()
+    if m in TEMPERATURE_REJECTING_MODELS:
+        return EVIDENCE_MEASURED_REJECTS
+    if m in TEMPERATURE_ACCEPTING_MODELS:
+        return EVIDENCE_MEASURED_ACCEPTS
+    return EVIDENCE_ASSUMED_ACCEPTS
 
 
 def verify_temperature_governance(*, model: str, temperature) -> dict:
@@ -202,6 +239,7 @@ def verify_temperature_governance(*, model: str, temperature) -> dict:
     return {
         "model": model,
         "provider_support": support,
+        "support_evidence": temperature_evidence(model),
         "path": ("pinned_zero" if recorded == 0 else "not_sent_unsupported"),
         "recorded_value": recorded,
         "sent_to_provider": recorded == 0,

@@ -286,11 +286,46 @@ def test_an_amendment_and_a_ruling_both_record():
 UNSUP = pl.TEMPERATURE_UNSUPPORTED
 
 
-def test_the_model_table_matches_the_measured_evidence():
-    for m in ("claude-opus-4-7", "claude-opus-4-8", "claude-opus-5"):
-        assert pl.temperature_support(m) == UNSUP
+def test_only_first_party_measurements_are_in_the_rejecting_table():
+    """DEC-070 as amended. Only claude-opus-5 was measured by THIS project."""
+    assert pl.TEMPERATURE_REJECTING_MODELS == frozenset({"claude-opus-5"})
+    assert pl.temperature_support("claude-opus-5") == UNSUP
     # sonnet ACCEPTS it -- which is why every prior measurement missed this.
     assert pl.temperature_support("claude-sonnet-4-5") == "supported"
+
+
+@pytest.mark.parametrize("model", ["claude-opus-4-7", "claude-opus-4-8"])
+def test_third_party_reports_and_inference_do_not_enter_the_table(model):
+    """4-7 is third-party-reported only; 4-8 was inferred from it and the
+    assertion is WITHDRAWN. Both stay out, so both are pinned to 0.
+
+    This is the asymmetry deliberately chosen: wrongly listing a model as
+    REJECTING silently drops the pin and lets the provider default decide
+    sampling; wrongly listing one as SUPPORTING earns a loud 400 before any
+    compute is spent."""
+    assert model not in pl.TEMPERATURE_REJECTING_MODELS
+    assert pl.temperature_support(model) == "supported"
+    with pytest.raises(LaunchRefused, match="temperature must be 0"):
+        pl.verify_temperature_governance(model=model, temperature=None)
+    g = pl.verify_temperature_governance(model=model, temperature=0)
+    assert g["recorded_value"] == 0
+    assert g["support_evidence"] == pl.EVIDENCE_ASSUMED_ACCEPTS
+
+
+def test_evidence_tiers_are_three_not_two():
+    """'Measured to accept' and 'assumed because nobody looked' behave the same
+    and must not READ the same."""
+    assert pl.temperature_evidence("claude-opus-5") == pl.EVIDENCE_MEASURED_REJECTS
+    assert pl.temperature_evidence("claude-sonnet-4-5") == pl.EVIDENCE_MEASURED_ACCEPTS
+    assert pl.temperature_evidence("claude-opus-4-7") == pl.EVIDENCE_ASSUMED_ACCEPTS
+    assert pl.temperature_evidence("some-new-model-9") == pl.EVIDENCE_ASSUMED_ACCEPTS
+
+
+def test_the_evidence_tier_lands_in_the_receipt():
+    g = pl.verify_temperature_governance(model="claude-opus-5", temperature=None)
+    assert g["support_evidence"] == pl.EVIDENCE_MEASURED_REJECTS
+    g = pl.verify_temperature_governance(model="claude-sonnet-4-5", temperature=0)
+    assert g["support_evidence"] == pl.EVIDENCE_MEASURED_ACCEPTS
 
 
 def test_a_rejecting_model_records_unsupported_and_sends_nothing():
