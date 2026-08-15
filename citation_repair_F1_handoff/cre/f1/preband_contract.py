@@ -356,7 +356,84 @@ def enforce_join_reached(counts: dict, missing_disposition_key: str,
 # --------------------------------------------------------------------------
 # Production preflight: the same conditions, checked BEFORE any work
 # --------------------------------------------------------------------------
-def assert_production_launch_shape(*, max_docs, resume_detected: bool,
+#: A frozen-corpus manifest must declare its CONTENTS, not just exist. Hashing
+#: the manifest file proves only that the manifest did not change -- it says
+#: nothing about the XML actually on disk, so a swapped, added or edited document
+#: passes unnoticed. Accepted inventory shapes, both under ``documents``:
+#:   {"documents": {"PMC1.xml": "<sha256>", ...}}
+#:   {"documents": [{"filename": "PMC1.xml", "sha256": "..."}, ...]}
+def corpus_inventory(manifest: dict) -> dict:
+    """Extract ``{filename: sha256}`` from a frozen-corpus manifest, or raise."""
+    docs = manifest.get("documents")
+    out: dict = {}
+    if isinstance(docs, dict) and docs:
+        for name, sha in docs.items():
+            if not isinstance(name, str) or not isinstance(sha, str):
+                raise PrebandContractError(
+                    f"frozen manifest inventory entry {name!r} is malformed")
+            out[name] = sha.strip().lower()
+    elif isinstance(docs, list) and docs:
+        for i, row in enumerate(docs):
+            if not isinstance(row, dict):
+                raise PrebandContractError(
+                    f"frozen manifest documents[{i}] is not an object")
+            name = row.get("filename") or row.get("name")
+            sha = row.get("sha256") or row.get("digest")
+            if not isinstance(name, str) or not isinstance(sha, str):
+                raise PrebandContractError(
+                    f"frozen manifest documents[{i}] lacks filename/sha256")
+            out[name] = sha.strip().lower()
+    if not out:
+        raise PrebandContractError(
+            "frozen corpus manifest declares no document inventory; a manifest "
+            "without one cannot bind the corpus, and hashing the manifest file "
+            "alone proves nothing about the XML on disk. Expected "
+            "{'documents': {filename: sha256}} or a list of "
+            "{filename, sha256} objects.")
+    for name, sha in out.items():
+        if not re.fullmatch(r"[0-9a-f]{64}", sha):
+            raise PrebandContractError(
+                f"frozen manifest inventory: {name} sha256 {sha!r} is not 64-hex")
+    return out
+
+
+def verify_corpus_contents(xml_dir: str, inventory: dict) -> dict:
+    """Verify the corpus dir matches the inventory EXACTLY. Raise on any drift.
+
+    Exact means: same filename set (no extras, no absences) and every file's
+    sha256 equal. An extra XML silently enlarges the population; a missing one
+    silently shrinks it; an edited one changes what was judged with no trace.
+    """
+    on_disk = sorted(fn for fn in os.listdir(xml_dir)
+                     if fn.endswith((".xml", ".nxml")))
+    declared = sorted(inventory)
+    missing = [f for f in declared if f not in on_disk]
+    extra = [f for f in on_disk if f not in inventory]
+    problems: list = []
+    if missing:
+        problems.append(f"declared but absent from {xml_dir}: {missing[:5]}")
+    if extra:
+        problems.append(f"present in {xml_dir} but not declared: {extra[:5]}")
+    mismatched: list = []
+    digests: dict = {}
+    for fn in on_disk:
+        if fn not in inventory:
+            continue
+        actual = _sha256_file(os.path.join(xml_dir, fn))
+        digests[fn] = actual
+        if actual != inventory[fn]:
+            mismatched.append(fn)
+    if mismatched:
+        problems.append(
+            f"content differs from the frozen digest: {mismatched[:5]}")
+    if problems:
+        raise PrebandContractError(
+            "FROZEN CORPUS MISMATCH -- the documents on disk are not the frozen "
+            "corpus:\n  - " + "\n  - ".join(problems))
+    return digests
+
+
+def assert_production_launch_shape(*, max_docs, out_dir: str,
                                    chain_genesis: str) -> None:
     """Phase 1 of the production preflight: is this a single fresh segment?
 
@@ -369,12 +446,20 @@ def assert_production_launch_shape(*, max_docs, resume_detected: bool,
         problems.append(
             "max_docs is set; a bounded pass leaves the manifest in_progress and "
             "is not a production run")
-    if resume_detected:
-        problems.append(
-            "out_dir already holds run state; production runs may not resume "
-            "(resume can duplicate rows, miscount the population, and combine "
-            "different models/settings/commits under one manifest). Start a "
-            "FRESH out_dir and restart.")
+    # NONEXISTENT OR COMPLETELY EMPTY, not merely "no checkpoint/predictions".
+    # A leftover manifest, sidecar, torn tail, queue or F5 discovery file from a
+    # prior attempt is state this run would append to or silently sit beside.
+    if os.path.isdir(out_dir):
+        leftover = sorted(os.listdir(out_dir))
+        if leftover:
+            problems.append(
+                f"out_dir {out_dir} is not empty ({leftover[:6]}); a production "
+                "run requires a NONEXISTENT or COMPLETELY EMPTY out_dir. Resume "
+                "can duplicate rows, miscount the population, and combine "
+                "different models/settings/commits under one manifest. Discard "
+                "and restart in a fresh directory.")
+    elif os.path.exists(out_dir):
+        problems.append(f"out_dir {out_dir} exists and is not a directory")
     if (chain_genesis or "").strip():
         problems.append(
             "chain_genesis is set; this run extends a prior segment and is not a "
@@ -387,7 +472,8 @@ def assert_production_launch_shape(*, max_docs, resume_detected: bool,
 
 def assert_production_preflight(*, disp: "Disposition | None", join_acc: dict,
                                 parse_failures: dict, code_commit: str,
-                                model: str, corpus_manifest_path: str) -> dict:
+                                model: str, corpus_manifest_path: str,
+                                xml_dir: str) -> dict:
     """Phase 2 of the production preflight: is this run BOUND? Returns the bindings.
 
     Every condition here is ALSO a reportability clause, but reportability is
@@ -428,6 +514,7 @@ def assert_production_preflight(*, disp: "Disposition | None", join_acc: dict,
         problems.append("no model supplied")
 
     corpus_sha = ""
+    doc_digests: dict = {}
     if not corpus_manifest_path:
         problems.append(
             "no corpus_manifest_path supplied; the frozen corpus cannot be bound")
@@ -444,12 +531,25 @@ def assert_production_preflight(*, disp: "Disposition | None", join_acc: dict,
             problems.append(
                 f"corpus mismatch: the disposition was built over "
                 f"{declared[:12]}… but this run judges {corpus_sha[:12]}…")
+        # AND the manifest's CONTENTS, not just its own bytes. Hashing the
+        # manifest file proves only that the manifest did not change; a swapped,
+        # added, removed or edited XML passes that check untouched.
+        try:
+            with open(corpus_manifest_path, encoding="utf-8") as f:
+                corpus_manifest = json.load(f)
+            inventory = corpus_inventory(corpus_manifest)
+            doc_digests = verify_corpus_contents(xml_dir, inventory)
+        except PrebandContractError as exc:
+            problems.append(str(exc))
+        except (json.JSONDecodeError, OSError) as exc:
+            problems.append(f"corpus manifest unreadable: {exc}")
 
     if problems:
         raise PrebandContractError(
             "PRODUCTION PREFLIGHT FAILED -- refusing to start; no output was "
             "written:\n  - " + "\n  - ".join(problems))
-    return {"corpus_manifest_sha256": corpus_sha}
+    return {"corpus_manifest_sha256": corpus_sha,
+            "document_sha256": doc_digests}
 
 
 # --------------------------------------------------------------------------
@@ -539,6 +639,53 @@ def reportability_report(manifest: dict, predictions_path: str) -> dict:
     dupes = sorted({cid for cid in lines if lines.count(cid) > 1})
     need("unique_citation_ids", not dupes,
          f"duplicate citation_id(s) in predictions: {dupes[:5]}")
+
+    # THE EXECUTED CORPUS MUST EQUAL THE PREFLIGHTED ONE. The preflight parse and
+    # the execution parse are two separate passes over the same XML; if the second
+    # drops a document or yields a different id set, the population that was
+    # validated is not the population that was judged.
+    dom = manifest.get("executed_domain") or {}
+    need("executed_domain_matches_preflight", dom.get("matches_preflight") is True,
+         f"executed citation-id domain differs from the preflight: "
+         f"{dom.get('only_in_preflight', [])[:3]} missing, "
+         f"{dom.get('only_in_execution', [])[:3]} unexpected")
+
+    # THE QUEUE MUST EQUAL THE SCOREABLE PREDICTIONS. An annotation queue that
+    # silently holds fewer rows than the run scored is a different denominator
+    # than the one the manifest reports.
+    q = manifest.get("queue_audit") or {}
+    need("queue_matches_scoreable", q.get("matches") is True,
+         f"annotation queue does not match the scoreable predictions "
+         f"(queue {q.get('queue_rows')} vs scoreable {q.get('scoreable_rows')}; "
+         f"differing ids {(q.get('symmetric_difference') or [])[:3]})")
+
+    # GLOBAL REPORTABILITY. A per-category block may be non-reportable on its own
+    # terms (F5 is unreportable BY CONSTRUCTION -- deploy_path_a is hard-gated off
+    # and it has no verifier; F4 is reportable only in formal mode with a distinct
+    # verifier; F7 needs its relation prompt digest). If the run EMITTED a label
+    # from such a category, the run as a whole is not reportable -- otherwise an
+    # unreportable F5 verdict rides out inside a "reportable" run.
+    emitted = manifest.get("emitted_labels") or {}
+    for cat in ("F3", "F4", "F5", "F7"):
+        if not emitted.get(cat):
+            continue
+        block = manifest.get(cat.lower())
+        if block is None:
+            need(f"{cat}_provenance", False,
+                 f"{emitted[cat]} {cat} label(s) emitted but no {cat.lower()} "
+                 "provenance block exists")
+            continue
+        if cat == "F3":
+            # F3 has no reportable flag; it requires a wired discriminator and a
+            # recorded effective policy.
+            ok = bool(block.get("wired")) and len(str(block.get("policy_sha256") or "")) == 64
+            need("F3_provenance", ok,
+                 f"{emitted[cat]} F3 label(s) emitted but the f3 block is "
+                 "unwired or carries no effective-policy digest")
+        else:
+            need(f"{cat}_reportable", block.get("reportable") is True,
+                 f"{emitted[cat]} {cat} label(s) emitted but the {cat.lower()} "
+                 "block is NOT reportable")
 
     return {"reportable": not failures, "failures": failures, "checks": checks}
 

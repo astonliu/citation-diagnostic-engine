@@ -74,6 +74,7 @@ from typing import Callable, Iterable, Optional
 
 from . import judgment_band as jb
 from . import preband_contract as pc
+from .preband_contract import PrebandContractError
 from .judgment_engine import (
     DiscriminatorContractError,
     ProvenanceAssessment,
@@ -939,9 +940,7 @@ def run_natural_judgment(
     # "empty corpus" error and the resume problem is never named.
     if production:
         pc.assert_production_launch_shape(
-            max_docs=max_docs,
-            resume_detected=bool(done) or os.path.exists(pred_path),
-            chain_genesis=chain_genesis)
+            max_docs=max_docs, out_dir=out_dir, chain_genesis=chain_genesis)
     pending = [fn for fn in files if jb._pmcid_from_filename(fn) not in done]
     to_process = pending[:max_docs] if max_docs is not None else pending
     expected_ids, expected_per_doc, preflight_parse_failures = (
@@ -957,11 +956,11 @@ def run_natural_judgment(
     # (after the compute is spent, and only if the caller asks). Checking up
     # front makes them mandatory rather than advisory.
     if production:
-        pc.assert_production_preflight(
+        corpus_bindings = pc.assert_production_preflight(
             disp=disp_obj, join_acc=join_acc,
             parse_failures=preflight_parse_failures,
             code_commit=code_commit, model=model,
-            corpus_manifest_path=corpus_manifest_path)
+            corpus_manifest_path=corpus_manifest_path, xml_dir=xml_dir)
 
     # Load-bearing module hashes, captured BEFORE execution so they describe the
     # bytes that actually ran. Read after the loop, they could describe a module
@@ -1005,6 +1004,10 @@ def run_natural_judgment(
     docs_processed = 0
     scoreable_records = 0
     queue_rows = 0
+    executed_ids: set = set()
+    queue_ids: list = []
+    scoreable_ids: list = []
+    emitted_labels: dict = {}
     pubtype_cache: dict = {}
 
     pred_fh = open(pred_path, "a", encoding="utf-8")
@@ -1036,6 +1039,8 @@ def run_natural_judgment(
              "link": prev_link}, ensure_ascii=False) + "\n")
         side_fh.flush()
         bump(rec["disposition"])
+        if rec.get("label"):
+            emitted_labels[rec["label"]] = emitted_labels.get(rec["label"], 0) + 1
         # Mechanical F4 counters, derived from the audit records themselves.
         for sr in rec.get("strength_records") or []:
             if sr.get("assessed"):
@@ -1049,6 +1054,8 @@ def run_natural_judgment(
             nonlocal scoreable_records, queue_rows
             scoreable_records += 1
             queue_rows += 1
+            scoreable_ids.append(rec["citation_id"])
+            queue_ids.append(rec["citation_id"])
             payload = jb.annotation_payload({
                 "item_key": rec["citation_id"],
                 "citing_sentence": rec["citing_sentence"],
@@ -1075,6 +1082,14 @@ def run_natural_judgment(
             try:
                 refs = parse_pmc_xml(os.path.join(xml_dir, fn), source_pmcid=pmcid)
             except Exception as e:                        # noqa: BLE001 - best effort
+                if production:
+                    # The preflight parsed this document successfully; a second
+                    # pass failing means the two passes disagree about the
+                    # population. Skipping would silently shrink it.
+                    raise PrebandContractError(
+                        f"production: {pmcid} parsed in the preflight but FAILED "
+                        f"during execution ({type(e).__name__}: {e}); the "
+                        "validated population is not the judged population")
                 print(f"[judgment-run-parse-skip] {pmcid}: {e}")
                 ckpt_fh.write(json.dumps({"pmcid": pmcid, "error": str(e)}) + "\n")
                 ckpt_fh.flush()
@@ -1084,6 +1099,7 @@ def run_natural_judgment(
 
             for ref in refs:
                 refs_seen += 1
+                executed_ids.add(ref.citation_id)
                 reason = jb.exclusion_reason(ref)
                 if reason is not None:                    # no citance / no cited pmid
                     emit(_excluded_record(ref, reason))
@@ -1333,6 +1349,29 @@ def run_natural_judgment(
             "f4_verifier_wired": f4_verifier_call_llm is not None,
             "chain_genesis": chain_genesis,
         },
+        # The preflight parse and the execution parse are two passes over the
+        # same XML. If they disagree, the population that was VALIDATED is not
+        # the population that was JUDGED.
+        "executed_domain": {
+            "preflight_ids": len(expected_ids),
+            "executed_ids": len(executed_ids),
+            "matches_preflight": executed_ids == set(expected_ids),
+            "only_in_preflight": sorted(set(expected_ids) - executed_ids)[:10],
+            "only_in_execution": sorted(executed_ids - set(expected_ids))[:10],
+        },
+        # The blind queue is the annotation denominator; it must equal the
+        # scoreable predictions exactly, by id, not just by count.
+        "queue_audit": {
+            "queue_rows": len(queue_ids),
+            "scoreable_rows": len(scoreable_ids),
+            "matches": (len(queue_ids) == len(scoreable_ids)
+                        and set(queue_ids) == set(scoreable_ids)),
+            "symmetric_difference": sorted(
+                set(queue_ids) ^ set(scoreable_ids))[:10],
+        },
+        "emitted_labels": dict(sorted(emitted_labels.items())),
+        **({"corpus_document_sha256": corpus_bindings.get("document_sha256", {})}
+           if production else {}),
         "counts": counts,
         "excluded_preband_by_label": preband_by_label,
         "docs_processed": docs_processed,

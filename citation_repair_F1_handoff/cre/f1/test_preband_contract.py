@@ -348,6 +348,9 @@ def good_manifest(**over):
         "module_sha256_stable": True,
         "total_records": 2,
         "chain_record_count": 2,
+        "executed_domain": {"matches_preflight": True},
+        "queue_audit": {"matches": True, "queue_rows": 2, "scoreable_rows": 2},
+        "emitted_labels": {},
     }
     m.update(over)
     return m

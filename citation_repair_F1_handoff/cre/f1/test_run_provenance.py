@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -385,9 +386,22 @@ def _canonical_disp(tmp_path, ids, *, corpus_sha=""):
 
 
 def _corpus(tmp_path, payload=None):
+    """A frozen manifest that declares its CONTENTS: every XML and its sha256."""
+    if payload is None:
+        inv = {}
+        for fn in sorted(os.listdir(tmp_path)):
+            if fn.endswith((".xml", ".nxml")):
+                inv[fn] = hashlib.sha256(
+                    (tmp_path / fn).read_bytes()).hexdigest()
+        payload = {"schema": "frozen_corpus_v1", "documents": inv}
     p = tmp_path / "frozen_manifest.json"
-    p.write_text(json.dumps(payload or {"documents": ["PMC1"]}), encoding="utf-8")
+    p.write_text(json.dumps(payload), encoding="utf-8")
     return str(p), hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def _seed_xml(tmp_path, names=("PMC1.xml",)):
+    for n in names:
+        (tmp_path / n).write_text("<x/>", encoding="utf-8")
 
 
 def _prod(tmp_path, monkeypatch, refs, disposition, **over):
@@ -401,6 +415,7 @@ def _prod(tmp_path, monkeypatch, refs, disposition, **over):
 
 
 def test_a_fully_bound_production_run_succeeds(tmp_path, monkeypatch):
+    _seed_xml(tmp_path)
     cpath, csha = _corpus(tmp_path)
     art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
     manifest, _ = _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
@@ -411,6 +426,7 @@ def test_a_fully_bound_production_run_succeeds(tmp_path, monkeypatch):
 
 def test_production_refuses_a_dict_disposition(tmp_path, monkeypatch):
     from . import preband_contract as pc
+    _seed_xml(tmp_path)
     cpath, _ = _corpus(tmp_path)
     out = tmp_path / "out"
     with pytest.raises(pc.PrebandContractError, match="canonical preband_disposition_v1"):
@@ -421,6 +437,7 @@ def test_production_refuses_a_dict_disposition(tmp_path, monkeypatch):
 
 def test_production_refuses_incomplete_id_coverage(tmp_path, monkeypatch):
     from . import preband_contract as pc
+    _seed_xml(tmp_path)
     cpath, csha = _corpus(tmp_path)
     art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
     with pytest.raises(pc.PrebandContractError, match="absent from the disposition"):
@@ -448,7 +465,7 @@ def test_production_refuses_a_missing_corpus_binding(tmp_path, monkeypatch):
 
 def test_production_refuses_any_parse_failure(tmp_path, monkeypatch):
     from . import preband_contract as pc
-    (tmp_path / "PMC2.xml").write_text("junk", encoding="utf-8")
+    _seed_xml(tmp_path, ("PMC1.xml", "PMC2.xml"))
     cpath, csha = _corpus(tmp_path)
     art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
 
@@ -458,7 +475,6 @@ def test_production_refuses_any_parse_failure(tmp_path, monkeypatch):
         return [make_ref("PMC1:B1")]
 
     monkeypatch.setattr(jr, "parse_pmc_xml", parse)
-    (tmp_path / "PMC1.xml").write_text("<x/>", encoding="utf-8")
     with pytest.raises(pc.PrebandContractError, match="ZERO parse"):
         jr.run_natural_judgment(
             str(tmp_path), str(tmp_path / "out"),
@@ -471,6 +487,7 @@ def test_production_refuses_any_parse_failure(tmp_path, monkeypatch):
 
 def test_production_refuses_an_empty_code_commit(tmp_path, monkeypatch):
     from . import preband_contract as pc
+    _seed_xml(tmp_path)
     cpath, csha = _corpus(tmp_path)
     art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
     with pytest.raises(pc.PrebandContractError, match="no code_commit"):
@@ -485,6 +502,7 @@ def test_production_refuses_an_empty_model(tmp_path, monkeypatch):
     (tmp_path / "PMC1.xml").write_text("<x/>", encoding="utf-8")
     monkeypatch.setattr(jr, "parse_pmc_xml",
                         lambda path, source_pmcid=None: [make_ref("PMC1:B1")])
+    _seed_xml(tmp_path)
     cpath, csha = _corpus(tmp_path)
     art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
     with pytest.raises(pc.PrebandContractError, match="no model"):
@@ -499,6 +517,7 @@ def test_production_refuses_an_empty_model(tmp_path, monkeypatch):
 
 def test_production_refuses_max_docs(tmp_path, monkeypatch):
     from . import preband_contract as pc
+    _seed_xml(tmp_path)
     cpath, csha = _corpus(tmp_path)
     art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
     with pytest.raises(pc.PrebandContractError, match="max_docs"):
@@ -510,19 +529,239 @@ def test_production_refuses_resume_into_an_existing_out_dir(tmp_path, monkeypatc
     """Resume can duplicate rows, miscount the population, and combine different
     models/settings/commits under one manifest. Recovery is a FRESH out_dir."""
     from . import preband_contract as pc
+    _seed_xml(tmp_path)
     cpath, csha = _corpus(tmp_path)
     art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
     _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
           corpus_manifest_path=cpath)                       # first run: fine
-    with pytest.raises(pc.PrebandContractError, match="may not resume"):
+    with pytest.raises(pc.PrebandContractError, match="COMPLETELY EMPTY out_dir"):
         _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
               corpus_manifest_path=cpath)                   # second: refused
 
 
 def test_production_refuses_a_chained_segment(tmp_path, monkeypatch):
     from . import preband_contract as pc
+    _seed_xml(tmp_path)
     cpath, csha = _corpus(tmp_path)
     art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
     with pytest.raises(pc.PrebandContractError, match="chain_genesis"):
         _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
               corpus_manifest_path=cpath, chain_genesis="a" * 64)
+
+
+def test_production_refuses_a_nonempty_out_dir_without_run_state(tmp_path, monkeypatch):
+    """CODEX 3: "no checkpoint/predictions" was too weak. A leftover manifest,
+    sidecar, torn tail, queue or F5 discovery file from a prior attempt is state
+    this run would append to or silently sit beside."""
+    from . import preband_contract as pc
+    _seed_xml(tmp_path)
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "judgment_run_torn_tail.jsonl").write_text("{}\n", encoding="utf-8")
+    with pytest.raises(pc.PrebandContractError, match="COMPLETELY EMPTY out_dir"):
+        _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
+              corpus_manifest_path=cpath)
+
+
+# --------------------------------- frozen corpus CONTENTS, not just its bytes
+
+def test_production_refuses_a_manifest_with_no_inventory(tmp_path, monkeypatch):
+    """CODEX 1: hashing the manifest file proves only that the manifest did not
+    change. It says nothing about the XML on disk."""
+    from . import preband_contract as pc
+    _seed_xml(tmp_path)
+    cpath, csha = _corpus(tmp_path, {"schema": "frozen_corpus_v1", "n": 1})
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+    with pytest.raises(pc.PrebandContractError, match="declares no document inventory"):
+        _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
+              corpus_manifest_path=cpath)
+
+
+def test_production_refuses_an_edited_xml(tmp_path, monkeypatch):
+    """The manifest is untouched and its own digest still matches; the DOCUMENT
+    changed. Only a contents check catches this."""
+    from . import preband_contract as pc
+    # NOT PMC1.xml: the run() helper rewrites that file on every call.
+    _seed_xml(tmp_path, ("PMC1.xml", "PMC5.xml"))
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+    (tmp_path / "PMC5.xml").write_text("<x>edited</x>", encoding="utf-8")
+    with pytest.raises(pc.PrebandContractError, match="content differs from the frozen digest"):
+        _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
+              corpus_manifest_path=cpath)
+
+
+def test_production_refuses_an_undeclared_extra_xml(tmp_path, monkeypatch):
+    """An extra XML silently ENLARGES the population."""
+    from . import preband_contract as pc
+    _seed_xml(tmp_path)
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+    (tmp_path / "PMC7.xml").write_text("<x/>", encoding="utf-8")
+    with pytest.raises(pc.PrebandContractError, match="not declared"):
+        _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
+              corpus_manifest_path=cpath)
+
+
+def test_production_refuses_a_declared_but_absent_xml(tmp_path, monkeypatch):
+    """A missing XML silently SHRINKS the population."""
+    from . import preband_contract as pc
+    _seed_xml(tmp_path, ("PMC1.xml", "PMC5.xml"))
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+    os.remove(tmp_path / "PMC5.xml")
+    with pytest.raises(pc.PrebandContractError, match="declared but absent"):
+        _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
+              corpus_manifest_path=cpath)
+
+
+def test_a_production_run_records_every_document_digest(tmp_path, monkeypatch):
+    _seed_xml(tmp_path)
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+    manifest, _ = _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
+                        corpus_manifest_path=cpath)
+    digests = manifest["corpus_document_sha256"]
+    assert set(digests) == {"PMC1.xml"}
+    assert digests["PMC1.xml"] == hashlib.sha256(
+        (tmp_path / "PMC1.xml").read_bytes()).hexdigest()
+
+
+# ------------------------------------- the double-parse loss (CODEX 2)
+
+def test_an_execution_parse_failure_is_fatal_in_production(tmp_path, monkeypatch):
+    """The preflight parsed it; the execution pass did not. Skipping would
+    silently shrink the validated population."""
+    from . import preband_contract as pc
+    _seed_xml(tmp_path)
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+    calls = {"n": 0}
+
+    def flaky(path, source_pmcid=None):
+        calls["n"] += 1
+        if calls["n"] > 1:                      # preflight ok, execution fails
+            raise ValueError("junk before document element")
+        return [make_ref("PMC1:B1")]
+
+    monkeypatch.setattr(jr, "parse_pmc_xml", flaky)
+    with pytest.raises(pc.PrebandContractError, match="FAILED during execution"):
+        jr.run_natural_judgment(
+            str(tmp_path), str(tmp_path / "out"),
+            extractor=extractor_of("Drug X reduces Y"),
+            coverage_judge=judge_established(True), fetch_abstract=abstract_ok,
+            preband_disposition=art, model="test-model", production=True,
+            temperature=0, corpus_manifest_path=cpath,
+            code_commit="8e1737163b9a43cc0f445d238fe04406a659c6f6")
+
+
+def test_a_diverging_executed_domain_blocks_reportability(tmp_path, monkeypatch):
+    """Both passes succeed but yield DIFFERENT ids -- the validated population is
+    not the judged one."""
+    _seed_xml(tmp_path)
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1", "PMC1:B2"], corpus_sha=csha)
+    calls = {"n": 0}
+
+    def drifting(path, source_pmcid=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [make_ref("PMC1:B1"), make_ref("PMC1:B2")]
+        return [make_ref("PMC1:B1")]            # execution loses one
+
+    monkeypatch.setattr(jr, "parse_pmc_xml", drifting)
+    manifest = jr.run_natural_judgment(
+        str(tmp_path), str(tmp_path / "out"),
+        extractor=extractor_of("Drug X reduces Y"),
+        coverage_judge=judge_established(True), fetch_abstract=abstract_ok,
+        preband_disposition=art, model="test-model", temperature=0,
+        corpus_manifest_path=cpath,
+        code_commit="8e1737163b9a43cc0f445d238fe04406a659c6f6")
+    dom = manifest["executed_domain"]
+    assert dom["matches_preflight"] is False
+    assert dom["only_in_preflight"] == ["PMC1:B2"]
+    assert manifest["reportability"]["checks"][
+        "executed_domain_matches_preflight"] is False
+
+
+# --------------------- global reportability across category blocks (CODEX 4)
+
+def test_an_emitted_f5_label_makes_the_whole_run_unreportable(tmp_path):
+    """F5 is unreportable BY CONSTRUCTION -- deploy_path_a is hard-gated off and
+    it has no verifier. An F5 verdict must not ride out inside a run that calls
+    itself reportable."""
+    from . import preband_contract as pc
+    from .test_preband_contract import good_manifest, preds
+    m = good_manifest()
+    m["emitted_labels"] = {"F5": 2}
+    m["f5"] = {"reportable": False}
+    r = pc.reportability_report(m, preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
+    assert r["checks"]["F5_reportable"] is False
+    assert r["reportable"] is False
+
+
+def test_an_emitted_f4_label_needs_a_reportable_f4_block(tmp_path):
+    from . import preband_contract as pc
+    from .test_preband_contract import good_manifest, preds
+    m = good_manifest()
+    m["emitted_labels"] = {"F4": 1}
+    m["f4"] = {"reportable": False, "mode": "development"}
+    r = pc.reportability_report(m, preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
+    assert r["checks"]["F4_reportable"] is False
+
+
+def test_an_emitted_f7_label_without_a_block_is_rejected(tmp_path):
+    from . import preband_contract as pc
+    from .test_preband_contract import good_manifest, preds
+    m = good_manifest()
+    m["emitted_labels"] = {"F7": 3}
+    r = pc.reportability_report(m, preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
+    assert r["checks"]["F7_provenance"] is False
+
+
+def test_an_emitted_f3_label_needs_a_wired_policy_digest(tmp_path):
+    from . import preband_contract as pc
+    from .test_preband_contract import good_manifest, preds
+    m = good_manifest()
+    m["emitted_labels"] = {"F3": 1}
+    m["f3"] = {"wired": False, "policy_sha256": ""}
+    r = pc.reportability_report(m, preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
+    assert r["checks"]["F3_provenance"] is False
+    m["f3"] = {"wired": True, "policy_sha256": "a" * 64}
+    assert pc.reportability_report(
+        m, preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))["checks"]["F3_provenance"] is True
+
+
+def test_f6_only_run_is_unaffected(tmp_path):
+    """F6 is the always-live discriminator and has no category block."""
+    from . import preband_contract as pc
+    from .test_preband_contract import good_manifest, preds
+    m = good_manifest()
+    m["emitted_labels"] = {"F6": 5}
+    assert pc.reportability_report(
+        m, preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))["reportable"] is True
+
+
+# ------------------------------------- the queue audit (CODEX 3, second half)
+
+def test_a_queue_short_of_the_scoreable_set_blocks_reportability(tmp_path):
+    from . import preband_contract as pc
+    from .test_preband_contract import good_manifest, preds
+    m = good_manifest()
+    m["queue_audit"] = {"matches": False, "queue_rows": 1, "scoreable_rows": 2,
+                        "symmetric_difference": ["PMC1:B2"]}
+    r = pc.reportability_report(m, preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
+    assert r["checks"]["queue_matches_scoreable"] is False
+
+
+def test_a_real_run_queue_matches_its_scoreable_predictions(tmp_path, monkeypatch):
+    _seed_xml(tmp_path)
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+    manifest, _ = _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
+                        corpus_manifest_path=cpath)
+    q = manifest["queue_audit"]
+    assert q["matches"] is True
+    assert q["queue_rows"] == q["scoreable_rows"] == manifest["scoreable_records"]
