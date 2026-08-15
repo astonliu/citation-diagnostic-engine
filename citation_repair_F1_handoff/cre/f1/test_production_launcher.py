@@ -57,13 +57,13 @@ def test_a_nonzero_or_absent_temperature_refuses(temp):
 
 # ------------------------------------------- different-family judge (DEC-065)
 
-def test_a_same_family_judge_refuses_without_an_amendment():
+def test_a_same_family_judge_refuses_without_an_amendment_or_ruling():
     with pytest.raises(LaunchRefused, match="SAME family"):
         pl.launch(**base(judge_model="claude-opus-4-7"))
 
 
 def test_no_judge_and_no_amendment_refuses():
-    with pytest.raises(LaunchRefused, match="different-family judge or a formal"):
+    with pytest.raises(LaunchRefused, match="no preregistration_scope_ruling"):
         pl.launch(**base(judge_model=""))
 
 
@@ -153,3 +153,120 @@ def test_a_consistent_receipt_passes():
 def test_a_missing_receipt_object_refuses():
     with pytest.raises(LaunchRefused, match="ZERO calls"):
         pl.verify_receipt(object(), model="m", temperature=0)
+
+
+# =====================================================================
+# The DECISION-recorded scope ruling: the third answer on the judge branch
+# =====================================================================
+#
+# DEC-069's actual payload. It supplies NEITHER a different-family judge NOR an
+# amendment, on purpose -- not touching the commit-hash-cited file is the whole
+# point of a scope ruling. A launcher offering only those two escape hatches
+# refuses every call, which is the defect these tests pin closed.
+DEC_069 = {
+    "decision_id": "DEC-069",
+    "date": "2026-08-15",
+    "section": "PREREGISTRATION.md §6",
+    "ruling": (
+        "§6 is titled 'Generation-Mode evaluation' and its different-family-judge "
+        "commitment governs the judging of GENERATED candidates. The first paper "
+        "has no generation mode (DEC-046A defers repair and generation), so §6 "
+        "has nothing to bind and the F3-F7 detection band is outside its scope."),
+    "residual_risk": (
+        "A reviewer may read §6 as covering any LLM-as-judge step. Inside the "
+        "band, claude-opus-5 judges coverage of claims claude-opus-5 itself "
+        "extracted. That is a real intra-pipeline conflict of interest and is "
+        "NOT the one §6 addresses; the answer is a human-adjudicated sample, not "
+        "a second model family."),
+}
+
+
+def test_a_scope_ruling_is_accepted_with_no_judge_and_no_amendment():
+    """THE DEFECT, pinned. DEC-069 closed model governance while giving neither
+    escape hatch, so launch() refused unconditionally and the corpus run could
+    not start."""
+    with pytest.raises(LaunchRefused) as exc:
+        pl.launch(**base(judge_model="", model="claude-opus-5",
+                         authorized_models=["claude-opus-5"],
+                         preregistration_scope_ruling=DEC_069))
+    msg = str(exc.value)
+    assert "scope_ruling" not in msg and "SAME family" not in msg
+    assert "different-family judge" not in msg      # got past the judge branch
+
+
+def test_the_scope_ruling_path_is_recorded():
+    g = pl.verify_judge_governance(
+        model="claude-opus-5", judge_model="",
+        preregistration_amendment="", preregistration_scope_ruling=DEC_069)
+    assert g["paths_satisfied"] == ["decision_scope_ruling"]
+    assert g["scope_ruling"]["decision_id"] == "DEC-069"
+    assert g["scope_ruling"]["section"] == "PREREGISTRATION.md §6"
+    assert g["different_family_judge"] is False
+    assert g["same_family_judge_active"] is False
+    assert g["preregistration_amended"] is False
+    # It must never read as compliance.
+    assert "SCOPE RULING, NOT COMPLIANCE" in g["compliance_note"]
+
+
+def test_a_different_family_judge_still_reads_as_compliance():
+    g = pl.verify_judge_governance(
+        model="claude-opus-5", judge_model="gpt-4o-mini",
+        preregistration_amendment="", preregistration_scope_ruling=None)
+    assert g["paths_satisfied"] == ["different_family_judge"]
+    assert g["different_family_judge"] is True
+    assert "different-family judge arrangement was used" in g["compliance_note"]
+
+
+# ------------------------------------- a ruling must be a DECISION, not prose
+
+@pytest.mark.parametrize("bad,pat", [
+    ("§6 doesn't apply", "must be a dict"),
+    ({}, "missing"),
+    ({**DEC_069, "decision_id": "sometime"}, "not a DECISION identifier"),
+    ({**DEC_069, "date": "yesterday"}, "not ISO"),
+    ({**DEC_069, "ruling": "n/a"}, "too short to be a ruling"),
+    ({**DEC_069, "section": "  "}, "missing"),
+])
+def test_a_malformed_scope_ruling_is_refused(bad, pat):
+    with pytest.raises(LaunchRefused, match=pat):
+        pl.verify_judge_governance(
+            model="claude-opus-5", judge_model="",
+            preregistration_amendment="", preregistration_scope_ruling=bad)
+
+
+# ---------------- a same-family judge may never run SILENTLY on a scope ruling
+
+def test_a_wired_same_family_judge_on_a_ruling_needs_a_written_residual_risk():
+    """The one combination that could be read as compliance when it is not. It
+    stays permitted -- the ruling governs -- but never silently."""
+    quiet = {k: v for k, v in DEC_069.items() if k != "residual_risk"}
+    with pytest.raises(LaunchRefused, match="must record its residual_risk"):
+        pl.verify_judge_governance(
+            model="claude-opus-5", judge_model="claude-sonnet-4-5",
+            preregistration_amendment="", preregistration_scope_ruling=quiet)
+
+
+def test_a_wired_same_family_judge_on_a_ruling_is_allowed_and_flagged_loudly():
+    g = pl.verify_judge_governance(
+        model="claude-opus-5", judge_model="claude-sonnet-4-5",
+        preregistration_amendment="", preregistration_scope_ruling=DEC_069)
+    assert g["same_family_judge_active"] is True
+    assert g["scope_ruling"]["residual_risk"]
+    assert "SCOPE RULING, NOT COMPLIANCE" in g["compliance_note"]
+
+
+def test_no_judge_wired_needs_no_residual_risk():
+    """ZD's actual configuration: one model, no separate judge seam at all."""
+    quiet = {k: v for k, v in DEC_069.items() if k != "residual_risk"}
+    g = pl.verify_judge_governance(
+        model="claude-opus-5", judge_model="",
+        preregistration_amendment="", preregistration_scope_ruling=quiet)
+    assert g["paths_satisfied"] == ["decision_scope_ruling"]
+
+
+def test_an_amendment_and_a_ruling_both_record():
+    g = pl.verify_judge_governance(
+        model="claude-opus-5", judge_model="claude-sonnet-4-5",
+        preregistration_amendment="amended 2026-08-15 by ZD",
+        preregistration_scope_ruling=DEC_069)
+    assert g["paths_satisfied"] == ["dated_amendment", "decision_scope_ruling"]
