@@ -814,3 +814,55 @@ def test_queue_audit_detects_an_id_swap(tmp_path):
     audit = jr._queue_audit(str(pred), str(queue))
     assert audit["queue_rows"] == audit["scoreable_rows"] == 1
     assert audit["matches"] is False
+
+
+# --------------------- DEC-070: three distinguishable temperature states
+
+def test_unsupported_is_recorded_as_a_string_never_as_zero(tmp_path, monkeypatch):
+    manifest, _ = run(tmp_path, [make_ref("c")],
+                      extractor=extractor_of("Drug X reduces Y"),
+                      coverage_judge=judge_established(True),
+                      disposition=CLEARED, monkeypatch=monkeypatch,
+                      temperature="unsupported")
+    assert manifest["adapter"]["temperature"] == "unsupported"
+    assert manifest["adapter"]["temperature"] != 0
+
+
+def test_the_three_temperature_states_are_distinguishable(tmp_path, monkeypatch):
+    """0 (sent), "unsupported" (not sent, provider rejects), key absent (never
+    recorded). A reader must be able to tell which of the three happened."""
+    states = {}
+    for name, kw in (("pinned", {"temperature": 0}),
+                     ("unsupported", {"temperature": "unsupported"}),
+                     ("unrecorded", {})):
+        d = tmp_path / name
+        d.mkdir()
+        m, _ = run(d, [make_ref("c")],
+                   extractor=extractor_of("Drug X reduces Y"),
+                   coverage_judge=judge_established(True),
+                   disposition=CLEARED, monkeypatch=monkeypatch, **kw)
+        states[name] = m["adapter"]
+    assert states["pinned"]["temperature"] == 0
+    assert states["unsupported"]["temperature"] == "unsupported"
+    assert "temperature" not in states["unrecorded"]
+
+
+@pytest.mark.parametrize("bad", ["0", "unsupportd", "none", []])
+def test_a_fourth_temperature_state_is_refused(tmp_path, monkeypatch, bad):
+    """A typo would read as a fourth state nobody can interpret."""
+    with pytest.raises(ValueError, match="temperature must be a number"):
+        run(tmp_path, [make_ref("c")],
+            extractor=extractor_of("Drug X reduces Y"),
+            coverage_judge=judge_established(True),
+            disposition=CLEARED, monkeypatch=monkeypatch, temperature=bad)
+
+
+def test_reportability_accepts_unsupported_but_not_a_stray_string(tmp_path):
+    from . import preband_contract as pc
+    from .test_preband_contract import good_manifest, preds
+    p = preds(tmp_path, ["PMC1:B1", "PMC1:B2"])
+    m = good_manifest()
+    m["adapter"] = {"model": "claude-opus-5", "temperature": "unsupported"}
+    assert pc.reportability_report(m, p)["checks"]["temperature_legal"] is True
+    m["adapter"] = {"model": "claude-opus-5", "temperature": "0"}
+    assert pc.reportability_report(m, p)["checks"]["temperature_legal"] is False

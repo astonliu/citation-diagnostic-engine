@@ -30,7 +30,8 @@ def base(**over):
               model="claude-sonnet-4-5",
               authorized_models=["claude-sonnet-4-5"],
               adapter_receipt=Receipt(OK_CALLS),
-              judge_model="gpt-4o-mini")
+              judge_model="gpt-4o-mini",
+              temperature=0)   # base model is sonnet, which SUPPORTS the param
     kw.update(over)
     return kw
 
@@ -188,6 +189,7 @@ def test_a_scope_ruling_is_accepted_with_no_judge_and_no_amendment():
     with pytest.raises(LaunchRefused) as exc:
         pl.launch(**base(judge_model="", model="claude-opus-5",
                          authorized_models=["claude-opus-5"],
+                         temperature=None,          # DEC-070: not sent
                          preregistration_scope_ruling=DEC_069))
     msg = str(exc.value)
     assert "scope_ruling" not in msg and "SAME family" not in msg
@@ -270,3 +272,108 @@ def test_an_amendment_and_a_ruling_both_record():
         preregistration_amendment="amended 2026-08-15 by ZD",
         preregistration_scope_ruling=DEC_069)
     assert g["paths_satisfied"] == ["dated_amendment", "decision_scope_ruling"]
+
+
+# =====================================================================
+# DEC-070: temperature is provider-deprecated from Claude Opus 4.7 onward
+# =====================================================================
+# Live pre-flight: HTTP 400 invalid_request_error "temperature is deprecated for
+# this model." from claude-opus-5 (req_011Ce3qbp97tLCSVL2rRZtYP). The pin is
+# retired ONLY for models that reject the parameter. On those it is not sent and
+# is recorded as "unsupported" -- never as 0, which would be a false record of
+# what was transmitted.
+
+UNSUP = pl.TEMPERATURE_UNSUPPORTED
+
+
+def test_the_model_table_matches_the_measured_evidence():
+    for m in ("claude-opus-4-7", "claude-opus-4-8", "claude-opus-5"):
+        assert pl.temperature_support(m) == UNSUP
+    # sonnet ACCEPTS it -- which is why every prior measurement missed this.
+    assert pl.temperature_support("claude-sonnet-4-5") == "supported"
+
+
+def test_a_rejecting_model_records_unsupported_and_sends_nothing():
+    """THE DEFECT, pinned. launch() required temperature == 0 by identity, so
+    under DEC-070 it refused every call and the run could not start."""
+    g = pl.verify_temperature_governance(model="claude-opus-5", temperature=None)
+    assert g["recorded_value"] == UNSUP
+    assert g["sent_to_provider"] is False
+    assert g["path"] == "not_sent_unsupported"
+    assert g["governing_decision"] == "DEC-070"
+
+
+def test_the_sentinel_may_also_be_passed_explicitly():
+    g = pl.verify_temperature_governance(model="claude-opus-5", temperature=UNSUP)
+    assert g["recorded_value"] == UNSUP
+
+
+def test_a_number_on_a_rejecting_model_is_refused():
+    """Sending it would 400; recording 0 for a call that never carried it would
+    be a false provenance record."""
+    for bad in (0, 1, 0.0):
+        with pytest.raises(LaunchRefused, match="REJECTS the temperature parameter"):
+            pl.verify_temperature_governance(model="claude-opus-5",
+                                             temperature=bad)
+
+
+# --------------------------- the relaxation must NOT widen to "anything goes"
+
+def test_a_supporting_model_is_still_pinned_to_zero():
+    g = pl.verify_temperature_governance(model="claude-sonnet-4-5", temperature=0)
+    assert g["recorded_value"] == 0
+    assert g["sent_to_provider"] is True
+    assert g["governing_decision"] == "DEC-046B"
+
+
+@pytest.mark.parametrize("temp", [None, 1, 0.7, 0.0001])
+def test_a_supporting_model_still_refuses_anything_but_zero(temp):
+    if temp == 0:
+        pytest.skip("zero is the pin")
+    with pytest.raises(LaunchRefused, match="temperature must be 0"):
+        pl.verify_temperature_governance(model="claude-sonnet-4-5",
+                                         temperature=temp)
+
+
+def test_a_supporting_model_cannot_opt_into_the_unsupported_path():
+    """The escape hatch is chosen by the MODEL, never by the caller."""
+    with pytest.raises(LaunchRefused, match="SUPPORTS the temperature parameter"):
+        pl.verify_temperature_governance(model="claude-sonnet-4-5",
+                                         temperature=UNSUP)
+
+
+def test_an_unknown_model_is_treated_as_supporting():
+    """The two errors are not symmetric. Calling a rejecting model 'supporting'
+    earns a loud 400 before compute is spent; the reverse silently drops the pin
+    and lets the provider default decide sampling."""
+    assert pl.temperature_support("some-new-model-9") == "supported"
+    with pytest.raises(LaunchRefused, match="temperature must be 0"):
+        pl.verify_temperature_governance(model="some-new-model-9",
+                                         temperature=None)
+
+
+# ------------------------------- unsupported means ABSENT, not unchecked
+
+def test_a_receipt_carrying_temperature_on_a_rejecting_model_is_refused():
+    r = Receipt([{"model": "claude-opus-5"},
+                 {"model": "claude-opus-5", "temperature": 0}])
+    with pytest.raises(LaunchRefused, match="call\\(s\\) CARRYING temperature"):
+        pl.verify_receipt(r, model="claude-opus-5", temperature=UNSUP)
+
+
+def test_a_receipt_with_the_field_absent_passes_on_a_rejecting_model():
+    r = Receipt([{"model": "claude-opus-5"}, {"model": "claude-opus-5"}])
+    out = pl.verify_receipt(r, model="claude-opus-5", temperature=UNSUP)
+    assert out["temperature"] == UNSUP
+    assert out["calls"] == 2
+
+
+def test_the_receipt_still_checks_the_model_on_the_unsupported_path():
+    r = Receipt([{"model": "claude-opus-5"}, {"model": "gpt-4o"}])
+    with pytest.raises(LaunchRefused, match="unauthorized model"):
+        pl.verify_receipt(r, model="claude-opus-5", temperature=UNSUP)
+
+
+def test_an_empty_receipt_still_refuses_on_the_unsupported_path():
+    with pytest.raises(LaunchRefused, match="ZERO calls"):
+        pl.verify_receipt(Receipt([]), model="claude-opus-5", temperature=UNSUP)

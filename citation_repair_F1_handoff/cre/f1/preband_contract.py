@@ -606,8 +606,15 @@ def reportability_report(manifest: dict, predictions_path: str) -> dict:
     need("code_commit_recorded", bool(manifest.get("code_commit")),
          "no code_commit recorded")
     need("model_recorded", bool(adapter.get("model")), "no adapter.model recorded")
+    # RECORDED, and one of the three legal states. DEC-046B pins 0 on a model
+    # that supports the parameter; DEC-070 records "unsupported" on one that
+    # rejects it. Any other value is a fourth state a reader cannot interpret.
+    temp = adapter.get("temperature", "__absent__")
     need("temperature_recorded", "temperature" in adapter,
-         "no adapter.temperature recorded (DEC-046B pins 0)")
+         "no adapter.temperature recorded (DEC-046B / DEC-070)")
+    need("temperature_legal",
+         temp == "unsupported" or isinstance(temp, (int, float)),
+         f"adapter.temperature {temp!r} is neither a number nor 'unsupported'")
 
     # Zero judged pairs is the clean-empty-run failure. Unconditional, so it
     # needs no reasoning about which exclusions dilute which denominator.

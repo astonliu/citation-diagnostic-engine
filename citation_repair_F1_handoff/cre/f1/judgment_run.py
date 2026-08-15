@@ -120,6 +120,11 @@ from .coverage_prompts_v3 import (
     RESPONSE_PARSER_VERSION as RESPONSE_PARSER_VERSION_V3)
 from .parser_versions import CLAIM_PARSER_VERSION, COVERAGE_PARSER_VERSION
 
+#: DEC-070: the recorded value when the provider rejects the parameter. Defined
+#: here (not imported from production_launcher) because judgment_run must not
+#: depend on its own launcher.
+TEMPERATURE_UNSUPPORTED = "unsupported"
+
 #: What the manifest and every full-text-scoped record call the evidence scope.
 #: Matches judgment_band's BAND_MODE_FULLTEXT marker so one run's two layers agree.
 EVIDENCE_SCOPE_FULLTEXT = "fulltext_sections"
@@ -949,6 +954,18 @@ def run_natural_judgment(
             "supplying one alone would silently judge full text with the "
             "abstract-scoped prompt, or fetch a body nothing reads")
     fulltext_path = fetch_fulltext is not None
+
+    # THREE DISTINGUISHABLE TEMPERATURE STATES, and nothing else. A number means
+    # it was sent; the literal "unsupported" means the provider rejects the
+    # parameter and it was NOT sent (DEC-070); the key absent from the manifest
+    # means it was never recorded. A typo like "0" or "unsupportd" would look
+    # like a fourth state to a reader and is refused here rather than written.
+    if not (temperature is None
+            or isinstance(temperature, (int, float))
+            or temperature == TEMPERATURE_UNSUPPORTED):
+        raise ValueError(
+            f"temperature must be a number, None, or {TEMPERATURE_UNSUPPORTED!r} "
+            f"(DEC-046B / DEC-070); got {temperature!r}")
 
     pred_path = os.path.join(out_dir, "judgment_predictions.jsonl")
     queue_path = os.path.join(out_dir, "judgment_band_annotation_queue.jsonl")

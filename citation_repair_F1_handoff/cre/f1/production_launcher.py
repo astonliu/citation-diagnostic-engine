@@ -19,8 +19,15 @@ WHAT IT VERIFIES, none of it taken from the caller:
   passed as ``authorized_models``, and the run's model must be one of them.
   DEC-065 requires the production model to be named in a decision; this refuses
   to run until one is.
-* **temperature=0.** DEC-046B pins it. Checked with ``is not None`` and ``== 0``,
-  never truthiness.
+* **Temperature governance.** Two paths, chosen by the MODEL and never by the
+  caller's preference. A model that supports the parameter is still pinned to
+  ``0`` (DEC-046B), checked with ``is not None`` and ``== 0``, never truthiness.
+  A model that REJECTS it -- Claude Opus 4.7 onward, which 400s with
+  ``"temperature is deprecated for this model."`` -- does not send it and
+  records the string ``"unsupported"`` (DEC-070), never ``0``. Three states stay
+  distinguishable in the manifest: ``0``, ``"unsupported"``, and the key being
+  absent. The relaxation is bounded by a measured model table, so it can never
+  widen into "any temperature is fine".
 * **Adapter receipt.** The adapter must record, per call, the model and
   temperature it actually sent. After the run the launcher verifies at least one
   call happened and that EVERY call used the authorized model at temperature 0.
@@ -120,6 +127,95 @@ def verify_tree(repo_dir: str, pkg_dir: str) -> dict:
             "on-disk module bytes differ from the recorded commit "
             f"({head[:12]}): {mismatched}")
     return {"code_commit": head, "runtime_module_sha256": digests}
+
+
+#: The recorded value when the provider rejects the parameter. A STRING, so it
+#: can never be confused with 0 in a manifest, and distinct from the key being
+#: absent (which means "not recorded at all"). Three states, all distinguishable.
+TEMPERATURE_UNSUPPORTED = "unsupported"
+
+#: Models measured to REJECT ``temperature`` outright (HTTP 400
+#: ``invalid_request_error: "temperature is deprecated for this model."``).
+#: DEC-070, from a live pre-flight against ``claude-opus-5``
+#: (request id ``req_011Ce3qbp97tLCSVL2rRZtYP``); deprecated provider-side from
+#: Claude Opus 4.7 onward.
+#:
+#: EXPLICIT MEMBERSHIP ONLY -- no version-range matching. The two errors are not
+#: symmetric. Mistaking a REJECTING model for a supporting one sends the
+#: parameter and earns a loud 400 before any compute is spent. Mistaking a
+#: SUPPORTING model for a rejecting one silently omits the pin and lets the
+#: provider default decide sampling, which is a quiet wrong number. So a new
+#: model is treated as supporting (and must be pinned to 0) until a DECISION
+#: adds it here on measured evidence.
+TEMPERATURE_REJECTING_MODELS = frozenset({
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+})
+
+
+def temperature_support(model: str) -> str:
+    """``"unsupported"`` if the provider rejects the parameter, else ``"supported"``."""
+    return (TEMPERATURE_UNSUPPORTED
+            if (model or "").strip() in TEMPERATURE_REJECTING_MODELS
+            else "supported")
+
+
+def verify_temperature_governance(*, model: str, temperature) -> dict:
+    """Resolve the temperature path, WITHOUT widening into 'anything goes'.
+
+    Two paths, chosen by the model, never by the caller's preference:
+
+    * **supported** -- the pin stands. ``temperature`` must be ``0`` by identity
+      (DEC-046B). ``is not None`` and ``== 0``, never truthiness, because 0 is
+      both a real value and a falsy one.
+    * **unsupported** -- DEC-070. The parameter is NOT SENT and is recorded as
+      the string ``"unsupported"``. Passing a NUMBER here is refused: that would
+      transmit a parameter the provider rejects, and recording ``0`` for a call
+      that never carried it is a false record of what was sent.
+
+    The relaxation is bounded by the model table, so a model that does support
+    the parameter is still pinned to 0 and cannot opt into the unsupported path.
+    """
+    support = temperature_support(model)
+    if support == TEMPERATURE_UNSUPPORTED:
+        if temperature is None or temperature == TEMPERATURE_UNSUPPORTED:
+            recorded = TEMPERATURE_UNSUPPORTED
+        else:
+            raise LaunchRefused(
+                f"model {model!r} REJECTS the temperature parameter (DEC-070), "
+                f"but temperature={temperature!r} was supplied. On a rejecting "
+                "model the parameter is not sent and is recorded as "
+                f"{TEMPERATURE_UNSUPPORTED!r}; recording a number for a call "
+                "that never carried one is a false provenance record.")
+    else:
+        if temperature == TEMPERATURE_UNSUPPORTED:
+            raise LaunchRefused(
+                f"model {model!r} SUPPORTS the temperature parameter, so the "
+                f"DEC-046B pin still applies; {TEMPERATURE_UNSUPPORTED!r} is not "
+                "an available answer for it. Pass temperature=0.")
+        if temperature is None or temperature != 0:
+            raise LaunchRefused(
+                f"temperature must be 0 for a production run on {model!r} "
+                f"(DEC-046B), got {temperature!r}")
+        recorded = 0
+    return {
+        "model": model,
+        "provider_support": support,
+        "path": ("pinned_zero" if recorded == 0 else "not_sent_unsupported"),
+        "recorded_value": recorded,
+        "sent_to_provider": recorded == 0,
+        "governing_decision": ("DEC-046B" if recorded == 0 else "DEC-070"),
+        "note": (
+            "The parameter was NOT SENT: this model rejects it provider-side "
+            "(HTTP 400, deprecated from Claude Opus 4.7 onward). Recorded as "
+            "'unsupported', never as 0. No greedy-decoding control exists on "
+            "this model, so run-to-run variation is bounded only by provider "
+            "defaults -- see DEC-070's re-measurement obligation."
+            if recorded != 0 else
+            "temperature=0 was sent and is pinned by DEC-046B."
+        ),
+    }
 
 
 #: A scope ruling must be a DECISION, not a sentence. These are required.
@@ -258,7 +354,16 @@ def verify_judge_governance(*, model: str, judge_model: str,
 
 
 def verify_receipt(receipt, *, model: str, temperature) -> dict:
-    """Every recorded call used the authorized model at the pinned temperature."""
+    """Every recorded call agrees with what the run DECLARED.
+
+    ``temperature`` here is the RESOLVED value from
+    ``verify_temperature_governance``: either ``0`` or ``"unsupported"``.
+
+    Unsupported means the field is ABSENT from the call, not unchecked. A call
+    that carries a temperature on a rejecting model either never happened as
+    recorded, or the adapter transmitted a parameter the provider refuses --
+    both are receipts that contradict the run, and both are refused.
+    """
     calls = list(getattr(receipt, "calls", None) or [])
     if not calls:
         raise LaunchRefused(
@@ -266,16 +371,28 @@ def verify_receipt(receipt, *, model: str, temperature) -> dict:
             "able to show what it actually sent")
     bad_model = sorted({c.get("model") for c in calls
                         if c.get("model") != model})
-    bad_temp = sorted({repr(c.get("temperature")) for c in calls
-                       if c.get("temperature") != temperature})
     if bad_model:
         raise LaunchRefused(
             f"adapter receipt shows call(s) to unauthorized model(s) {bad_model}; "
             f"the run declared {model!r}")
-    if bad_temp:
-        raise LaunchRefused(
-            f"adapter receipt shows call(s) at temperature {bad_temp}; "
-            f"the run declared {temperature!r} (DEC-046B pins 0)")
+
+    if temperature == TEMPERATURE_UNSUPPORTED:
+        carried = sorted({repr(c.get("temperature")) for c in calls
+                          if "temperature" in c})
+        if carried:
+            raise LaunchRefused(
+                f"the run declared temperature {TEMPERATURE_UNSUPPORTED!r} for "
+                f"{model!r} (DEC-070: the provider rejects the parameter), but "
+                f"the receipt shows call(s) CARRYING temperature {carried}. "
+                "Unsupported means the field is absent from the call, not "
+                "unchecked.")
+    else:
+        bad_temp = sorted({repr(c.get("temperature")) for c in calls
+                           if c.get("temperature") != temperature})
+        if bad_temp:
+            raise LaunchRefused(
+                f"adapter receipt shows call(s) at temperature {bad_temp}; "
+                f"the run declared {temperature!r} (DEC-046B pins 0)")
     return {"calls": len(calls), "models": [model], "temperature": temperature}
 
 
@@ -284,7 +401,7 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
            model: str, authorized_models, adapter_receipt,
            judge_model: str = "", preregistration_amendment: str = "",
            preregistration_scope_ruling=None,
-           temperature=0, **run_kwargs) -> dict:
+           temperature=None, **run_kwargs) -> dict:
     """Verify every precondition, run in production mode, verify the receipt.
 
     Returns the run manifest with a ``launch_receipt`` block. Raises
@@ -301,11 +418,10 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         raise LaunchRefused(
             f"model {model!r} is not in the DECISION-backed allowlist {allowed}")
 
-    # --- the temperature pin (DEC-046B); 0 is real AND falsy ------------
-    if temperature is None or temperature != 0:
-        raise LaunchRefused(
-            f"temperature must be 0 for a production run (DEC-046B), got "
-            f"{temperature!r}")
+    # --- temperature governance (DEC-046B pin / DEC-070 unsupported) ----
+    temperature_governance = verify_temperature_governance(
+        model=model, temperature=temperature)
+    resolved_temperature = temperature_governance["recorded_value"]
 
     # --- judge governance (DEC-065 / PREREGISTRATION §6) ----------------
     judge_governance = verify_judge_governance(
@@ -321,10 +437,10 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         preband_disposition=preband_disposition,
         corpus_manifest_path=corpus_manifest_path,
         code_commit=tree["code_commit"], model=model,
-        temperature=temperature, production=True, **run_kwargs)
+        temperature=resolved_temperature, production=True, **run_kwargs)
 
     receipt = verify_receipt(adapter_receipt, model=model,
-                             temperature=temperature)
+                             temperature=resolved_temperature)
 
     manifest["launch_receipt"] = {
         "launcher": "production_launcher.launch",
@@ -334,7 +450,7 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         "authorized_models": allowed,
         "model": model,
         "judge_governance": judge_governance,
-        "temperature": temperature,
+        "temperature_governance": temperature_governance,
         "adapter_receipt": receipt,
         "limitation": (
             "The receipt is produced by the adapter under test. It proves what "
