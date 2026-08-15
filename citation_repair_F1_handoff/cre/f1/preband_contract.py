@@ -354,6 +354,105 @@ def enforce_join_reached(counts: dict, missing_disposition_key: str,
 
 
 # --------------------------------------------------------------------------
+# Production preflight: the same conditions, checked BEFORE any work
+# --------------------------------------------------------------------------
+def assert_production_launch_shape(*, max_docs, resume_detected: bool,
+                                   chain_genesis: str) -> None:
+    """Phase 1 of the production preflight: is this a single fresh segment?
+
+    Checked FIRST, before the corpus is even scanned, because an exhausted or
+    partially-complete out_dir otherwise surfaces as a confusing "empty corpus"
+    error from the corpus preflight -- the resume problem would never be named.
+    """
+    problems: list = []
+    if max_docs is not None:
+        problems.append(
+            "max_docs is set; a bounded pass leaves the manifest in_progress and "
+            "is not a production run")
+    if resume_detected:
+        problems.append(
+            "out_dir already holds run state; production runs may not resume "
+            "(resume can duplicate rows, miscount the population, and combine "
+            "different models/settings/commits under one manifest). Start a "
+            "FRESH out_dir and restart.")
+    if (chain_genesis or "").strip():
+        problems.append(
+            "chain_genesis is set; this run extends a prior segment and is not a "
+            "single-segment production run")
+    if problems:
+        raise PrebandContractError(
+            "PRODUCTION PREFLIGHT FAILED -- refusing to start; no output was "
+            "written:\n  - " + "\n  - ".join(problems))
+
+
+def assert_production_preflight(*, disp: "Disposition | None", join_acc: dict,
+                                parse_failures: dict, code_commit: str,
+                                model: str, corpus_manifest_path: str) -> dict:
+    """Phase 2 of the production preflight: is this run BOUND? Returns the bindings.
+
+    Every condition here is ALSO a reportability clause, but reportability is
+    evaluated on the finished manifest -- i.e. after the compute is spent, and
+    only when the caller remembered to ask. Each of these could be violated by a
+    run that still returned ``status="complete"``. Checking them up front makes
+    them mandatory rather than advisory, and makes a misconfigured production run
+    cost nothing.
+
+    RESUME AND max_docs ARE REFUSED IN PRODUCTION. ``judgment_run`` writes
+    predictions per reference but checkpoints per document, so an interrupted
+    document is replayed and its rows appended a second time; a resumed
+    manifest's counters cover only the final invocation; and a resumed segment
+    can combine different models, temperatures and commits under one final
+    manifest. Recovery is a FRESH out_dir and a restart, which is safe and cheap
+    relative to a corrupted denominator.
+    """
+    problems: list = []
+
+    if disp is None or not disp.canonical or disp.source != SOURCE_ARTIFACT:
+        problems.append(
+            "disposition is not a canonical preband_disposition_v1 file artifact "
+            "(in-process dictionaries are test/development-only and can never "
+            "bind a population)")
+    if join_acc.get("missing_from_disposition"):
+        problems.append(
+            f"{join_acc['missing_from_disposition']} corpus citation_id(s) are "
+            f"absent from the disposition, e.g. {join_acc.get('missing_sample', [])[:3]}; "
+            "production requires COMPLETE id coverage")
+    if parse_failures:
+        problems.append(
+            f"{len(parse_failures)} document(s) failed to parse: "
+            f"{sorted(parse_failures)[:5]}; production requires ZERO parse "
+            "failures, because a dropped document silently shrinks the population")
+    if not (code_commit or "").strip():
+        problems.append("no code_commit supplied")
+    if not (model or "").strip():
+        problems.append("no model supplied")
+
+    corpus_sha = ""
+    if not corpus_manifest_path:
+        problems.append(
+            "no corpus_manifest_path supplied; the frozen corpus cannot be bound")
+    elif not os.path.exists(corpus_manifest_path):
+        problems.append(f"corpus manifest not found: {corpus_manifest_path}")
+    else:
+        corpus_sha = _sha256_file(corpus_manifest_path)
+        declared = (disp.corpus_manifest_sha256 if disp is not None else "") or ""
+        if not declared:
+            problems.append(
+                "the disposition manifest carries no corpus_manifest_sha256, so "
+                "the population cannot be tied to the corpus being judged")
+        elif declared != corpus_sha:
+            problems.append(
+                f"corpus mismatch: the disposition was built over "
+                f"{declared[:12]}… but this run judges {corpus_sha[:12]}…")
+
+    if problems:
+        raise PrebandContractError(
+            "PRODUCTION PREFLIGHT FAILED -- refusing to start; no output was "
+            "written:\n  - " + "\n  - ".join(problems))
+    return {"corpus_manifest_sha256": corpus_sha}
+
+
+# --------------------------------------------------------------------------
 # Reportability: the single gate a published number must pass
 # --------------------------------------------------------------------------
 #: A run may be perfectly valid and still not reportable -- a development pass,

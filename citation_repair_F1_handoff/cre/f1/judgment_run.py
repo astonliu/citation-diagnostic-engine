@@ -808,6 +808,7 @@ def run_natural_judgment(
     assistant_prefill: str = "", stop_sequences: tuple = (), temperature=None,
     code_commit: str = "", corpus_manifest_path: str = "",
     require_full_coverage: bool = False, require_reportable: bool = False,
+    production: bool = False,
 ) -> dict:
     """Run the F3-F7 band end-to-end over a dir of natural PMC-OA citing papers.
 
@@ -854,6 +855,20 @@ def run_natural_judgment(
     ``code_commit`` / ``corpus_manifest_path``: bound into the manifest so a
     published number can be tied to the Band-2 tree and the frozen corpus bytes
     it was computed over.
+
+    PRODUCTION (``production=True``) is the single switch the launcher sets. It
+    runs a MANDATORY PREFLIGHT before any output file exists -- canonical file
+    artifact only, complete id coverage, disposition corpus digest equal to the
+    corpus being judged, zero parse failures, nonempty code_commit and model --
+    and it REFUSES resume and ``max_docs``. Each of those conditions could
+    otherwise be violated by a run that still returned ``status="complete"``.
+    It also implies ``require_full_coverage`` and ``require_reportable``.
+
+    Resume is refused because this module writes predictions per reference but
+    checkpoints per document: an interrupted document is replayed and its rows
+    appended a second time, a resumed manifest's counters cover only the final
+    invocation, and a resumed segment can combine different models, temperatures
+    and commits under one manifest. Recovery is a FRESH out_dir and a restart.
 
     REPORTABILITY (``require_reportable``). A run can complete cleanly and still
     be unfit to publish: a development pass, a ``max_docs`` slice, a resumed
@@ -919,6 +934,14 @@ def run_natural_judgment(
     # Resume-safe: only the docs this segment will actually process define the
     # expected id domain, so accounting stays honest across a resumed run.
     done = jb._load_checkpoint(checkpoint_path)
+    # Production preflight phase 1 -- single fresh segment. Checked BEFORE the
+    # corpus is scanned: an exhausted out_dir otherwise surfaces as a confusing
+    # "empty corpus" error and the resume problem is never named.
+    if production:
+        pc.assert_production_launch_shape(
+            max_docs=max_docs,
+            resume_detected=bool(done) or os.path.exists(pred_path),
+            chain_genesis=chain_genesis)
     pending = [fn for fn in files if jb._pmcid_from_filename(fn) not in done]
     to_process = pending[:max_docs] if max_docs is not None else pending
     expected_ids, expected_per_doc, preflight_parse_failures = (
@@ -926,7 +949,19 @@ def run_natural_judgment(
                                 jb._pmcid_from_filename))
     join_acc = pc.join_accounting(disp_obj, expected_ids)
     pc.enforce_join(join_acc, disp=disp_obj,
-                    require_full_coverage=require_full_coverage)
+                    require_full_coverage=require_full_coverage or production)
+
+    # PRODUCTION PREFLIGHT -- mandatory, and before any output file exists, so a
+    # misconfigured production run costs nothing. Every condition here is also a
+    # reportability clause, but reportability is checked on the FINISHED manifest
+    # (after the compute is spent, and only if the caller asks). Checking up
+    # front makes them mandatory rather than advisory.
+    if production:
+        pc.assert_production_preflight(
+            disp=disp_obj, join_acc=join_acc,
+            parse_failures=preflight_parse_failures,
+            code_commit=code_commit, model=model,
+            corpus_manifest_path=corpus_manifest_path)
 
     # Load-bearing module hashes, captured BEFORE execution so they describe the
     # bytes that actually ran. Read after the loop, they could describe a module
@@ -1346,6 +1381,6 @@ def run_natural_judgment(
     pc.enforce_join_reached(
         counts, DISP_EXCLUDED_PREBAND_MISSING,
         (DISP_EXCLUDED_NO_CITANCE, DISP_EXCLUDED_NO_CITED_PMID))
-    if require_reportable:
+    if require_reportable or production:
         pc.assert_reportable_run(manifest, pred_path)
     return manifest

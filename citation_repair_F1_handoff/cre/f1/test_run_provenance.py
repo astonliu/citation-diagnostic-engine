@@ -360,3 +360,169 @@ def test_require_reportable_aborts_a_development_run(tmp_path, monkeypatch):
             coverage_judge=judge_established(True),
             disposition=CLEARED, monkeypatch=monkeypatch,
             require_reportable=True)
+
+
+# ========================================================================
+# The MANDATORY production preflight -- refuses before any output exists
+# ========================================================================
+
+def _canonical_disp(tmp_path, ids, *, corpus_sha=""):
+    """Write a real canonical artifact + sidecar."""
+    from . import preband_contract as pc
+    body = "".join(json.dumps({"citation_id": c, "label": "cleared"},
+                              sort_keys=True) + "\n" for c in ids)
+    art = tmp_path / "disp.jsonl"
+    art.write_text(body, encoding="utf-8")
+    side = {"schema": pc.DISPOSITION_SCHEMA,
+            "artifact_sha256": hashlib.sha256(body.encode()).hexdigest(),
+            "f2_commit": "d90196a7be3fe64e1eb9225a17b2ce4a26e0ecd1",
+            "row_count": len(ids)}
+    if corpus_sha:
+        side["corpus_manifest_sha256"] = corpus_sha
+    (tmp_path / ("disp.jsonl" + pc.MANIFEST_SUFFIX)).write_text(
+        json.dumps(side), encoding="utf-8")
+    return str(art)
+
+
+def _corpus(tmp_path, payload=None):
+    p = tmp_path / "frozen_manifest.json"
+    p.write_text(json.dumps(payload or {"documents": ["PMC1"]}), encoding="utf-8")
+    return str(p), hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def _prod(tmp_path, monkeypatch, refs, disposition, **over):
+    kw = dict(extractor=extractor_of("Drug X reduces Y"),
+              coverage_judge=judge_established(True),
+              disposition=disposition, monkeypatch=monkeypatch,
+              production=True, temperature=0,
+              code_commit="8e1737163b9a43cc0f445d238fe04406a659c6f6")
+    kw.update(over)
+    return run(tmp_path, refs, **kw)
+
+
+def test_a_fully_bound_production_run_succeeds(tmp_path, monkeypatch):
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+    manifest, _ = _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
+                        corpus_manifest_path=cpath)
+    assert manifest["reportability"]["reportable"] is True, \
+        manifest["reportability"]["failures"]
+
+
+def test_production_refuses_a_dict_disposition(tmp_path, monkeypatch):
+    from . import preband_contract as pc
+    cpath, _ = _corpus(tmp_path)
+    out = tmp_path / "out"
+    with pytest.raises(pc.PrebandContractError, match="canonical preband_disposition_v1"):
+        _prod(tmp_path, monkeypatch, [make_ref("c")], {"c": "cleared"},
+              corpus_manifest_path=cpath)
+    assert not out.exists()          # refused BEFORE any output
+
+
+def test_production_refuses_incomplete_id_coverage(tmp_path, monkeypatch):
+    from . import preband_contract as pc
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+    with pytest.raises(pc.PrebandContractError, match="absent from the disposition"):
+        _prod(tmp_path, monkeypatch,
+              [make_ref("PMC1:B1"), make_ref("PMC1:B2")], art,
+              corpus_manifest_path=cpath)
+
+
+def test_production_refuses_a_corpus_mismatch(tmp_path, monkeypatch):
+    """The disposition was built over corpus A; this run judges corpus B."""
+    from . import preband_contract as pc
+    cpath, _ = _corpus(tmp_path, {"documents": ["PMC999"]})
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha="f" * 64)
+    with pytest.raises(pc.PrebandContractError, match="corpus mismatch"):
+        _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
+              corpus_manifest_path=cpath)
+
+
+def test_production_refuses_a_missing_corpus_binding(tmp_path, monkeypatch):
+    from . import preband_contract as pc
+    art = _canonical_disp(tmp_path, ["PMC1:B1"])
+    with pytest.raises(pc.PrebandContractError, match="no corpus_manifest_path"):
+        _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art)
+
+
+def test_production_refuses_any_parse_failure(tmp_path, monkeypatch):
+    from . import preband_contract as pc
+    (tmp_path / "PMC2.xml").write_text("junk", encoding="utf-8")
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+
+    def parse(path, source_pmcid=None):
+        if source_pmcid == "PMC2":
+            raise ValueError("junk before document element")
+        return [make_ref("PMC1:B1")]
+
+    monkeypatch.setattr(jr, "parse_pmc_xml", parse)
+    (tmp_path / "PMC1.xml").write_text("<x/>", encoding="utf-8")
+    with pytest.raises(pc.PrebandContractError, match="ZERO parse"):
+        jr.run_natural_judgment(
+            str(tmp_path), str(tmp_path / "out"),
+            extractor=extractor_of("Drug X reduces Y"),
+            coverage_judge=judge_established(True), fetch_abstract=abstract_ok,
+            preband_disposition=art, model="test-model", production=True,
+            temperature=0, corpus_manifest_path=cpath,
+            code_commit="8e1737163b9a43cc0f445d238fe04406a659c6f6")
+
+
+def test_production_refuses_an_empty_code_commit(tmp_path, monkeypatch):
+    from . import preband_contract as pc
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+    with pytest.raises(pc.PrebandContractError, match="no code_commit"):
+        _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
+              corpus_manifest_path=cpath, code_commit="")
+
+
+def test_production_refuses_an_empty_model(tmp_path, monkeypatch):
+    """The run() helper always supplies a model, so this drives the entry point
+    directly -- an unnamed model is exactly the governance gap being closed."""
+    from . import preband_contract as pc
+    (tmp_path / "PMC1.xml").write_text("<x/>", encoding="utf-8")
+    monkeypatch.setattr(jr, "parse_pmc_xml",
+                        lambda path, source_pmcid=None: [make_ref("PMC1:B1")])
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+    with pytest.raises(pc.PrebandContractError, match="no model"):
+        jr.run_natural_judgment(
+            str(tmp_path), str(tmp_path / "out"),
+            extractor=extractor_of("Drug X reduces Y"),
+            coverage_judge=judge_established(True), fetch_abstract=abstract_ok,
+            preband_disposition=art, model="", production=True, temperature=0,
+            corpus_manifest_path=cpath,
+            code_commit="8e1737163b9a43cc0f445d238fe04406a659c6f6")
+
+
+def test_production_refuses_max_docs(tmp_path, monkeypatch):
+    from . import preband_contract as pc
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+    with pytest.raises(pc.PrebandContractError, match="max_docs"):
+        _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
+              corpus_manifest_path=cpath, max_docs=1)
+
+
+def test_production_refuses_resume_into_an_existing_out_dir(tmp_path, monkeypatch):
+    """Resume can duplicate rows, miscount the population, and combine different
+    models/settings/commits under one manifest. Recovery is a FRESH out_dir."""
+    from . import preband_contract as pc
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+    _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
+          corpus_manifest_path=cpath)                       # first run: fine
+    with pytest.raises(pc.PrebandContractError, match="may not resume"):
+        _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
+              corpus_manifest_path=cpath)                   # second: refused
+
+
+def test_production_refuses_a_chained_segment(tmp_path, monkeypatch):
+    from . import preband_contract as pc
+    cpath, csha = _corpus(tmp_path)
+    art = _canonical_disp(tmp_path, ["PMC1:B1"], corpus_sha=csha)
+    with pytest.raises(pc.PrebandContractError, match="chain_genesis"):
+        _prod(tmp_path, monkeypatch, [make_ref("PMC1:B1")], art,
+              corpus_manifest_path=cpath, chain_genesis="a" * 64)
