@@ -187,6 +187,14 @@ def build_item(ref) -> "dict | None":
         "citance_group_id": getattr(ref, "citance_group_id", "") or "",
         "citance_group_members": list(
             getattr(ref, "citance_group_members", None) or []),
+        # Range-expansion provenance: which members were INFERRED from
+        # contiguous numbering rather than linked by the publisher, and whether
+        # THIS reference is one of them. Carried so a reader can weigh a group
+        # whose membership is partly deduced.
+        "citance_group_inferred_members": list(
+            getattr(ref, "citance_group_inferred_members", None) or []),
+        "citance_marker_inferred": bool(
+            getattr(ref, "citance_marker_inferred", False)),
         "cited_marker": ref.cited_reference_marker,
         "cited_pmid": c.claimed_pmid,
         "cited_claimed": {

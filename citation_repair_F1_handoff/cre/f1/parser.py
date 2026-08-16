@@ -224,6 +224,111 @@ def _sentence_for(pos: int, spans) -> str:
     return ""
 
 
+# A rendered range is two numeric markers with NOTHING but a dash between them
+# in the serialized text: "<xref>9</xref>-<xref>13</xref>" renders as "9-13".
+# Every dash Unicode actually uses for ranges, so an en dash is not a miss.
+_RANGE_DASH_RE = re.compile(r"^\s*[-‐‑‒–—]\s*$")
+
+
+def _innermost_blocks(root):
+    """Sentence-bearing blocks with no nested block, serialized once each.
+
+    Serializing here rather than inside :func:`link_citances` lets that function
+    make TWO passes over the same data -- one to validate the article's
+    numbering, one to assign -- without walking or re-serializing the tree
+    twice."""
+    for block in root.iter():
+        if _localname(block.tag) not in _BLOCK_TAGS:
+            continue
+        nested = 0
+        for d in block.iter():
+            if _localname(d.tag) in _BLOCK_TAGS:
+                nested += 1
+                if nested > 1:
+                    break
+        if nested > 1:
+            continue
+        text, markers = _serialize_with_markers(block)
+        if markers:
+            yield text, markers
+
+
+def _positional_numbering(serialized, refs_by_id, ordered_ref_ids) -> dict:
+    """``displayed number -> ref id``, but ONLY if the article numbers its
+    references positionally and contiguously. Empty dict disables expansion.
+
+    This is the safety gate for range expansion, and it is deliberately
+    all-or-nothing per article: EVERY numeric single-target marker in the
+    document must resolve to the reference at that bibliography ordinal. One
+    disagreement -- an unnumbered reference shifting the sequence, a
+    author-year scheme, a ref the parser skipped -- and the whole article is
+    refused, because an ordinal model that is wrong anywhere cannot be trusted
+    to infer members anywhere.
+
+    Returns {} when nothing attests the scheme either: with no numeric marker to
+    check against, "contiguous" is an assumption rather than an observation.
+    """
+    by_ordinal = {i + 1: rid for i, rid in enumerate(ordered_ref_ids)}
+    if not by_ordinal:
+        return {}
+    attested = 0
+    for _text, markers in serialized:
+        for _pos, rids, mtext in markers:
+            label = mtext.strip()
+            if not label.isdigit() or len(rids) != 1:
+                continue
+            if by_ordinal.get(int(label)) != rids[0]:
+                return {}
+            attested += 1
+    return by_ordinal if attested else {}
+
+
+def _inferred_interior(text, entries, numbering, refs_by_id) -> list:
+    """References a sentence renders inside a range but never links.
+
+    ``entries`` is one sentence's markers as ``(pos, rids, marker_text)`` in
+    document order. Returns ``[(opening_endpoint_pos, number, rid), ...]`` -- the
+    position lets the caller restore rendered order -- for the interiors of every
+    range that clears all four safety conditions:
+
+      1. both endpoints are numeric single-target markers,
+      2. both resolve to a bibliography entry AT their own displayed ordinal,
+      3. the numbers strictly between them all exist and are resolvable, and
+      4. the endpoints are adjacent in the text with only a dash between them.
+
+    A range that fails ANY of these is skipped whole -- never partially
+    expanded. A partial expansion would assert some members and silently drop
+    others from the same rendered range, which is worse than expanding none: the
+    reader cannot see what was left out.
+    """
+    out = []
+    for k in range(len(entries) - 1):
+        pos_a, rids_a, text_a = entries[k]
+        pos_b, rids_b, text_b = entries[k + 1]
+        label_a, label_b = text_a.strip(), text_b.strip()
+        if not (label_a.isdigit() and label_b.isdigit()):
+            continue
+        if len(rids_a) != 1 or len(rids_b) != 1:
+            continue
+        first, last = int(label_a), int(label_b)
+        if last <= first + 1:
+            continue
+        if not _RANGE_DASH_RE.match(text[pos_a + len(text_a):pos_b]):
+            continue
+        if numbering.get(first) != rids_a[0] or numbering.get(last) != rids_b[0]:
+            continue
+        interior = []
+        for n in range(first + 1, last):
+            rid = numbering.get(n)
+            if rid is None or rid not in refs_by_id:
+                interior = None
+                break
+            interior.append((pos_a, n, rid))
+        if interior:
+            out.extend(interior)
+    return out
+
+
 def _span_index(pos: int, spans) -> int:
     """Index of the sentence span containing ``pos``.
 
@@ -237,7 +342,7 @@ def _span_index(pos: int, spans) -> int:
     return len(spans) - 1 if spans else -1
 
 
-def link_citances(root, refs_by_id: dict) -> None:
+def link_citances(root, refs_by_id: dict, ordered_ref_ids=()) -> None:
     """Attach the citing sentence + marker to each Reference (first hit wins),
     and record the CO-CITATION GROUP that sentence occurrence forms.
 
@@ -259,42 +364,73 @@ def link_citances(root, refs_by_id: dict) -> None:
     carrying overlapping ranges ("1-8" and "3, 9") yields ONE group naming each
     reference once.
 
+    RANGE EXPANSION. A sentence that renders "9-13" is normally marked up as an
+    xref on 9 and an xref on 13 with a literal dash between them: references 10,
+    11 and 12 are cited on the page and carry no link at all. Measured over
+    corpus_frozen_v1, that is not an edge case -- 63 rendered ranges, ALL with
+    unlinked interiors, affecting 115 references, 90 of which got no citance
+    whatsoever and 23 of which silently took a LATER sentence's citance instead.
+    Those interiors are recovered here when, and only when,
+    :func:`_positional_numbering` and :func:`_inferred_interior` agree it is
+    safe, and each recovered member is recorded as INFERRED so a reader can tell
+    a deduction from a link the publisher wrote.
+
     Best-effort: any failure here must never break reference extraction, so the
     caller wraps this in try/except.
     """
+    serialized = list(_innermost_blocks(root))
+    # Validated across the WHOLE article before a single member is inferred: a
+    # numbering model that is wrong anywhere is not trusted anywhere.
+    numbering = _positional_numbering(serialized, refs_by_id,
+                                      ordered_ref_ids or ())
     group_seq = 0
-    for block in root.iter():
-        if _localname(block.tag) not in _BLOCK_TAGS:
-            continue
-        # only the innermost block (no nested block-level descendant)
-        nested = 0
-        for d in block.iter():
-            if _localname(d.tag) in _BLOCK_TAGS:
-                nested += 1
-                if nested > 1:
-                    break
-        if nested > 1:
-            continue
-
-        text, markers = _serialize_with_markers(block)
-        if not markers:
-            continue
+    for text, markers in serialized:
         spans = _sentence_spans(text)
-        # Sentence occurrence -> the references it newly gave its citance to, in
-        # document order. Built as the assignments happen so it records exactly
-        # the population a group verdict may be aggregated over.
-        claimed_by_span: dict = {}
+        # Sentence occurrence -> its markers, in document order. Bucketed before
+        # assigning so a sentence's rendered ranges can be read as a whole;
+        # spans are visited in ascending order, so first-citance-wins resolves
+        # exactly as it did when this walked markers directly.
+        by_span: dict = {}
         for pos, rids, mtext in markers:
-            sentence = _sentence_for(pos, spans)
-            span_i = _span_index(pos, spans)
-            for rid in rids:
+            by_span.setdefault(_span_index(pos, spans), []).append(
+                (pos, rids, mtext))
+
+        claimed_by_span: dict = {}
+        inferred_by_span: dict = {}
+        for span_i in sorted(by_span):
+            entries = by_span[span_i]
+            sentence = _sentence_for(entries[0][0], spans)
+            # (sort key, ref). ASSIGNMENT happens explicit-first so an explicit
+            # link always beats an inference to a reference; the key restores
+            # RENDERED order afterwards, placing each inferred interior right
+            # after the endpoint that opened its range. "1-5" therefore lists
+            # B1..B5, not B1, B5, B2, B3, B4.
+            claims: list = []
+            for pos, rids, mtext in entries:
+                for rid in rids:
+                    ref = refs_by_id.get(rid)
+                    if ref is None or ref.citance:    # first citance wins
+                        continue
+                    ref.citance = sentence
+                    if not ref.cited_reference_marker:
+                        ref.cited_reference_marker = mtext
+                    claims.append(((pos, 0, 0), ref))
+            for open_pos, number, rid in _inferred_interior(
+                    text, entries, numbering, refs_by_id):
                 ref = refs_by_id.get(rid)
-                if ref is None or ref.citance:    # first citance wins
+                if ref is None or ref.citance:        # first citance still wins
                     continue
                 ref.citance = sentence
+                ref.citance_marker_inferred = True
                 if not ref.cited_reference_marker:
-                    ref.cited_reference_marker = mtext
-                claimed_by_span.setdefault(span_i, []).append(ref)
+                    # The number the article renders. Accurate, and the
+                    # inferred flag records that no xref asserted it.
+                    ref.cited_reference_marker = str(number)
+                claims.append(((open_pos, 1, number), ref))
+                inferred_by_span.setdefault(span_i, []).append(ref)
+            if claims:
+                claims.sort(key=lambda kv: kv[0])
+                claimed_by_span[span_i] = [ref for _k, ref in claims]
 
         # One group per sentence occurrence that claimed at least one reference.
         # Numbered in document order across the whole article so the id is stable
@@ -305,9 +441,12 @@ def link_citances(root, refs_by_id: dict) -> None:
             pmcid = members[0].source_pmcid or members[0].source_pmid or "doc"
             group_id = f"{pmcid}:g{group_seq:02d}"
             member_ids = list(dict.fromkeys(m.citation_id for m in members))
+            inferred_ids = list(dict.fromkeys(
+                m.citation_id for m in inferred_by_span.get(span_i, [])))
             for ref in members:
                 ref.citance_group_id = group_id
                 ref.citance_group_members = list(member_ids)
+                ref.citance_group_inferred_members = list(inferred_ids)
 
 
 def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:
@@ -325,6 +464,14 @@ def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:
 
     refs: list[Reference] = []
     refs_by_id: dict[str, Reference] = {}
+    # Bibliography order -- the ordinal a numbered citation marker refers to.
+    # EVERY <ref> counts, including one the loop below skips for carrying no
+    # citation node, because a skipped entry still occupies a numbered slot on
+    # the page. Dropping it would shift every later ordinal by one and silently
+    # mis-resolve inferred range members; counting it keeps the sequence honest,
+    # and _positional_numbering refuses the article if the markers disagree.
+    ordered_ref_ids: list[str] = [
+        ref.get("id") or f"ref{i}" for i, ref in enumerate(root.iter("ref"))]
     for i, ref in enumerate(root.iter("ref")):
         cit = _citation_node(ref)
         if cit is None:
@@ -354,7 +501,7 @@ def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:
             refs_by_id[ref.get("id")] = reference
 
     try:
-        link_citances(root, refs_by_id)
+        link_citances(root, refs_by_id, ordered_ref_ids)
     except Exception as e:                            # noqa: BLE001 - best-effort
         print(f"[citance-skip] {source_pmcid or path}: {e}")
     return refs

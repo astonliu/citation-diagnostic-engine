@@ -291,6 +291,12 @@ def group_record(group_id: str, items: "Sequence[dict]", aggregated: dict,
     defect that goes unread.
     """
     first = items[0] if items else {}
+    # Members whose membership was INFERRED from a rendered range's contiguous
+    # numbering rather than asserted by an xref. Reported alongside the full
+    # list, never merged into it: a group that is half deduction should not read
+    # as a group the publisher linked.
+    inferred = [i.get("citation_id") for i in items
+                if i.get("citance_marker_inferred")]
     coverage = aggregated.get("claim_coverage", [])
     uncovered = [row["claim"] for row in coverage
                  if row["status"] == CLAIM_UNCOVERED]
@@ -302,6 +308,8 @@ def group_record(group_id: str, items: "Sequence[dict]", aggregated: dict,
         "citing_sentence": first.get("citing_sentence"),
         "size": len(items),
         "members": [i.get("citation_id") for i in items],
+        "inferred_members": inferred,
+        "asserted_size": len(items) - len(inferred),
         "atomic_claims": list(aggregated.get("atomic_claims", [])),
         "claim_coverage": coverage,
         "claims_covered": sum(1 for r in coverage if r["status"] == CLAIM_COVERED),

@@ -362,6 +362,174 @@ def test_row9_split_range_markers_group_by_sentence_not_by_text(tmp_path):
 
 
 # ==========================================================================
+# ROW 9b -- RANGE EXPANSION: rendered ranges whose interior is never linked.
+#
+# "9-13" is normally marked up as an xref on 9 and an xref on 13 with a literal
+# dash between them; 10, 11 and 12 are cited on the page and carry no link.
+# Measured over corpus_frozen_v1: 63 rendered ranges, ALL with unlinked
+# interiors, affecting 115 references -- 90 with no citance at all and 23
+# silently taking a LATER sentence's citance. Expansion recovers them, but only
+# where it is provably safe, and always marks a deduction as a deduction.
+# ==========================================================================
+def _numbered(n):
+    """n references, ids B1..Bn, so bibliography ordinal i == B{i}."""
+    return [(f"B{i}", f"{i}00") for i in range(1, n + 1)]
+
+
+def _dash_range(lo, hi, dash="-"):
+    """The two-xref rendering of "lo-hi" -- interior numbers unlinked."""
+    return (_xref(f"B{lo}", str(lo)) + dash + _xref(f"B{hi}", str(hi)))
+
+
+def test_range_expansion_recovers_the_unlinked_interior(tmp_path):
+    parsed = _parse(tmp_path, _numbered(5),
+                    [f"A collectively cited claim {_dash_range(1, 5)}."])
+    by_id = {r.citation_id: r for r in parsed}
+    expected = [f"PMC1000:B{i}" for i in range(1, 6)]
+    for i in range(1, 6):
+        ref = by_id[f"PMC1000:B{i}"]
+        assert ref.citance.startswith("A collectively cited claim")
+        assert ref.citance_group_members == expected      # size 5, not 2
+    assert len({r.citance_group_id for r in parsed}) == 1
+
+
+def test_inferred_members_are_marked_as_inferred_not_asserted(tmp_path):
+    """The whole point: a reader can tell a deduction from a publisher's link,
+    and both counts are reportable."""
+    parsed = _parse(tmp_path, _numbered(5),
+                    [f"A collectively cited claim {_dash_range(1, 5)}."])
+    by_id = {r.citation_id: r for r in parsed}
+    inferred = [f"PMC1000:B{i}" for i in (2, 3, 4)]
+    for cid, ref in by_id.items():
+        assert ref.citance_marker_inferred is (cid in inferred)
+        assert ref.citance_group_inferred_members == inferred
+    # Endpoints keep the marker the publisher wrote; interiors get the number
+    # the article renders, flagged as inferred.
+    assert by_id["PMC1000:B1"].cited_reference_marker == "1"
+    assert by_id["PMC1000:B3"].cited_reference_marker == "3"
+    # ...and the group record separates the two counts.
+    items = [jb.build_item(r) for r in parsed]
+    for it in items:
+        it["atomic_claims"] = [CLAIM_A]
+        it["coverage_verdicts"] = [SUPPORTS]
+        it["proposed_route"] = jb.ROUTE_FULL_COVERAGE
+    groups, _counts, _stats = jb.apply_cocitation_routing(items)
+    assert groups[0]["size"] == 5
+    assert groups[0]["asserted_size"] == 2
+    assert groups[0]["inferred_members"] == inferred
+
+
+def test_expansion_needs_a_dash_a_comma_list_is_not_a_range(tmp_path):
+    """"1, 5" cites two references. Reading it as a range would fabricate three."""
+    parsed = _parse(tmp_path, _numbered(5),
+                    [f"Two references {_xref('B1', '1')}, {_xref('B5', '5')}."])
+    by_id = {r.citation_id: r for r in parsed}
+    assert by_id["PMC1000:B1"].citance_group_members == [
+        "PMC1000:B1", "PMC1000:B5"]
+    assert not by_id["PMC1000:B3"].citance          # never claimed
+    assert not any(r.citance_marker_inferred for r in parsed)
+
+
+def test_expansion_accepts_an_en_dash(tmp_path):
+    parsed = _parse(tmp_path, _numbered(4),
+                    [f"A claim {_dash_range(1, 4, dash='–')}."])
+    by_id = {r.citation_id: r for r in parsed}
+    assert len(by_id["PMC1000:B1"].citance_group_members) == 4
+    assert by_id["PMC1000:B2"].citance_marker_inferred is True
+
+
+def test_adjacent_endpoints_have_no_interior_to_infer(tmp_path):
+    parsed = _parse(tmp_path, _numbered(3), [f"A claim {_dash_range(1, 2)}."])
+    by_id = {r.citation_id: r for r in parsed}
+    assert by_id["PMC1000:B1"].citance_group_members == [
+        "PMC1000:B1", "PMC1000:B2"]
+    assert not any(r.citance_marker_inferred for r in parsed)
+
+
+def test_non_positional_numbering_disables_expansion_article_wide(tmp_path):
+    """One marker disagreeing with its bibliography ordinal means the ordinal
+    model is wrong, and a model that is wrong anywhere is not trusted anywhere."""
+    refs = _numbered(6)
+    parsed = _parse(tmp_path, refs, [
+        # "2" links B3 -- the article does not number positionally.
+        f"A mismatched marker {_xref('B3', '2')}.",
+        f"A range that would otherwise expand {_dash_range(1, 5)}.",
+    ])
+    by_id = {r.citation_id: r for r in parsed}
+    assert not any(r.citance_marker_inferred for r in parsed)
+    assert by_id["PMC1000:B1"].citance_group_members == [
+        "PMC1000:B1", "PMC1000:B5"]                  # endpoints only
+
+
+def test_an_explicit_link_beats_an_inference(tmp_path):
+    """B3 is linked in the same sentence, so it is asserted, not deduced."""
+    parsed = _parse(tmp_path, _numbered(5), [
+        f"A claim {_dash_range(1, 5)} and also {_xref('B3', '3')}."])
+    by_id = {r.citation_id: r for r in parsed}
+    assert by_id["PMC1000:B3"].citance_marker_inferred is False
+    assert by_id["PMC1000:B1"].citance_group_inferred_members == [
+        "PMC1000:B2", "PMC1000:B4"]
+    assert len(by_id["PMC1000:B1"].citance_group_members) == 5
+
+
+def test_expansion_respects_first_citance_wins(tmp_path):
+    """An interior already carrying an earlier sentence keeps it -- expansion
+    adds members, it never steals them."""
+    parsed = _parse(tmp_path, _numbered(5), [
+        f"Sentence X cites three alone {_xref('B3', '3')}.",
+        f"Sentence Y renders a range {_dash_range(1, 5)}.",
+    ])
+    by_id = {r.citation_id: r for r in parsed}
+    b3 = by_id["PMC1000:B3"]
+    assert b3.citance.startswith("Sentence X")
+    assert b3.citance_marker_inferred is False
+    assert b3.citance_group_members == ["PMC1000:B3"]
+    # Y's group gets the rest, without B3.
+    y = by_id["PMC1000:B1"].citance_group_members
+    assert y == ["PMC1000:B1", "PMC1000:B2", "PMC1000:B4", "PMC1000:B5"]
+    assert "PMC1000:B3" not in y
+
+
+def test_a_range_with_an_unresolvable_interior_is_refused_whole():
+    """Never partially expanded: asserting some members of a rendered range
+    while silently dropping others is worse than expanding none, because the
+    reader cannot see what was left out."""
+    from cre.f1.parser import _inferred_interior
+    text = "A claim 1-5."
+    entries = [(8, ["B1"], "1"), (10, ["B5"], "5")]
+    full = {1: "B1", 2: "B2", 3: "B3", 4: "B4", 5: "B5"}
+    holed = {**full, 3: None}
+    refs_by_id = {k: object() for k in ("B1", "B2", "B3", "B4", "B5")}
+    assert _inferred_interior(text, entries, full, refs_by_id) == [
+        (8, 2, "B2"), (8, 3, "B3"), (8, 4, "B4")]
+    assert _inferred_interior(text, entries, holed, refs_by_id) == []
+    # ...and an interior the parser never built a Reference for is the same case.
+    assert _inferred_interior(text, entries, full,
+                              {"B1": 1, "B2": 2, "B5": 5}) == []
+
+
+def test_multi_rid_range_needs_no_inference(tmp_path):
+    """A publisher who links the whole range in one xref already asserts every
+    member; nothing is deduced."""
+    rids = " ".join(f"B{i}" for i in range(1, 6))
+    parsed = _parse(tmp_path, _numbered(5),
+                    [f"A claim {_xref(rids, '1-5')}."])
+    by_id = {r.citation_id: r for r in parsed}
+    assert len(by_id["PMC1000:B1"].citance_group_members) == 5
+    assert not any(r.citance_marker_inferred for r in parsed)
+
+
+def test_expansion_brings_dropped_references_into_the_band(tmp_path):
+    """The measured consequence: 90 of the 115 affected references had NO
+    citance at all, so the band never saw them."""
+    parsed = _parse(tmp_path, _numbered(6),
+                    [f"A claim {_dash_range(1, 6)}."])
+    assert all(jb.exclusion_reason(r) is None for r in parsed)
+    by_id = {r.citation_id: r for r in parsed}
+    assert sum(r.citance_marker_inferred for r in parsed) == 4
+
+
+# ==========================================================================
 # ROW 10 -- a "range" resolving to one reference behaves as a singleton.
 # ==========================================================================
 def test_row10_group_of_one_has_no_path_divergence(tmp_path, monkeypatch):

@@ -359,6 +359,21 @@ class Reference:
     # would aggregate verdicts over two different claim lists.
     citance_group_id: str = ""
     citance_group_members: list[str] = field(default_factory=list)
+    # RANGE EXPANSION provenance. A citing sentence that renders "9-13" is
+    # usually marked up as two xrefs -- one on 9, one on 13 -- with a literal
+    # dash between them; references 10, 11 and 12 are cited on the page and
+    # carry no xref at all. Measured over corpus_frozen_v1: 63 rendered ranges,
+    # ALL of them with unlinked interiors, affecting 115 references.
+    #
+    # ``citance_group_inferred_members`` is the subset of
+    # ``citance_group_members`` recovered that way, and
+    # ``citance_marker_inferred`` says THIS reference is one of them. Kept as a
+    # separate list rather than folded in, because an inferred member is a
+    # deduction from contiguous numbering and an asserted one is a link the
+    # publisher wrote: a reader must be able to tell them apart, and both counts
+    # must be reportable.
+    citance_group_inferred_members: list[str] = field(default_factory=list)
+    citance_marker_inferred: bool = False
 
     retrieved: RetrievedRecord = field(default_factory=RetrievedRecord)
     log: StageLog = field(default_factory=StageLog)
