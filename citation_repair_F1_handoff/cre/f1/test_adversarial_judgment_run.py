@@ -39,9 +39,15 @@ def _ref(cid, pmid):
         source_pmcid="PMC1", source_pmid="9", source_title="Citing")
 
 
-@pytest.mark.xfail(strict=True, reason="checkpoint advances only after the whole document")
 def test_mid_document_interrupt_resume_does_not_duplicate_chain_or_queue(
         tmp_path, monkeypatch):
+    """Was an accepted defect (strict xfail: "checkpoint advances only after the
+    whole document"). The co-citation fix closed it as a side effect: a group
+    verdict needs every member of a document judged, so no record can be emitted
+    until the document's coverage is complete. The document is now BOTH the
+    checkpoint granularity and the write granularity, so an interrupt mid-document
+    leaves nothing durable for the resume to append a second time -- the same
+    invariant run_band has always documented."""
     xml_dir = tmp_path / "xml"; xml_dir.mkdir()
     (xml_dir / "PMC1.xml").write_text("<article/>", encoding="utf-8")
     refs = [_ref("PMC1:R1", "1"), _ref("PMC1:R2", "2")]

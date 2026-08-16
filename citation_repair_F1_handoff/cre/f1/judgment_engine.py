@@ -276,6 +276,36 @@ def _validate_entities(
     return out
 
 
+def _validate_cogroup_covered(
+    claims: tuple[str, ...], covered: Sequence[bool]
+) -> tuple[bool, ...]:
+    """Validate the optional co-citation coverage overlay.
+
+    Empty -- the default -- means "no co-citation context supplied" and leaves
+    every decision below byte-identical to what it was before this parameter
+    existed. Anything else must be exactly one EXACT bool per claim: a partial or
+    loosely-typed overlay would silently excuse the wrong claim, and an F6 that
+    disappears for the wrong reason is worse than the false positive it fixes.
+    """
+    if isinstance(covered, (str, bytes)):
+        raise DiscriminatorContractError("cogroup_covered must be a sequence")
+    try:
+        out = tuple(covered)
+    except TypeError:
+        raise DiscriminatorContractError(
+            "cogroup_covered must be a sequence"
+        ) from None
+    if not out:
+        return ()
+    if any(type(flag) is not bool for flag in out):
+        raise DiscriminatorContractError(
+            "cogroup_covered must contain exact booleans")
+    if len(out) != len(claims):
+        raise DiscriminatorContractError(
+            "cogroup_covered must have exactly one flag per claim")
+    return out
+
+
 def from_legacy_coverage(
     claims: Sequence[str], verdicts: Sequence[dict]
 ) -> tuple[ClaimSupport, ...]:
@@ -343,13 +373,40 @@ def decide_judgment(
     entity_assessments: Sequence[EntityAssessment] = (),
     provenance: Optional[ProvenanceAssessment],
     temporal: Optional[TemporalAssessment],
+    cogroup_covered: Sequence[bool] = (),
 ) -> JudgmentDecision:
-    """Apply the reviewed F3--F7 hierarchy to typed assessments."""
+    """Apply the reviewed F3--F7 hierarchy to typed assessments.
+
+    ``cogroup_covered`` is the CO-CITATION OVERLAY: one flag per claim, True when
+    some OTHER reference cited in the same sentence established that claim. A
+    sentence citing eight references cites them collectively, so a claim a
+    sibling established is not this reference's coverage gap and must not raise
+    F6 against it -- otherwise F6 fires by construction on every member of every
+    co-citation group.
+
+    It is the ONLY thing the engine is told about the group, and it touches
+    exactly one finding:
+
+      * F6 is not raised for a claim whose flag is True. Instead a hold reason
+        records that the coverage was attributed elsewhere, so the reference is
+        never silently CLEARED either -- it did not establish the claim, the
+        group did.
+      * F4 (strength) and F7 (entity) are PER-REFERENCE properties and are
+        untouched. A cited paper making a weaker claim than the citing sentence
+        is F4 whether or not siblings exist, and a paper about a different entity
+        is F7 the same way.
+      * ``all_supported`` still requires every claim strictly SUPPORTED by THIS
+        reference, so the F3 provenance gate is unchanged: a claim covered only
+        by a sibling never opens provenance on this paper.
+
+    Empty (the default) means no co-citation context and reproduces the previous
+    behaviour exactly."""
     if type(preband_cleared) is not bool:
         raise DiscriminatorContractError("preband_cleared must be an exact bool")
     claim_values = _validate_claims(claims)
     support = _validate_support(claim_values, claim_support)
     entities = _validate_entities(claim_values, entity_assessments)
+    covered = _validate_cogroup_covered(claim_values, cogroup_covered)
     if provenance is not None and not isinstance(provenance, ProvenanceAssessment):
         raise DiscriminatorContractError("provenance has the wrong contract type")
     if temporal is not None and not isinstance(temporal, TemporalAssessment):
@@ -373,8 +430,23 @@ def decide_judgment(
         hold_reasons.append("no atomic claims")
     if any(row.state is EntityState.DIFFERENT_ENTITY_SUPPORTED for row in entities):
         findings.append("F7")
-    if any(row.state is SupportState.UNESTABLISHED for row in support):
+    # An UNESTABLISHED claim that a CO-CITED reference established is the group's
+    # coverage, not this reference's gap: no F6. It is still not this reference's
+    # support either, so it holds rather than clears -- a co-citation group must
+    # never become a blanket excuse.
+    unestablished = [row for row in support
+                     if row.state is SupportState.UNESTABLISHED]
+    own_gaps = [row for row in unestablished
+                if not (covered and covered[row.claim_index])]
+    if own_gaps:
         findings.append("F6")
+    # Deferred to the end of the hierarchy, and raised ONLY if nothing was found.
+    # Its whole job is to stop a group-covered claim from producing a silent
+    # "accurate", which can happen only when findings AND hold_reasons are both
+    # empty. Appending it unconditionally would instead downgrade a CONFIRMED
+    # fault -- an F4 overstatement, an F7 wrong entity -- from terminal to held,
+    # hiding exactly the per-reference faults co-citation must never touch.
+    cogroup_attributed = len(own_gaps) != len(unestablished)
     if any(row.state is SupportState.WEAKER_STRENGTH for row in support):
         findings.append("F4")
 
@@ -419,6 +491,10 @@ def decide_judgment(
     ordered_findings = tuple(
         label for label in ("F7", "F6", "F4", "F3", "F5") if label in findings
     )
+    if cogroup_attributed and not ordered_findings:
+        # See the note at the F6 stage: this is the "never a silent clear" guard,
+        # and it fires only where a clear was actually possible.
+        hold_reasons.append("claim coverage attributed to a co-cited reference")
     if hold_reasons:
         return JudgmentDecision(
             DecisionStatus.HELD_UNJUDGEABLE,
@@ -451,8 +527,13 @@ def evaluate_judgment(
     entity_assessor: EntityAssessor,
     provenance_assessor: ProvenanceAssessor,
     temporal_assessor: TemporalAssessor,
+    cogroup_covered: Sequence[bool] = (),
 ) -> JudgmentDecision:
-    """Run injected assessors, then invoke the deterministic decision core."""
+    """Run injected assessors, then invoke the deterministic decision core.
+
+    ``cogroup_covered`` passes straight through to :func:`decide_judgment`; see
+    its docstring for the co-citation overlay's exact effect. Empty (the default)
+    reproduces the previous behaviour exactly."""
     claim_values = _validate_claims(claims)
     support = _validate_support(claim_values, support_assessor(claim_values))
     entities = _validate_entities(
@@ -494,4 +575,5 @@ def evaluate_judgment(
         entity_assessments=entities,
         provenance=provenance,
         temporal=temporal,
+        cogroup_covered=cogroup_covered,
     )

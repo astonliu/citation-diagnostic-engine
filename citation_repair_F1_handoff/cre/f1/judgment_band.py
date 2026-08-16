@@ -87,6 +87,13 @@ from .band_prompts import (
 # substrate for the same reason coverage_aggregate does: band_prompts.py cannot
 # be edited without drifting its pinned blob OID.
 from .coverage_aggregate import no_usable_fulltext_dict
+# Co-citation grouping (leaf; imports nothing from this module, so no cycle). The
+# four coverage-bucket names live there as the single source of truth and are
+# re-exported below under the public names this module has always used, so the
+# two vocabularies cannot drift and no manifest byte moves.
+from . import cocitation
+from .cocitation import (
+    ROUTE_GROUP_COVERED, ROUTE_GROUP_COVERAGE_GAP, ROUTE_UNSUPPORTED_MEMBER)
 from .coverage_prompts_v3 import (
     COVERAGE_PROMPT_VERSION_V3, SPAN_MISS_STATUSES,
     RESPONSE_PARSER_VERSION as RESPONSE_PARSER_VERSION_V3)
@@ -158,7 +165,15 @@ def build_item(ref) -> "dict | None":
 
     ``item_key == citation_id == "<citing_pmcid>:<ref_id>"`` -- labels key on it
     and are reused across finder-prompt versions. ``citing_sentence`` and
-    ``cited_pmid`` additionally pin pair identity."""
+    ``cited_pmid`` additionally pin pair identity. THE GROUP DOES NOT REPLACE THE
+    ID: ``citance_group_id`` rides alongside as context, because labels key on
+    citation_id across prompt versions and the Band-1 disposition joins on it
+    (``preband_contract``).
+
+    ``citance_group_id`` / ``citance_group_members`` carry the co-citation group
+    the parser resolved -- the other references this sentence cites collectively.
+    Empty on a Reference built outside ``parser.link_citances``, which every
+    consumer reads as a singleton, i.e. the pre-group behaviour."""
     if exclusion_reason(ref) is not None:
         return None
     c = ref.claimed
@@ -169,6 +184,9 @@ def build_item(ref) -> "dict | None":
         "citing_pmid": ref.source_pmid,
         "citing_title": ref.source_title,
         "citing_sentence": ref.citance,
+        "citance_group_id": getattr(ref, "citance_group_id", "") or "",
+        "citance_group_members": list(
+            getattr(ref, "citance_group_members", None) or []),
         "cited_marker": ref.cited_reference_marker,
         "cited_pmid": c.claimed_pmid,
         "cited_claimed": {
@@ -365,10 +383,10 @@ def _proposed_verdict(route_value: str) -> "str | None":
 # abstract contradicts this" (the only abstract-scoped fault) from "the abstract
 # doesn't say," so the ratio can decide whether abstract-scoped F6 is a headline
 # result or a screening stage.
-COVERAGE_ESTABLISHED = "coverage_established"
-COVERAGE_CONTRADICTED = "coverage_contradicted"
-COVERAGE_UNCONFIRMED_SPECIFIC = "coverage_unconfirmed_specific"
-COVERAGE_OFF_TOPIC = "coverage_off_topic"
+COVERAGE_ESTABLISHED = cocitation.BUCKET_ESTABLISHED
+COVERAGE_CONTRADICTED = cocitation.BUCKET_CONTRADICTED
+COVERAGE_UNCONFIRMED_SPECIFIC = cocitation.BUCKET_UNCONFIRMED_SPECIFIC
+COVERAGE_OFF_TOPIC = cocitation.BUCKET_OFF_TOPIC
 _COVERAGE_BUCKETS = (
     COVERAGE_ESTABLISHED, COVERAGE_CONTRADICTED,
     COVERAGE_UNCONFIRMED_SPECIFIC, COVERAGE_OFF_TOPIC,
@@ -397,6 +415,97 @@ def coverage_bucket(verdict: dict) -> "str | None":
             return COVERAGE_UNCONFIRMED_SPECIFIC
         return COVERAGE_ESTABLISHED
     return None
+
+
+def item_buckets(item: dict) -> list:
+    """One coverage bucket per claim for one item, aligned to ``atomic_claims``.
+
+    ``None`` entries are verdicts carrying no structured judgment (the
+    deterministic no-usable-abstract / no-usable-fulltext path): neither evidence
+    of coverage nor evidence of a gap."""
+    return [coverage_bucket(v) for v in (item.get("coverage_verdicts") or [])]
+
+
+def apply_cocitation_routing(items: "list[dict]") -> tuple:
+    """Re-route a document's items with their CO-CITATION GROUPS in view.
+
+    Called once per document, after every item has its per-reference coverage
+    verdicts and its solo route, and before anything is written. Judging stays
+    per reference and the prompts are untouched; only the interpretation of the
+    result becomes group-aware.
+
+    Mutates each item in place and returns ``(group_records, route_counts,
+    stats)``. The route counters are returned rather than applied so the caller
+    keeps ownership of the manifest's counter set.
+
+    A group of ONE is a no-op: its route, verdict and record are exactly what
+    they were, and no ``cocitation`` block or ``proposed_route_solo`` key is
+    added. A document with no co-cited sentence therefore produces the same item
+    rows and the same manifest counters as before this existed.
+
+    PARSE_QUARANTINE rows are held out entirely: they carry no trustworthy
+    verdicts, so they can neither cover a claim for a sibling nor be excused by
+    one. They keep their quarantine route and are named in the group record's
+    ``excluded_members``.
+    """
+    routable = [it for it in items
+                if it.get("proposed_route") != ROUTE_PARSE_QUARANTINE]
+    quarantined_by_group: dict = {}
+    for it in items:
+        if it.get("proposed_route") == ROUTE_PARSE_QUARANTINE:
+            gid = cocitation.group_id_of(it)
+            if gid:
+                quarantined_by_group.setdefault(gid, []).append(
+                    {"citation_id": it.get("citation_id"),
+                     "reason": cocitation.EXCLUDED_NO_VERDICTS})
+
+    group_records: list = []
+    route_counts: dict = {}
+    size_distribution: dict = {}
+    groups = cocitation.partition(routable)
+    for gid, members in groups.items():
+        size = len(members)
+        size_distribution[str(size)] = size_distribution.get(str(size), 0) + 1
+        aggregated = cocitation.aggregate(members, buckets_of=item_buckets)
+        if gid in quarantined_by_group:
+            aggregated["excluded_members"].extend(quarantined_by_group[gid])
+        routes: dict = {}
+        for item in members:
+            solo = item.get("proposed_route")
+            final = cocitation.member_route(
+                buckets=item_buckets(item), solo_route=solo,
+                aggregated=aggregated, group_size=size)
+            if final != solo:
+                # Present exactly when the group changed the answer, so a reader
+                # can see what it changed and a run with no co-citation keeps
+                # byte-identical rows.
+                item["proposed_route_solo"] = solo
+            item["proposed_route"] = final
+            item["proposed_verdict"] = _proposed_verdict(final)
+            routes[item["citation_id"]] = final
+            route_counts[final] = route_counts.get(final, 0) + 1
+        if size > 1:
+            record = cocitation.group_record(gid, members, aggregated, routes)
+            group_records.append(record)
+            for item in members:
+                item["cocitation"] = {
+                    "citance_group_id": record["citance_group_id"],
+                    "size": size,
+                    "members": list(record["members"]),
+                    "claims_covered": record["claims_covered"],
+                    "claims_uncovered": record["claims_uncovered"],
+                    "claims_unknown": record["claims_unknown"],
+                    "uncovered_claims": list(record["uncovered_claims"]),
+                }
+    stats = {
+        "groups": len(groups),
+        "cocitation_groups": sum(1 for m in groups.values() if len(m) > 1),
+        "members_in_cocitation_groups": sum(
+            len(m) for m in groups.values() if len(m) > 1),
+        "group_size_distribution": dict(sorted(
+            size_distribution.items(), key=lambda kv: int(kv[0]))),
+    }
+    return group_records, route_counts, stats
 
 
 # ==========================================================================
@@ -695,13 +804,17 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
     so a citance citing [5,6,7,8] extracts once and is judged four times. Every
     counter, item record, and queue row remains per reference.
 
-    Writes three files in ``out_dir``:
+    Writes four files in ``out_dir``:
       * ``judgment_band_items.jsonl``            -- one item record per unit,
         carrying the system's proposed_route / proposed_verdict (item record ONLY).
       * ``judgment_band_annotation_queue.jsonl`` -- one BLIND annotator payload
         per unit (no proposed verdict).
+      * ``judgment_band_cocitation_groups.jsonl`` -- one record per CO-CITATION
+        group (a sentence occurrence citing two or more references): its members,
+        which claims the group covered, and which claims no member covered.
       * ``judgment_band_manifest.json``          -- counts, params, pinned prompt
-        versions, gold-discipline warning.
+        versions, the co-citation block with BOTH candidate denominators, and the
+        gold-discipline warning.
 
     Every helper (extractor, coverage_judge, fetch_abstract, fetch_reflist) is
     injected, so this is fully offline-testable. The cited-work review check uses
@@ -749,6 +862,7 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
     os.makedirs(out_dir, exist_ok=True)
     items_path = os.path.join(out_dir, "judgment_band_items.jsonl")
     queue_path = os.path.join(out_dir, "judgment_band_annotation_queue.jsonl")
+    groups_path = os.path.join(out_dir, "judgment_band_cocitation_groups.jsonl")
     manifest_path = os.path.join(out_dir, "judgment_band_manifest.json")
     checkpoint_path = os.path.join(out_dir, "judgment_band_checkpoint.jsonl")
 
@@ -817,12 +931,23 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
     engaged_claims = 0
     engaged_claims_with_span = 0
     pubtype_cache: dict = {}
+    # Co-citation accounting. THE UNIT OF ANALYSIS IS NOW AMBIGUOUS and that is
+    # reported, not resolved here: some verdicts attach to a group of citations
+    # rather than to one, so every downstream rate has two candidate
+    # denominators. Both are surfaced in the manifest; picking one is ZD's call.
+    cocitation_groups = 0
+    cocitation_stats: dict = {}
+    group_sizes: dict = {}
+    covered_claims_total = 0
+    uncovered_claims_total = 0
+    unknown_claims_total = 0
 
     files = sorted(fn for fn in os.listdir(xml_dir)
                    if fn.endswith((".xml", ".nxml")))
 
     items_fh = open(items_path, "a", encoding="utf-8")
     queue_fh = open(queue_path, "a", encoding="utf-8")
+    groups_fh = open(groups_path, "a", encoding="utf-8")
     ckpt_fh = open(checkpoint_path, "a", encoding="utf-8")
     if fulltext_path and _prior_mode is None:
         # Written once, before any document. The abstract path writes nothing.
@@ -1001,18 +1126,14 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                     row["sanitized_paths"] = sanitized_paths
                     doc_items.append(row)
                     continue
+                # The SOLO route: this reference judged alone against the whole
+                # citing sentence. It is provisional until the document's
+                # co-citation groups are known (apply_cocitation_routing, below),
+                # so it is recorded now and COUNTED THERE -- counting here would
+                # tally a route the group may still overturn.
                 r = route(item["coverage_verdicts"])
                 item["proposed_route"] = r
                 item["proposed_verdict"] = _proposed_verdict(r)
-                # ``.get`` rather than a pre-seeded key, for ROUTE_NO_CLAIMS
-                # alone: seeding it unconditionally would add a zero-valued key to
-                # the manifest of EVERY default run, and byte-identity of the
-                # default path is the opt-in guarantee
-                # (test_default_path_manifest_counter_set_is_unchanged pins the
-                # exact key set). So the counter appears exactly when a claim-less
-                # reference actually occurs -- absent means it never fired, never
-                # "unknown". The four routes above are pre-seeded and unaffected.
-                counts[r] = counts.get(r, 0) + 1
 
                 # Per-atomic-claim coverage tally (calibration): the abstract-
                 # scoped distribution the tri-state gate produces. Verdicts on
@@ -1063,19 +1184,52 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                     # against, so it is recorded durably but NOT queued for blind
                     # annotation. It is not lost -- it is in the items file, with
                     # its incomplete_reasons -- it is simply not answerable yet.
-                    doc_queue.append(annotation_payload(item))
+                    doc_queue.append(item)
+
+            # CO-CITATION POST-PASS. Every reference in this document now has its
+            # own coverage verdicts, so the groups the parser resolved can finally
+            # be aggregated: a claim a sibling established is not this member's
+            # coverage gap. Runs here, on the already-buffered document, because a
+            # group verdict needs every member judged and the document is already
+            # the unit of durability. Routes are counted here, not inline, so a
+            # counter can never record a route the group overturned.
+            doc_groups, doc_route_counts, doc_stats = apply_cocitation_routing(
+                doc_items)
+            for route_name, n in doc_route_counts.items():
+                # ``.get`` for the same reason ROUTE_NO_CLAIMS uses it: a
+                # pre-seeded group counter would add zero-valued keys to the
+                # manifest of every default run. A group route counter appears
+                # exactly when that route actually fired.
+                counts[route_name] = counts.get(route_name, 0) + n
+            cocitation_groups += len(doc_groups)
+            for key in ("groups", "cocitation_groups",
+                        "members_in_cocitation_groups"):
+                cocitation_stats[key] = cocitation_stats.get(key, 0) + doc_stats[key]
+            for size, n in doc_stats["group_size_distribution"].items():
+                group_sizes[size] = group_sizes.get(size, 0) + n
+            for record in doc_groups:
+                uncovered_claims_total += record["claims_uncovered"]
+                covered_claims_total += record["claims_covered"]
+                unknown_claims_total += record["claims_unknown"]
 
             # Doc is through: publish its rows, THEN checkpoint it. An interrupt
             # anywhere above leaves nothing durable for the resume to duplicate.
             for row in doc_items:
                 _append_jsonl(items_fh, row)
+            for row in doc_groups:
+                _append_jsonl(groups_fh, row)
             for row in doc_queue:
-                _append_jsonl(queue_fh, row)
+                # Built AFTER the post-pass so the payload is derived from the
+                # final item. annotation_payload is blind to the route either way,
+                # so the annotator's view is unchanged -- the ordering is for the
+                # reader of this code, not a behaviour change.
+                _append_jsonl(queue_fh, annotation_payload(row))
             _append_jsonl(ckpt_fh, {"pmcid": pmcid})
             done.add(pmcid)
     finally:
         items_fh.close()
         queue_fh.close()
+        groups_fh.close()
         ckpt_fh.close()
 
     manifest = {
@@ -1163,9 +1317,56 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                 "that a verdict is correct."
             ),
         }} if fulltext_path else {}),
+        # CO-CITATION. A sentence citing eight references cites them
+        # COLLECTIVELY; judging each alone against the whole sentence made F6
+        # fire by construction on every member. Grouping fixes the judgment and
+        # in doing so CHANGES THE UNIT OF ANALYSIS, which is a reporting
+        # consequence, not an implementation detail.
+        "cocitation": {
+            "groups_path": groups_path,
+            # BOTH candidate denominators, deliberately unreconciled. A rate can
+            # be per CITATION (one row per reference, the historical unit, still
+            # every counter above) or per CITATION-GROUP (one row per sentence
+            # occurrence, the unit a collectively-cited claim is actually made
+            # in). They differ, they are both defensible, and choosing between
+            # them is a reporting decision for ZD -- so both are published and
+            # neither is silently adopted.
+            "denominator_per_citation": counts["items_built"],
+            "denominator_per_citation_group": cocitation_stats.get("groups", 0),
+            "cocitation_groups": cocitation_stats.get("cocitation_groups", 0),
+            "members_in_cocitation_groups": cocitation_stats.get(
+                "members_in_cocitation_groups", 0),
+            "group_size_distribution": dict(sorted(
+                group_sizes.items(), key=lambda kv: int(kv[0]))),
+            # Claim-level accounting over the co-citation groups only. An
+            # uncovered claim is a REAL DEFECT that belongs to the group rather
+            # than to an arbitrary member, so it is counted here and listed per
+            # group in groups_path -- never dropped because "it's a group".
+            "group_claims_covered": covered_claims_total,
+            "group_claims_uncovered": uncovered_claims_total,
+            "group_claims_unknown": unknown_claims_total,
+            "routes": {
+                ROUTE_GROUP_COVERED: counts.get(ROUTE_GROUP_COVERED, 0),
+                ROUTE_GROUP_COVERAGE_GAP: counts.get(ROUTE_GROUP_COVERAGE_GAP, 0),
+                ROUTE_UNSUPPORTED_MEMBER: counts.get(ROUTE_UNSUPPORTED_MEMBER, 0),
+            },
+            "note": (
+                "A group is one SENTENCE OCCURRENCE and its members are the "
+                "references that occurrence gave its citance to (first-citance-"
+                "wins, so a reference already carrying an earlier sentence "
+                "belongs to that sentence's group instead). GROUP_COVERED means "
+                "the group covers every claim and this member contributed; "
+                "GROUP_COVERAGE_GAP means at least one claim NO member covered; "
+                "UNSUPPORTED_MEMBER means this member engaged nothing at all and "
+                "is a fault, never a clear. Contradiction stays per reference and "
+                "still routes F6_FLAGGED -- a sibling covering a claim says "
+                "nothing about this paper's counter-evidence."
+            ),
+        },
         "distinct_cited_pmids_looked_up": len(pubtype_cache),
         "items_path": items_path,
         "annotation_queue_path": queue_path,
+        "cocitation_groups_path": groups_path,
         "checkpoint_path": checkpoint_path,
         "manifest_path": manifest_path,
     }

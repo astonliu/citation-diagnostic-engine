@@ -73,6 +73,7 @@ import time
 from typing import Callable, Iterable, Optional
 
 from . import judgment_band as jb
+from . import cocitation
 from . import preband_contract as pc
 from .preband_contract import PrebandContractError
 from .judgment_engine import (
@@ -144,6 +145,14 @@ DISP_HELD_INSUFFICIENT = "held_insufficient_evidence"
 DISP_HELD_PENDING_F5_F7 = "held_pending_F5_F7"            # full coverage, not overstated, proper origin
 DISP_HELD_PROVENANCE_UNJUDGEABLE = "held_provenance_unjudgeable"
 DISP_HELD_STRENGTH_UNJUDGEABLE = "held_strength_unjudgeable"
+# CO-CITATION. The coverage route is F6_FLAGGED, but every claim this reference
+# did not establish was established by a reference cited in the SAME sentence.
+# Citing eight papers for one sentence is normal practice and the eight are cited
+# COLLECTIVELY, so "supports part of the claim but not all of it" is not a
+# statement about this reference. HELD, never PREDICTED and never a clear: this
+# reference genuinely did not establish those claims, the group did, and the
+# attribution is on the group record.
+DISP_HELD_COCITATION_COVERED = "held_cocitation_covered"
 
 # Pipeline/taxonomy labels that mean "the cited work was verified as the right,
 # existing paper" -> the F3-F7 band may proceed. Everything else is out of band.
@@ -153,7 +162,12 @@ _CLEAR_LABELS = frozenset({"cleared", "accurate"})
 _SCOREABLE = frozenset(
     {DISP_PREDICTED, DISP_HELD_FULL_COVERAGE, DISP_HELD_INSUFFICIENT,
      DISP_HELD_PENDING_F5_F7, DISP_HELD_PROVENANCE_UNJUDGEABLE,
-     DISP_HELD_STRENGTH_UNJUDGEABLE}
+     DISP_HELD_STRENGTH_UNJUDGEABLE,
+     # Scoreable: the pair was fully judged and there IS something for a human to
+     # adjudicate -- whether collective support by the co-cited group is the right
+     # reading of this citation. Dropping it from the queue would be the silent
+     # clear the co-citation fix must never become.
+     DISP_HELD_COCITATION_COVERED}
 )
 
 _TRUST_BOUNDARY = (
@@ -393,51 +407,28 @@ def _excluded_record(ref, disposition: str, preband_label=None) -> dict:
     }
 
 
-def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
-               fetch_reflist=None, discriminator_call_llm=None,
-               f4_verifier_call_llm=None,
-               f3_fetch_reflist=None, f3_resolve_pmcid=None,
-               f4_policy=None, f3_policy=None,
-               f5_seams=None, f5_evidence_builder=None, f5_policy=None,
-               f7_seams=None, f7_evidence_builder=None, f7_policy=None,
-               fetch_fulltext=None, coverage_judge_v3=None) -> dict:
-    """Type a single PRE-BAND-CLEARED item through coverage + the engine.
+def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract,
+                        fetch_reflist=None, fetch_fulltext=None,
+                        coverage_judge_v3=None) -> tuple:
+    """PHASE 1 of :func:`judge_pair`: evidence, atomic claims, coverage verdicts.
 
-    Mutates and returns a durable record. Raises ValueError (propagated from the
-    strict band parsers) on malformed model output -- the caller quarantines it.
-    ``f4_policy=None`` defaults to a development-mode (non-reportable) F4Policy;
-    ``f4_verifier_call_llm`` is threaded into ``refine_support_strength``.
+    Split out because the CO-CITATION GROUP a reference belongs to cannot be
+    aggregated until every member of that group has its own coverage verdicts.
+    The caller runs this over a whole document, computes the group coverage, then
+    calls :func:`judge_pair_finish` per pair in the original order -- so the emit
+    order, the record shape and the hash chain are exactly what they were.
 
-    FULL-TEXT COVERAGE (opt-in, DEC-030/032). Supplying BOTH ``fetch_fulltext`` and
-    ``coverage_judge_v3`` moves coverage from the cited abstract to the retrieved
-    body: evidence gains ``cited_fulltext``, a complete retrieval is judged by the v3
-    judge, and a retrieval that is NOT complete is held with no model call of either
-    version. The record's ``coverage_prompt_version`` is OVERWRITTEN to
-    ``coverage_v3`` on that path, because ``_new_record`` stamps the frozen abstract
-    version on every record and leaving it would be a false provenance stamp.
-    Supplying neither leaves every byte of this function's output unchanged;
-    supplying one alone is a configuration error and raises in the caller.
-
-    F5 (temporal supersession) is wired through injected seams, fail-closed like
-    F3: when BOTH ``f5_seams`` (a dict of the six offline ``decide_f5`` seam
-    callables) and ``f5_evidence_builder`` (``item -> evidence`` dict) are
-    supplied, ``decide_f5`` produces the ``TemporalAssessment`` and the per-claim
-    F5 records; otherwise the temporal seam holds ``UNJUDGEABLE`` (unevaluated,
-    an honest hold -- never a fabricated confident negative). ``f5_policy`` runs
-    development-mode (``deploy_path_a=False``, non-reportable) by default.
-
-    F7 (wrong entity) is wired the same way: when BOTH ``f7_seams`` (a dict of the
-    five ``make_entity_assessor`` seam callables) and ``f7_evidence_builder``
-    (``item -> EvidenceContext``) are supplied, the assessor produces the
-    per-claim ``EntityAssessment`` rows and the durable F7 records; otherwise the
-    entity seam stays empty and F7 is never asserted either way. F7 is
-    deliberately NOT gated on support state -- it may coexist with F6/F4, so
-    support is context, not a veto. ``make_entity_assessor`` raises ValueError on
-    a configuration or provenance defect, which the caller quarantines exactly
-    like the other strict discriminators.
+    Returns ``(rec, claims, verdicts)``. Raises ValueError (propagated from the
+    strict band parsers) on malformed model output; the caller quarantines it.
     """
     rec = _new_record(item)
     rec["preband_cleared"] = True
+    # The co-citation group, carried on the durable record so a reader can see
+    # which references shared this citance. It does NOT replace citation_id:
+    # labels key on that across prompt versions and the Band-1 disposition joins
+    # on it.
+    rec["citance_group_id"] = item.get("citance_group_id", "") or ""
+    rec["citance_group_members"] = list(item.get("citance_group_members") or [])
 
     # OPT-IN FULL-TEXT COVERAGE (DEC-030/032), mirroring run_band's branch exactly.
     # MODE COMES FROM CONFIGURATION, never from the fetched value: inferring it from
@@ -489,7 +480,94 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
     rec["atomic_claims"] = claims
     rec["coverage_verdicts"] = verdicts
     rec["ts"] = int(time.time())
+    # Kept on the item too, so the co-citation aggregation can read them through
+    # the same accessor the band uses (jb.item_buckets).
+    item["atomic_claims"] = claims
+    item["coverage_verdicts"] = verdicts
+    return rec, claims, verdicts
 
+
+def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
+               fetch_reflist=None, discriminator_call_llm=None,
+               f4_verifier_call_llm=None,
+               f3_fetch_reflist=None, f3_resolve_pmcid=None,
+               f4_policy=None, f3_policy=None,
+               f5_seams=None, f5_evidence_builder=None, f5_policy=None,
+               f7_seams=None, f7_evidence_builder=None, f7_policy=None,
+               fetch_fulltext=None, coverage_judge_v3=None,
+               cogroup_covered=()) -> dict:
+    """Type a single PRE-BAND-CLEARED item through coverage + the engine.
+
+    Mutates and returns a durable record. Raises ValueError (propagated from the
+    strict band parsers) on malformed model output -- the caller quarantines it.
+    ``f4_policy=None`` defaults to a development-mode (non-reportable) F4Policy;
+    ``f4_verifier_call_llm`` is threaded into ``refine_support_strength``.
+
+    FULL-TEXT COVERAGE (opt-in, DEC-030/032). Supplying BOTH ``fetch_fulltext`` and
+    ``coverage_judge_v3`` moves coverage from the cited abstract to the retrieved
+    body: evidence gains ``cited_fulltext``, a complete retrieval is judged by the v3
+    judge, and a retrieval that is NOT complete is held with no model call of either
+    version. The record's ``coverage_prompt_version`` is OVERWRITTEN to
+    ``coverage_v3`` on that path, because ``_new_record`` stamps the frozen abstract
+    version on every record and leaving it would be a false provenance stamp.
+    Supplying neither leaves every byte of this function's output unchanged;
+    supplying one alone is a configuration error and raises in the caller.
+
+    F5 (temporal supersession) is wired through injected seams, fail-closed like
+    F3: when BOTH ``f5_seams`` (a dict of the six offline ``decide_f5`` seam
+    callables) and ``f5_evidence_builder`` (``item -> evidence`` dict) are
+    supplied, ``decide_f5`` produces the ``TemporalAssessment`` and the per-claim
+    F5 records; otherwise the temporal seam holds ``UNJUDGEABLE`` (unevaluated,
+    an honest hold -- never a fabricated confident negative). ``f5_policy`` runs
+    development-mode (``deploy_path_a=False``, non-reportable) by default.
+
+    F7 (wrong entity) is wired the same way: when BOTH ``f7_seams`` (a dict of the
+    five ``make_entity_assessor`` seam callables) and ``f7_evidence_builder``
+    (``item -> EvidenceContext``) are supplied, the assessor produces the
+    per-claim ``EntityAssessment`` rows and the durable F7 records; otherwise the
+    entity seam stays empty and F7 is never asserted either way. F7 is
+    deliberately NOT gated on support state -- it may coexist with F6/F4, so
+    support is context, not a veto. ``make_entity_assessor`` raises ValueError on
+    a configuration or provenance defect, which the caller quarantines exactly
+    like the other strict discriminators.
+
+    ``cogroup_covered`` is the CO-CITATION OVERLAY (see
+    ``judgment_engine.decide_judgment``): one flag per claim, True when a
+    reference cited in the SAME sentence established that claim. Empty -- the
+    default -- means no co-citation context and reproduces the previous output
+    byte for byte. ``run_natural_judgment`` supplies it by running
+    :func:`judge_pair_coverage` over a whole document first.
+    """
+    rec, claims, verdicts = judge_pair_coverage(
+        item, extractor=extractor, coverage_judge=coverage_judge,
+        fetch_abstract=fetch_abstract, fetch_reflist=fetch_reflist,
+        fetch_fulltext=fetch_fulltext, coverage_judge_v3=coverage_judge_v3)
+    return judge_pair_finish(
+        rec, item, claims, verdicts, fetch_abstract=fetch_abstract,
+        cogroup_covered=cogroup_covered,
+        discriminator_call_llm=discriminator_call_llm,
+        f4_verifier_call_llm=f4_verifier_call_llm,
+        f3_fetch_reflist=f3_fetch_reflist, f3_resolve_pmcid=f3_resolve_pmcid,
+        f4_policy=f4_policy, f3_policy=f3_policy,
+        f5_seams=f5_seams, f5_evidence_builder=f5_evidence_builder,
+        f5_policy=f5_policy, f7_seams=f7_seams,
+        f7_evidence_builder=f7_evidence_builder, f7_policy=f7_policy)
+
+
+def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
+                      fetch_abstract, cogroup_covered=(),
+                      discriminator_call_llm=None, f4_verifier_call_llm=None,
+                      f3_fetch_reflist=None, f3_resolve_pmcid=None,
+                      f4_policy=None, f3_policy=None,
+                      f5_seams=None, f5_evidence_builder=None, f5_policy=None,
+                      f7_seams=None, f7_evidence_builder=None,
+                      f7_policy=None) -> dict:
+    """PHASE 2 of :func:`judge_pair`: type through the engine, derive disposition.
+
+    Separated from phase 1 so a caller can interpose the document's CO-CITATION
+    group coverage (``cogroup_covered``) between the two. Mutates and returns
+    ``rec``.
+    """
     if not claims:
         # NO_CLAIMS since 2026-08-11 (ZD calibration item 1). This branch always
         # had the case right -- DISP_HELD_NO_CLAIMS below -- while jb.route
@@ -576,7 +654,7 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
     decision = decide_judgment(
         preband_cleared=True, claims=claims, claim_support=support,
         entity_assessments=entities, provenance=provenance,
-        temporal=temporal)
+        temporal=temporal, cogroup_covered=cogroup_covered)
     rec["findings"] = list(decision.findings)
     rec["hold_reasons"] = list(decision.hold_reasons)
 
@@ -587,6 +665,17 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
         # Legacy path: coverage->F6 is the only live discriminator.
         if r == jb.ROUTE_F6_FLAGGED:
             if "F6" not in decision.findings:
+                # The co-citation overlay explains this route: every claim this
+                # reference did not establish was established by a reference cited
+                # in the SAME sentence, so the sentence is collectively supported
+                # and F6 -- "supports part of the claim but not all of it" -- is
+                # not a statement about this reference. It is NOT a clear either:
+                # this reference did not establish those claims, so the pair holds
+                # for human adjudication and the group record carries the
+                # attribution.
+                if cogroup_covered:
+                    rec["disposition"] = DISP_HELD_COCITATION_COVERED
+                    return rec
                 raise DiscriminatorContractError(
                     "route F6_FLAGGED but engine findings lack F6")
             rec["disposition"] = DISP_PREDICTED
@@ -609,6 +698,14 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
             raise DiscriminatorContractError("F6 finding without an F6 coverage route")
         rec["disposition"] = DISP_PREDICTED
         rec["label"] = "F6"
+    elif r == jb.ROUTE_F6_FLAGGED and cogroup_covered and not findings:
+        # Same case as the legacy branch above, on the wired path: the F6 route is
+        # fully explained by co-cited coverage. ``not findings`` is the guard that
+        # makes this safe -- F4 (overstatement) and F7 (wrong entity) are
+        # PER-REFERENCE faults that co-citation says nothing about, and F3/F5 are
+        # their own findings, so any surviving finding falls through to its own
+        # branch and keeps the label.
+        rec["disposition"] = DISP_HELD_COCITATION_COVERED
     elif "F4" in findings:
         rec["disposition"] = DISP_PREDICTED
         rec["label"] = "F4"
@@ -631,6 +728,67 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
     else:
         rec["disposition"] = DISP_HELD_PROVENANCE_UNJUDGEABLE
     return rec
+
+
+def _cocitation_overlay(items: "list[dict]") -> dict:
+    """Aggregate one document's judged items into their co-citation groups.
+
+    Returns the per-citation overlay the engine consumes plus the group records
+    and the size accounting the manifest reports.
+
+    ``by_citation_id`` maps citation_id -> ``(cogroup_covered_flags, summary)``.
+    The flags are EMPTY for a singleton, for a member the aggregation excluded,
+    and whenever their length does not match the member's own claim list -- a
+    length mismatch would excuse the wrong claim, so it fails closed to "no
+    co-citation context" rather than guessing an alignment.
+    """
+    by_citation_id: dict = {}
+    group_records: list = []
+    size_distribution: dict = {}
+    members_in_groups = 0
+    groups = cocitation.partition(items)
+    for gid, members in groups.items():
+        size = len(members)
+        size_distribution[str(size)] = size_distribution.get(str(size), 0) + 1
+        if size <= 1:
+            continue
+        members_in_groups += size
+        aggregated = cocitation.aggregate(members, buckets_of=jb.item_buckets)
+        flags = cocitation.cogroup_covered_flags(aggregated)
+        contributing = set(aggregated.get("contributing_members", []))
+        routes = {
+            m["citation_id"]: cocitation.member_route(
+                buckets=jb.item_buckets(m),
+                solo_route=jb.route(m.get("coverage_verdicts") or []),
+                aggregated=aggregated, group_size=size)
+            for m in members
+        }
+        record = cocitation.group_record(gid, members, aggregated, routes)
+        group_records.append(record)
+        summary = {
+            "citance_group_id": record["citance_group_id"],
+            "size": size,
+            "members": list(record["members"]),
+            "claims_covered": record["claims_covered"],
+            "claims_uncovered": record["claims_uncovered"],
+            "claims_unknown": record["claims_unknown"],
+            "uncovered_claims": list(record["uncovered_claims"]),
+        }
+        for m in members:
+            cid = m["citation_id"]
+            own_claims = m.get("atomic_claims") or []
+            usable = (cid in contributing and len(flags) == len(own_claims)
+                      and any(flags))
+            member_summary = dict(summary)
+            member_summary["member_route"] = routes[cid]
+            by_citation_id[cid] = (flags if usable else (), member_summary)
+    return {
+        "by_citation_id": by_citation_id,
+        "group_records": group_records,
+        "groups": len(groups),
+        "members_in_cocitation_groups": members_in_groups,
+        "group_size_distribution": size_distribution,
+    }
 
 
 def _module_hashes(fulltext_path: bool, f5_seams, f7_seams) -> dict:
@@ -972,6 +1130,7 @@ def run_natural_judgment(
     manifest_path = os.path.join(out_dir, "judgment_run_manifest.json")
     checkpoint_path = os.path.join(out_dir, "judgment_run_checkpoint.jsonl")
     sidecar_path = os.path.join(out_dir, "judgment_run_record_hashes.jsonl")
+    groups_path = os.path.join(out_dir, "judgment_run_cocitation_groups.jsonl")
 
     corpus_bindings: dict = {}
 
@@ -1034,6 +1193,15 @@ def run_natural_judgment(
     # Full-text retrieval funnel. Separate from `counts` for the same reason
     # f4_counts is: `counts` sums to the record total and admits no statistics.
     fulltext_counts = {"no_usable_fulltext": 0}
+    # Co-citation accounting. Its OWN tally, never `counts`: `counts` is one entry
+    # per emitted record and is summed into `total_records`, so a statistic there
+    # would corrupt the record count rather than add information.
+    cocitation_counts = {"groups": 0, "cocitation_groups": 0,
+                         "members_in_cocitation_groups": 0,
+                         "group_claims_covered": 0,
+                         "group_claims_uncovered": 0,
+                         "group_claims_unknown": 0}
+    group_sizes: dict = {}
 
     def bump(key: str) -> None:
         counts[key] = counts.get(key, 0) + 1
@@ -1065,6 +1233,7 @@ def run_natural_judgment(
     queue_fh = open(queue_path, "a", encoding="utf-8")
     ckpt_fh = open(checkpoint_path, "a", encoding="utf-8")
     side_fh = open(sidecar_path, "a", encoding="utf-8")
+    groups_fh = open(groups_path, "a", encoding="utf-8")
 
     # Every F5 record produced this run, for the discovery queue and the manifest
     # tallies. Collected at emit so it follows the same crash invariant as the
@@ -1145,17 +1314,24 @@ def run_natural_judgment(
                 _write_json_atomic(manifest_path, progress_manifest())
                 continue
 
+            # PHASE 1 over the whole document. A co-citation group verdict needs
+            # every member's coverage, so nothing is emitted until the document's
+            # coverage is complete. `pending` preserves REF ORDER exactly, so the
+            # emit sequence, the record shapes and the hash chain are unchanged --
+            # only the moment of writing moves, from per reference to per
+            # document, which is already the checkpoint granularity.
+            pending: list = []
             for ref in refs:
                 refs_seen += 1
                 executed_ids.add(ref.citation_id)
                 reason = jb.exclusion_reason(ref)
                 if reason is not None:                    # no citance / no cited pmid
-                    emit(_excluded_record(ref, reason))
+                    pending.append((_excluded_record(ref, reason), None))
                     continue
                 cleared, disp_label, preband_label = _preband(ref.citation_id, disp)
                 if not cleared:
                     rec = _excluded_record(ref, disp_label, preband_label)
-                    emit(rec)
+                    pending.append((rec, None))
                     if disp_label == DISP_EXCLUDED_PREBAND:
                         k = str(preband_label)
                         preband_by_label[k] = preband_by_label.get(k, 0) + 1
@@ -1163,7 +1339,8 @@ def run_natural_judgment(
 
                 item = jb.build_item(ref)
                 if item is None:                          # defensive; exclusion caught above
-                    emit(_excluded_record(ref, DISP_EXCLUDED_NO_CITANCE))
+                    pending.append((_excluded_record(ref, DISP_EXCLUDED_NO_CITANCE),
+                                    None))
                     continue
 
                 # Review check (optional injected lookup; cached per pmid).
@@ -1174,23 +1351,11 @@ def run_natural_judgment(
                     item["cited_is_review"] = jb.is_review(pubtype_cache[pmid])
 
                 try:
-                    rec = judge_pair(item, extractor=extractor,
-                                     coverage_judge=coverage_judge,
-                                     fetch_abstract=fetch_abstract,
-                                     fetch_reflist=fetch_reflist,
-                                     discriminator_call_llm=discriminator_call_llm,
-                                     f4_verifier_call_llm=f4_verifier_call_llm,
-                                     f3_fetch_reflist=f3_fetch_reflist,
-                                     f3_resolve_pmcid=f3_resolve_pmcid,
-                                     f4_policy=eff_f4_policy, f3_policy=f3_policy,
-                                     f5_seams=f5_seams,
-                                     f5_evidence_builder=f5_evidence_builder,
-                                     f5_policy=f5_policy,
-                                     f7_seams=f7_seams,
-                                     f7_evidence_builder=f7_evidence_builder,
-                                     f7_policy=f7_policy,
-                                     fetch_fulltext=fetch_fulltext,
-                                     coverage_judge_v3=coverage_judge_v3)
+                    rec, claims, verdicts = judge_pair_coverage(
+                        item, extractor=extractor, coverage_judge=coverage_judge,
+                        fetch_abstract=fetch_abstract, fetch_reflist=fetch_reflist,
+                        fetch_fulltext=fetch_fulltext,
+                        coverage_judge_v3=coverage_judge_v3)
                     if rec.get("fulltext_incomplete_hold") is True:
                         # Its OWN tally, never `counts`. `counts` is one entry per
                         # emitted record and is summed into `total_records`, so an
@@ -1200,6 +1365,58 @@ def run_natural_judgment(
                         # retrieve looks identical in the route counters to one
                         # judged against complete text: DEC-032 makes both hold.
                         fulltext_counts["no_usable_fulltext"] += 1
+                    pending.append((rec, (item, claims, verdicts)))
+                except ValueError as e:                   # strict-parser failure -> quarantine
+                    rec = _new_record(item)
+                    rec["preband_cleared"] = True
+                    rec["disposition"] = DISP_QUARANTINE_PARSE
+                    rec["parse_error"] = str(e)
+                    rec["ts"] = int(time.time())
+                    print(f"[judgment-run-quarantine] {rec['citation_id']}: {e}")
+                    pending.append((rec, None))
+
+            # CO-CITATION AGGREGATION over the judged pairs of this document.
+            judged_items = [extra[0] for _rec, extra in pending if extra is not None]
+            overlay = _cocitation_overlay(judged_items)
+            doc_group_records = overlay["group_records"]
+            for record in doc_group_records:
+                cocitation_counts["group_claims_covered"] += record["claims_covered"]
+                cocitation_counts["group_claims_uncovered"] += record["claims_uncovered"]
+                cocitation_counts["group_claims_unknown"] += record["claims_unknown"]
+            cocitation_counts["groups"] += overlay["groups"]
+            cocitation_counts["cocitation_groups"] += len(doc_group_records)
+            cocitation_counts["members_in_cocitation_groups"] += overlay[
+                "members_in_cocitation_groups"]
+            for size, n in overlay["group_size_distribution"].items():
+                group_sizes[size] = group_sizes.get(size, 0) + n
+            for record in doc_group_records:
+                groups_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            groups_fh.flush()
+
+            # PHASE 2, in the original ref order.
+            for rec, extra in pending:
+                if extra is None:
+                    emit(rec)
+                    continue
+                item, claims, verdicts = extra
+                cid = item["citation_id"]
+                flags, summary = overlay["by_citation_id"].get(cid, ((), None))
+                if summary is not None:
+                    rec["cocitation"] = summary
+                try:
+                    rec = judge_pair_finish(
+                        rec, item, claims, verdicts,
+                        fetch_abstract=fetch_abstract, cogroup_covered=flags,
+                        discriminator_call_llm=discriminator_call_llm,
+                        f4_verifier_call_llm=f4_verifier_call_llm,
+                        f3_fetch_reflist=f3_fetch_reflist,
+                        f3_resolve_pmcid=f3_resolve_pmcid,
+                        f4_policy=eff_f4_policy, f3_policy=f3_policy,
+                        f5_seams=f5_seams,
+                        f5_evidence_builder=f5_evidence_builder,
+                        f5_policy=f5_policy, f7_seams=f7_seams,
+                        f7_evidence_builder=f7_evidence_builder,
+                        f7_policy=f7_policy)
                 except ValueError as e:                   # strict-parser failure -> quarantine
                     rec = _new_record(item)
                     rec["preband_cleared"] = True
@@ -1219,6 +1436,7 @@ def run_natural_judgment(
         queue_fh.close()
         ckpt_fh.close()
         side_fh.close()
+        groups_fh.close()
 
     # Module hashes were captured BEFORE execution (see `_module_hashes` at the
     # top of this function): read here, they could describe a module edited
@@ -1484,8 +1702,42 @@ def run_natural_judgment(
         "accounting_ok": total_records == refs_seen,
         "scoreable_records": scoreable_records,
         "annotation_queue_rows": manifest_queue_rows,
+        # CO-CITATION. A sentence citing eight references cites them
+        # COLLECTIVELY; judging each alone against the whole sentence made F6
+        # fire by construction on every member. Fixing that CHANGES THE UNIT OF
+        # ANALYSIS, which is a reporting consequence and is surfaced, not absorbed.
+        "cocitation": {
+            "groups_path": groups_path,
+            # BOTH candidate denominators, deliberately unreconciled. Per CITATION
+            # is one row per reference -- the historical unit, and every counter
+            # above. Per CITATION-GROUP is one row per sentence occurrence -- the
+            # unit a collectively-cited claim is actually made in. They differ,
+            # both are defensible, and choosing is a reporting decision for ZD.
+            "denominator_per_citation": total_records,
+            "denominator_per_citation_group": cocitation_counts["groups"],
+            "cocitation_groups": cocitation_counts["cocitation_groups"],
+            "members_in_cocitation_groups":
+                cocitation_counts["members_in_cocitation_groups"],
+            "group_size_distribution": dict(sorted(
+                group_sizes.items(), key=lambda kv: int(kv[0]))),
+            "group_claims_covered": cocitation_counts["group_claims_covered"],
+            "group_claims_uncovered": cocitation_counts["group_claims_uncovered"],
+            "group_claims_unknown": cocitation_counts["group_claims_unknown"],
+            "held_cocitation_covered": counts.get(DISP_HELD_COCITATION_COVERED, 0),
+            "note": (
+                "A group is one SENTENCE OCCURRENCE and its members are the "
+                "references that occurrence gave its citance to. A claim a "
+                "co-cited reference established does not raise F6 against this "
+                "one; the pair is HELD (held_cocitation_covered), never predicted "
+                "and never cleared. F4 (overstatement) and F7 (wrong entity) are "
+                "per-reference and still own the label when they fire. Claims NO "
+                "member covered are counted in group_claims_uncovered and listed "
+                "per group in groups_path -- a real defect, owned by the group."
+            ),
+        },
         "predictions_path": pred_path,
         "annotation_queue_path": queue_path,
+        "cocitation_groups_path": groups_path,
         "checkpoint_path": checkpoint_path,
         "record_hashes_path": sidecar_path,
         "manifest_path": manifest_path,

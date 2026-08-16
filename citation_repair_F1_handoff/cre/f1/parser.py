@@ -224,12 +224,45 @@ def _sentence_for(pos: int, spans) -> str:
     return ""
 
 
+def _span_index(pos: int, spans) -> int:
+    """Index of the sentence span containing ``pos``.
+
+    The OCCURRENCE, not the text: two sentences in one block can be
+    byte-identical, and they are still two separate acts of citation. Mirrors
+    :func:`_sentence_for`'s past-the-last-boundary fallback exactly, so the group
+    a marker lands in and the sentence it is given can never disagree."""
+    for i, (start, end, _seg) in enumerate(spans):
+        if start <= pos < end:
+            return i
+    return len(spans) - 1 if spans else -1
+
+
 def link_citances(root, refs_by_id: dict) -> None:
-    """Attach the citing sentence + marker to each Reference (first hit wins).
+    """Attach the citing sentence + marker to each Reference (first hit wins),
+    and record the CO-CITATION GROUP that sentence occurrence forms.
+
+    A sentence citing eight references is normal, correct scientific practice:
+    the eight are cited COLLECTIVELY and no single one is expected to carry the
+    whole claim. The band judged each one alone against the whole sentence, so
+    F6 ("supports part of the claim but not all of it") fired by construction on
+    every member of every co-citation group. The membership needed to see that is
+    resolved right here and used to be discarded.
+
+    GROUP MEMBERSHIP IS "REFERENCES THIS SENTENCE ACTUALLY GAVE ITS CITANCE TO",
+    not "references this sentence mentions". Because first-citance-wins, a
+    reference already carrying an earlier sentence keeps it and is judged against
+    THAT sentence's claims; adding it to this group would aggregate coverage
+    verdicts across two different claim lists. Such a reference is simply absent
+    from this group, and belongs to the group of the sentence it did take.
+
+    Ordering is document order and members are deduplicated, so one sentence
+    carrying overlapping ranges ("1-8" and "3, 9") yields ONE group naming each
+    reference once.
 
     Best-effort: any failure here must never break reference extraction, so the
     caller wraps this in try/except.
     """
+    group_seq = 0
     for block in root.iter():
         if _localname(block.tag) not in _BLOCK_TAGS:
             continue
@@ -247,8 +280,13 @@ def link_citances(root, refs_by_id: dict) -> None:
         if not markers:
             continue
         spans = _sentence_spans(text)
+        # Sentence occurrence -> the references it newly gave its citance to, in
+        # document order. Built as the assignments happen so it records exactly
+        # the population a group verdict may be aggregated over.
+        claimed_by_span: dict = {}
         for pos, rids, mtext in markers:
             sentence = _sentence_for(pos, spans)
+            span_i = _span_index(pos, spans)
             for rid in rids:
                 ref = refs_by_id.get(rid)
                 if ref is None or ref.citance:    # first citance wins
@@ -256,6 +294,20 @@ def link_citances(root, refs_by_id: dict) -> None:
                 ref.citance = sentence
                 if not ref.cited_reference_marker:
                     ref.cited_reference_marker = mtext
+                claimed_by_span.setdefault(span_i, []).append(ref)
+
+        # One group per sentence occurrence that claimed at least one reference.
+        # Numbered in document order across the whole article so the id is stable
+        # and reproducible from the XML alone.
+        for span_i in sorted(claimed_by_span):
+            members = claimed_by_span[span_i]
+            group_seq += 1
+            pmcid = members[0].source_pmcid or members[0].source_pmid or "doc"
+            group_id = f"{pmcid}:g{group_seq:02d}"
+            member_ids = list(dict.fromkeys(m.citation_id for m in members))
+            for ref in members:
+                ref.citance_group_id = group_id
+                ref.citance_group_members = list(member_ids)
 
 
 def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:

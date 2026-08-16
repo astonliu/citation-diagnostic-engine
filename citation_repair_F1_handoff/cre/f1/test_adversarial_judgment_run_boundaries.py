@@ -95,7 +95,11 @@ def test_orchestrator_queue_cannot_surface_any_stage_proposal(tmp_path, monkeypa
     )
     monkeypatch.setattr(jr, "parse_pmc_xml", lambda *_args, **_kwargs: [ref])
 
-    def contaminated(item, **_kwargs):
+    # The seam is judge_pair_finish: run_natural_judgment runs coverage over a
+    # whole document first (so co-citation groups can be aggregated), then
+    # finishes each pair. This is still "whatever the judging stage returns", the
+    # contamination is identical, and the blindness assertions below are unchanged.
+    def contaminated(_rec, item, _claims, _verdicts, **_kwargs):
         record = jr._new_record(item)
         record.update({
             "preband_cleared": True,
@@ -126,7 +130,7 @@ def test_orchestrator_queue_cannot_surface_any_stage_proposal(tmp_path, monkeypa
         })
         return record
 
-    monkeypatch.setattr(jr, "judge_pair", contaminated)
+    monkeypatch.setattr(jr, "judge_pair_finish", contaminated)
     out = tmp_path / "out"
     jr.run_natural_judgment(
         str(xml_dir), str(out),

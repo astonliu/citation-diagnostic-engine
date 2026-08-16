@@ -333,6 +333,32 @@ class Reference:
     source_pmcid: str = ""
     source_pmid: str = ""
     source_title: str = ""
+    # CO-CITATION GROUP (the sentence occurrence this reference was cited in).
+    #
+    # ``citance`` alone is what the band judged against, and it is attached to
+    # every reference the sentence cites INDEPENDENTLY. That is the whole F6
+    # co-citation defect: eight references sharing one sentence were each asked
+    # "does this paper support the whole claim?", and each supports part, which is
+    # the definition of F6. The group is the missing context, and it exists at
+    # parse time -- ``link_citances`` resolves a sentence's markers and used to
+    # throw the membership away.
+    #
+    # ``citance_group_id`` is "<citing_pmcid>:g<NN>", NN a zero-padded
+    # document-order index over sentence occurrences that cite at least one
+    # resolvable reference. Empty when the reference has no citance, or when the
+    # Reference was built outside the parser -- an empty id is read as "no group
+    # known", which every consumer treats as a singleton, i.e. exactly the
+    # pre-group behaviour.
+    #
+    # ``citance_group_members`` holds the citation_ids of every reference whose
+    # citance was assigned FROM THIS SAME sentence occurrence, in document order,
+    # deduplicated, and INCLUDING this reference. It is deliberately not "every
+    # reference the sentence mentions": ``link_citances`` is first-citance-wins, so
+    # a reference already carrying an earlier sentence is judged against THAT
+    # sentence and its verdicts concern THAT sentence's claims. Including it here
+    # would aggregate verdicts over two different claim lists.
+    citance_group_id: str = ""
+    citance_group_members: list[str] = field(default_factory=list)
 
     retrieved: RetrievedRecord = field(default_factory=RetrievedRecord)
     log: StageLog = field(default_factory=StageLog)
