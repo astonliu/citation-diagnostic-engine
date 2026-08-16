@@ -706,6 +706,29 @@ def test_quarantined_member_neither_covers_nor_is_excused():
     assert bad["proposed_route"] == jb.ROUTE_PARSE_QUARANTINE
 
 
+def test_a_bucket_list_that_does_not_line_up_takes_the_unjudged_path():
+    """``aggregate`` pads a short member out with None (unjudged), so
+    ``member_route`` must read a misaligned list the same way. Otherwise a
+    truncated list -- carrying no None to see -- would skip rule 3 and be routed
+    on a partial view of its own evidence."""
+    aggregated = {"claim_coverage": [
+        {"claim": CLAIM_A, "status": cc.CLAIM_COVERED, "covered_by": ["x"],
+         "contradicted_by": [], "judged_by": ["x"]},
+        {"claim": CLAIM_B, "status": cc.CLAIM_COVERED, "covered_by": ["x"],
+         "contradicted_by": [], "judged_by": ["x"]},
+    ]}
+    aligned = [cc.BUCKET_OFF_TOPIC, cc.BUCKET_ESTABLISHED]
+    assert cc.member_route(buckets=aligned, solo_route=jb.ROUTE_F6_FLAGGED,
+                           aggregated=aggregated, group_size=2) == \
+        cc.ROUTE_GROUP_COVERED
+    for misaligned in ([cc.BUCKET_OFF_TOPIC],                       # short
+                       aligned + [cc.BUCKET_ESTABLISHED]):          # long
+        assert cc.member_route(buckets=misaligned,
+                               solo_route=jb.ROUTE_F6_FLAGGED,
+                               aggregated=aggregated,
+                               group_size=2) == jb.ROUTE_F6_FLAGGED
+
+
 def test_the_bucket_vocabulary_has_one_source_of_truth():
     assert jb.COVERAGE_ESTABLISHED == cc.BUCKET_ESTABLISHED
     assert jb.COVERAGE_CONTRADICTED == cc.BUCKET_CONTRADICTED

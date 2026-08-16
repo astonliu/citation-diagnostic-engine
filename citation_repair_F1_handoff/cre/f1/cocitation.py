@@ -222,7 +222,10 @@ def member_route(*, buckets, solo_route: str, aggregated: dict,
       3. ANY claim this member's own evidence could not be judged on ->
          ``solo_route`` (HELD). Grouping acts only on a member whose every claim
          was actually judged; excusing an unjudged claim would be an argument
-         from missing evidence.
+         from missing evidence. A bucket list that does not LINE UP with the
+         group's claim list takes this same path: :func:`aggregate` pads a short
+         member out with ``None`` (unjudged), so anything else here would let a
+         truncated list skip the very guard the padding exists to trigger.
       4. Every claim ESTABLISHED by this member alone -> ``solo_route``
          (FULL_COVERAGE). It is strictly more informative than any group route,
          and it is the gate into the F3 provenance discriminator: downgrading it
@@ -246,10 +249,11 @@ def member_route(*, buckets, solo_route: str, aggregated: dict,
     if group_size <= 1:
         return solo_route
     all_buckets = list(buckets or [])
+    statuses = [row["status"] for row in aggregated.get("claim_coverage", [])]
     judged = [b for b in all_buckets if b is not None]
     if not judged:
         return solo_route
-    if any(b is None for b in all_buckets):
+    if any(b is None for b in all_buckets) or len(all_buckets) != len(statuses):
         return solo_route
     if all(b == BUCKET_ESTABLISHED for b in all_buckets):
         return solo_route
@@ -257,7 +261,6 @@ def member_route(*, buckets, solo_route: str, aggregated: dict,
         return solo_route
     if all(b == BUCKET_OFF_TOPIC for b in judged):
         return ROUTE_UNSUPPORTED_MEMBER
-    statuses = [row["status"] for row in aggregated.get("claim_coverage", [])]
     if any(s == CLAIM_UNCOVERED for s in statuses):
         return ROUTE_GROUP_COVERAGE_GAP
     if any(s == CLAIM_UNKNOWN for s in statuses):
