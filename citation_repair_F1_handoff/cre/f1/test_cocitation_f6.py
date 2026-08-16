@@ -796,6 +796,32 @@ def test_orchestrator_holds_a_cocitation_covered_pair(tmp_path, monkeypatch):
     assert groups[0]["members"] == ["PMC1000:B1", "PMC1000:B2"]
 
 
+def test_orchestrator_record_carries_range_expansion_provenance(tmp_path):
+    """The inferred/asserted distinction must reach the PREDICTION record, not
+    just the band item -- that record is what a human adjudicates from, and a
+    deduction presented as a publisher's link is exactly the confusion the
+    inferred marking exists to prevent."""
+    refs = _numbered(4)
+    xml_dir = tmp_path / "xml"
+    xml_dir.mkdir()
+    (xml_dir / "PMC1000.xml").write_text(
+        _article(refs, [f"A collectively cited claim {_dash_range(1, 4)}."]),
+        encoding="utf-8")
+    out = tmp_path / "out"
+    jr.run_natural_judgment(
+        str(xml_dir), str(out),
+        extractor=lambda _s: [CLAIM_A],
+        coverage_judge=lambda claims, _ev: [SUPPORTS for _ in claims],
+        fetch_abstract=lambda pmid: f"Abstract {pmid}.",
+        preband_disposition={f"PMC1000:B{i}": "cleared" for i in range(1, 5)})
+    rows = {json.loads(l)["citation_id"]: json.loads(l) for l in
+            (out / "judgment_predictions.jsonl").read_text().splitlines()}
+    inferred = ["PMC1000:B2", "PMC1000:B3"]
+    for cid, rec in rows.items():
+        assert rec["citance_group_inferred_members"] == inferred
+        assert rec["citance_marker_inferred"] is (cid in inferred)
+
+
 def test_orchestrator_still_predicts_f6_when_no_sibling_covers(tmp_path,
                                                                monkeypatch):
     refs = [("B1", "111"), ("B2", "222")]

@@ -429,6 +429,14 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
     # on it.
     rec["citance_group_id"] = item.get("citance_group_id", "") or ""
     rec["citance_group_members"] = list(item.get("citance_group_members") or [])
+    # RANGE-EXPANSION PROVENANCE travels with the group, or the distinction is
+    # lost exactly where a human reads it. A member recovered from a rendered
+    # range ("16-18" links 16 and 18; 17 is cited and unlinked) is a deduction
+    # from contiguous numbering, not a link the publisher wrote, and an
+    # adjudicator judging the flag needs to know which they are looking at.
+    rec["citance_group_inferred_members"] = list(
+        item.get("citance_group_inferred_members") or [])
+    rec["citance_marker_inferred"] = bool(item.get("citance_marker_inferred"))
 
     # OPT-IN FULL-TEXT COVERAGE (DEC-030/032), mirroring run_band's branch exactly.
     # MODE COMES FROM CONFIGURATION, never from the fetched value: inferring it from
