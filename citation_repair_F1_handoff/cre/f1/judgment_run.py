@@ -760,7 +760,8 @@ def _cocitation_overlay(items: "list[dict]") -> dict:
             m["citation_id"]: cocitation.member_route(
                 buckets=jb.item_buckets(m),
                 solo_route=jb.route(m.get("coverage_verdicts") or []),
-                aggregated=aggregated, group_size=size)
+                aggregated=aggregated, group_size=size,
+                citation_id=m["citation_id"])
             for m in members
         }
         record = cocitation.group_record(gid, members, aggregated, routes)

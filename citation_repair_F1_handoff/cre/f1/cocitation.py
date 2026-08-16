@@ -206,7 +206,7 @@ def cogroup_covered_flags(aggregated: dict) -> tuple:
 
 
 def member_route(*, buckets, solo_route: str, aggregated: dict,
-                 group_size: int) -> str:
+                 group_size: int, citation_id: str = "") -> str:
     """The group-aware route for ONE member. ``solo_route`` is today's route.
 
     THE GROUP CAN ONLY EXPLAIN A GAP OR NAME A FAULT. It never downgrades a route
@@ -214,8 +214,17 @@ def member_route(*, buckets, solo_route: str, aggregated: dict,
     early return below hands back ``solo_route`` untouched.
 
     Order is load-bearing:
-      1. A group of one is not a group -- singletons take byte-identically the
-         path they took before.
+      1. A group of one is not a group, and a member :func:`aggregate` EXCLUDED
+         is not in one either -- both take byte-identically the path they took
+         before. The exclusion check needs ``citation_id``; omit it and the check
+         is skipped, so a caller that has not identified the member never gets a
+         silent "everyone was excluded". A member excluded for
+         ``EXCLUDED_CLAIMS_DIFFER`` is the reason this is not covered by the
+         length guard in rule 3: two members of one sentence can extract
+         different claim lists OF THE SAME LENGTH (one extractor call per
+         reference, and the model is not deterministic), and routing that member
+         on statuses computed without it would judge it against claims it was
+         never asked about.
       2. Nothing judged at all -> ``solo_route``. A member whose abstract could
          not be retrieved is an OPERATIONAL exclusion: neither a freeloader nor
          covered, and it must be counted as neither.
@@ -247,6 +256,8 @@ def member_route(*, buckets, solo_route: str, aggregated: dict,
          ``ROUTE_GROUP_COVERED``.
     """
     if group_size <= 1:
+        return solo_route
+    if citation_id and citation_id not in aggregated.get("contributing_members", ()):
         return solo_route
     all_buckets = list(buckets or [])
     statuses = [row["status"] for row in aggregated.get("claim_coverage", [])]

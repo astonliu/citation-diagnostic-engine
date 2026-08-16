@@ -474,7 +474,8 @@ def apply_cocitation_routing(items: "list[dict]") -> tuple:
             solo = item.get("proposed_route")
             final = cocitation.member_route(
                 buckets=item_buckets(item), solo_route=solo,
-                aggregated=aggregated, group_size=size)
+                aggregated=aggregated, group_size=size,
+                citation_id=item["citation_id"])
             if final != solo:
                 # Present exactly when the group changed the answer, so a reader
                 # can see what it changed and a run with no co-citation keeps

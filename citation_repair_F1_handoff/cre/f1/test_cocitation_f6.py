@@ -729,6 +729,35 @@ def test_a_bucket_list_that_does_not_line_up_takes_the_unjudged_path():
                                group_size=2) == jb.ROUTE_F6_FLAGGED
 
 
+def test_an_excluded_member_keeps_its_solo_route():
+    """Two members of one sentence can extract DIFFERENT claim lists of the SAME
+    length -- one extractor call per reference, and the model is not
+    deterministic -- so the rule-3 length guard cannot see it. ``aggregate``
+    excludes such a member, and ``member_route`` must not then route it on
+    statuses computed without it: that would judge it against claims it was never
+    asked about."""
+    covered = {"citation_id": "PMC1:R1", "citing_pmcid": "PMC1",
+               "citing_sentence": "s", "citance_group_id": "PMC1:g01",
+               "atomic_claims": [CLAIM_A], "coverage_verdicts": [SUPPORTS],
+               "proposed_route": jb.ROUTE_FULL_COVERAGE}
+    divergent = {"citation_id": "PMC1:R2", "citing_pmcid": "PMC1",
+                 "citing_sentence": "s", "citance_group_id": "PMC1:g01",
+                 # Same LENGTH, different claim -- the extractor disagreed.
+                 "atomic_claims": ["A differently worded claim"],
+                 "coverage_verdicts": [OFF_TOPIC],
+                 "proposed_route": jb.ROUTE_F6_FLAGGED}
+    groups, _counts, _stats = jb.apply_cocitation_routing([covered, divergent])
+    aggregated = groups[0]
+    assert aggregated["contributing_members"] == ["PMC1:R1"]
+    assert aggregated["excluded_members"] == [
+        {"citation_id": "PMC1:R2", "reason": cc.EXCLUDED_CLAIMS_DIFFER}]
+    # Excluded -> untouched. Without the guard it would have read the group's
+    # "CLAIM_A is covered" and become UNSUPPORTED_MEMBER on a claim it never saw.
+    assert divergent["proposed_route"] == jb.ROUTE_F6_FLAGGED
+    assert "proposed_route_solo" not in divergent
+    assert covered["proposed_route"] == jb.ROUTE_FULL_COVERAGE
+
+
 def test_the_bucket_vocabulary_has_one_source_of_truth():
     assert jb.COVERAGE_ESTABLISHED == cc.BUCKET_ESTABLISHED
     assert jb.COVERAGE_CONTRADICTED == cc.BUCKET_CONTRADICTED
