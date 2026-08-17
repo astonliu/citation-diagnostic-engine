@@ -48,6 +48,12 @@ class RateLimiter:
 NCBI = RateLimiter(3.0)
 CROSSREF = RateLimiter(5.0)
 OPENALEX = RateLimiter(5.0)
+# F2-F provider set (spec §14.9: rate limits are PER PROVIDER -- no shared limiter
+# may let one source's policy govern another). DataCite dereferences arXiv
+# (10.48550) and other non-Crossref DOIs; bioRxiv/medRxiv supplies the
+# preprint->published relation. bioRxiv asks callers to be gentle.
+DATACITE = RateLimiter(5.0)
+BIORXIV = RateLimiter(1.0)
 
 
 def configure_ncbi(has_api_key: bool) -> None:
