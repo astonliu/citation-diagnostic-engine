@@ -151,6 +151,12 @@ activemq-data/
 .env
 .envrc
 .venv
+# Local per-project virtualenvs (.venv_cre, ...). A venv sitting untracked in
+# `git status` is noise that trains a reader to skim the list -- which is how a
+# `git add -A` sweeps one in.
+# No trailing slash ON PURPOSE: .venv_cre here is a SYMLINK into another repo,
+# and a `dir/` pattern matches real directories only, never a symlink.
+.venv*
 env/
 venv/
 ENV/
