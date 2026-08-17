@@ -290,6 +290,14 @@ class ClaimedRef:
     # Empty remains the safe "can't judge" value for malformed citations.
     volume: str = ""
     pages: str = ""
+    # F2-E: leading bibliographic furniture (author run / chapter label / article-
+    # type label) excised from ``title`` at parse time, kept verbatim so every edit
+    # to the scored title is reviewable. Empty when no furniture was removed.
+    written_title_excised: str = ""
+    # True only when the first written author came from a JATS <collab> element.
+    # This is provenance for corporate-author comparison; ``authors`` remains the
+    # verbatim evidence and is never rewritten by a matcher rule.
+    first_author_is_collab: bool = False
 
 
 @dataclass
@@ -324,6 +332,9 @@ class RetrievedRecord:
     # is the old-cache default and is read as "answered" (see fetch_answered).
     # ``resolved=False`` alone is NOT evidence of anything until this is read.
     transport_status: str = ""
+    # MEDLINE CollectiveName (CN) provenance.  Old caches omit the field and read
+    # safely as False; newly written caches preserve the authoritative signal.
+    has_collective_author: bool = False
 
 
 @dataclass
@@ -370,6 +381,23 @@ class StageLog:
     # No-ID branch (references with no claimed PMID).
     noid_lookup_attempted: bool = False      # ran the structured biblio lookup
     noid_not_found: bool = False             # biblio lookup found no confident match
+    # F8 -- retracted source (RESEARCH_PLAN_v2.2 §4.3). TRI-STATE, never a bare
+    # bool:
+    #   True  -- the resolved record's PubMed publication types include
+    #            "Retracted Publication"
+    #   False -- the types were fetched and that type is absent
+    #   None  -- UNKNOWN: no resolved PMID to look up, or the lookup failed
+    # Test with ``is True`` / ``is False``, the same discipline as author_match. A
+    # falsy check would read an EFetch outage as "not retracted" and let a
+    # retracted source clear -- the same defect class as ``resolver_error`` in the
+    # F3-F7 full-text path: an absence of signal must stay distinguishable from a
+    # signal of absence. An unknown state is never an F8 (precision-first).
+    retracted: Optional[bool] = None
+    # The §5.6 reason code carried by an F8 row; "" on every other row. Set by
+    # decide() at the point the row takes the F8 route, so it names the ROUTE
+    # taken rather than merely restating ``retracted`` (a retracted row that the
+    # UNSCOREABLE branch claims first keeps retracted=True and this field "").
+    retraction_reason: str = ""
 
 
 @dataclass
@@ -486,6 +514,8 @@ class Reference:
                 "identity_signals": self.log.identity_signals,
                 "author_tripwire": self.log.author_tripwire,
                 "unscoreable_reason": self.log.unscoreable_reason,
+                "retracted": self.log.retracted,
+                "retraction_reason": self.log.retraction_reason,
                 "llm_verdict": self.log.llm_verdict,
                 "db_hits": self.log.db_hits,
                 "decided_by": self.log.decided_by,
