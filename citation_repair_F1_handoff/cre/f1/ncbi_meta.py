@@ -78,6 +78,31 @@ REVIEW_PUBTYPES = {
     "narrative review", "review literature as topic",
 }
 
+# The ONE publication type that means "this article was retracted" (F8).
+#
+# PubMed carries two retraction publication types and they mean OPPOSITE things:
+#   "Retracted Publication" -- THIS article was retracted          -> F8
+#   "Retraction Notice"     -- this article IS the notice that      -> NOT F8
+#                              retracts some OTHER article
+# Matching the wrong one would label every retraction notice a faulty citation
+# and miss every actually-retracted paper -- a silent inversion that still looks
+# like a working detector. So the compare is EXACT on the lowercased string; a
+# substring test on "retract" matches both and is never correct here.
+#
+# Live counts, checked 2026-08-15 via esearch ``<term>[pt]``:
+#   "Retracted Publication"     33923
+#   "Retraction Notice"         32967
+#   "Retraction of Publication"     0  <- the OLD MeSH name for the notice type;
+#                                         PubMed no longer emits it. Kept below so
+#                                         a legacy/cached record still reads
+#                                         correctly, and so the exact-match
+#                                         contract is pinned against BOTH spellings.
+RETRACTED_PUBTYPE = "retracted publication"
+RETRACTION_NOTICE_PUBTYPES = frozenset({
+    "retraction notice",            # what PubMed emits today
+    "retraction of publication",    # historical name, zero live records
+})
+
 # ELink's canonical "this PMID's own PMC full text" linkname. NOT pubmed_pmc_refs
 # (PMC articles that CITE this PMID) nor pubmed_pmc_citedin -- those resolve to
 # unrelated papers and would pre-stage a wrong reference list for the human.
@@ -118,6 +143,18 @@ def ncbi_pubtypes(pmid: str, api_key: str = "", email: str = "",
     if r is None or r.status_code != 200 or not r.text.strip():
         return None
     return [m.strip() for m in re.findall(r"(?m)^PT\s*-\s*(.+)$", r.text)]
+
+
+def is_retracted(pubtypes: "list[str] | None") -> "bool | None":
+    """None when pubtypes is None (couldn't judge); else True iff the types
+    include ``Retracted Publication`` EXACTLY (see ``RETRACTED_PUBTYPE``).
+
+    A retraction NOTICE type (``RETRACTION_NOTICE_PUBTYPES``) deliberately returns
+    False: the notice retracts some other article and is not itself a retracted
+    work."""
+    if pubtypes is None:
+        return None
+    return any(pt.strip().lower() == RETRACTED_PUBTYPE for pt in pubtypes)
 
 
 def is_review(pubtypes: "list[str] | None") -> "bool | None":
