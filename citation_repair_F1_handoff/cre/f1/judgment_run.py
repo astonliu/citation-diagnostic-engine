@@ -74,6 +74,7 @@ from typing import Callable, Iterable, Optional
 
 from . import judgment_band as jb
 from . import cocitation
+from . import marker_scope
 from . import preband_contract as pc
 from .preband_contract import PrebandContractError
 from .judgment_engine import (
@@ -409,7 +410,8 @@ def _excluded_record(ref, disposition: str, preband_label=None) -> dict:
 
 def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract,
                         fetch_reflist=None, fetch_fulltext=None,
-                        coverage_judge_v3=None) -> tuple:
+                        coverage_judge_v3=None, claims_cache=None,
+                        scope_counts=None) -> tuple:
     """PHASE 1 of :func:`judge_pair`: evidence, atomic claims, coverage verdicts.
 
     Split out because the CO-CITATION GROUP a reference belongs to cannot be
@@ -417,6 +419,20 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
     The caller runs this over a whole document, computes the group coverage, then
     calls :func:`judge_pair_finish` per pair in the original order -- so the emit
     order, the record shape and the hash chain are exactly what they were.
+
+    ``claims_cache`` is the per-document CITING-SENTENCE claim cache
+    (``sentence -> claims``), mirroring ``run_band``'s. Atomic claims are a pure
+    function of the sentence, so a group of four references sharing one citance
+    made FOUR identical extraction calls on this path and one on the band path.
+    That was waste at 1.30 billed calls/reference, and a latent correctness risk
+    besides: any extraction drift across the four silently triggers
+    ``EXCLUDED_CLAIMS_DIFFER`` and the group's coverage credit vanishes with
+    nothing in the output saying so. Omitted -- the default -- each call extracts
+    for itself exactly as before.
+
+    ``scope_counts`` accumulates the MARKER ATTRIBUTION tally (see
+    ``marker_scope``): the claims this reference was actually cited for, and the
+    (reference, claim) pairs that were therefore never asked.
 
     Returns ``(rec, claims, verdicts)``. Raises ValueError (propagated from the
     strict band parsers) on malformed model output; the caller quarantines it.
@@ -451,7 +467,31 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
     from .band_prompts import evidence_is_usable
     rec["evidence_usable"] = bool(evidence_is_usable(item["evidence"]))
 
-    claims = jb.extract_atomic_claims(item["citing_sentence"], extractor=extractor)
+    sentence = item["citing_sentence"]
+    if claims_cache is None:
+        claims = jb.extract_atomic_claims(sentence, extractor=extractor)
+    else:
+        if sentence not in claims_cache:
+            # Assigned only on success, so a sentence whose reply is malformed
+            # keeps its per-reference retry and its per-reference quarantine
+            # count -- run_band's rule, reproduced rather than reinvented.
+            claims_cache[sentence] = jb.extract_atomic_claims(
+                sentence, extractor=extractor)
+        # Copy: the cached list is shared by every reference on this citance, and
+        # each record owns its own claims.
+        claims = list(claims_cache[sentence])
+    # MARKER ATTRIBUTION. A reference is asked only the claims its own marker
+    # cluster was cited for; a claim it was never cited for cannot produce a
+    # verdict against it, because the question is not put at all. Fails closed to
+    # the whole sentence on any ambiguity -- see ``marker_scope``.
+    scope = marker_scope.scope_item_claims(item, claims)
+    claims = list(scope["claims"])
+    if scope["status"] == marker_scope.SCOPE_SCOPED:
+        item["claim_scope_id"] = scope["scope_id"]
+    if marker_scope.should_record(scope):
+        rec["marker_scope"] = {k: v for k, v in scope.items() if k != "claims"}
+    if scope_counts is not None:
+        marker_scope.tally(scope_counts, scope, item.get("citing_pmcid") or "")
     if not fulltext_path:
         # Default path, untouched: abstract scope, v2 prompt, no parser-version key.
         verdicts = jb.coverage_verdicts(claims, item["evidence"],
@@ -485,6 +525,15 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
         rec["coverage_prompt_version"] = COVERAGE_PROMPT_VERSION_V3
         rec["response_parser_version"] = RESPONSE_PARSER_VERSION_V3
         rec["evidence_scope"] = EVIDENCE_SCOPE_FULLTEXT
+    # The cluster match, per verdict as well as per record: a reader auditing one
+    # claim must not have to join back to the row header to see which clause of
+    # the sentence it belonged to.
+    marker_scope.stamp_verdicts(verdicts, scope)
+    if scope_counts is not None:
+        # Answered-and-failed, counted beside never-asked so the two can never
+        # be read as one number.
+        marker_scope.tally_verdicts(
+            scope_counts, [jb.coverage_bucket(v) for v in verdicts])
     rec["atomic_claims"] = claims
     rec["coverage_verdicts"] = verdicts
     rec["ts"] = int(time.time())
@@ -772,10 +821,17 @@ def _cocitation_overlay(items: "list[dict]") -> dict:
                 citation_id=m["citation_id"])
             for m in members
         }
-        record = cocitation.group_record(gid, members, aggregated, routes)
+        # The SENTENCE id, never the partition key: when marker attribution
+        # narrowed this unit to one clause the key is a cluster id, and
+        # citance_group_id must keep meaning "the sentence occurrence".
+        record = cocitation.group_record(
+            cocitation.group_id_of(members[0]) or gid, members, aggregated,
+            routes)
         group_records.append(record)
         summary = {
             "citance_group_id": record["citance_group_id"],
+            **({"marker_scope_id": record["marker_scope_id"]}
+               if "marker_scope_id" in record else {}),
             "size": size,
             "members": list(record["members"]),
             "claims_covered": record["claims_covered"],
@@ -809,6 +865,10 @@ def _module_hashes(fulltext_path: bool, f5_seams, f7_seams) -> dict:
     """
     names = ["cre.f1.judgment_band", "cre.f1.judgment_engine",
              "cre.f1.band_prompts", "cre.f1.parser", "cre.f1.schema",
+             # Governs WHICH CLAIMS each reference was asked. A run whose
+             # attribution rule changed would otherwise be indistinguishable
+             # from one whose model changed its mind.
+             "cre.f1.marker_scope",
              "cre.f1.f4_strength", "cre.f1.f3_provenance",
              "cre.f1.judgment_run", "cre.f1.preband_contract"]
     if fulltext_path:
@@ -1202,6 +1262,10 @@ def run_natural_judgment(
     # Full-text retrieval funnel. Separate from `counts` for the same reason
     # f4_counts is: `counts` sums to the record total and admits no statistics.
     fulltext_counts = {"no_usable_fulltext": 0}
+    # MARKER ATTRIBUTION accounting. A (reference, claim) pair that was never
+    # asked has to be countable, or "we narrowed the question" and "the reference
+    # answered" become the same number.
+    scope_counts = marker_scope.new_counts()
     # Co-citation accounting. Its OWN tally, never `counts`: `counts` is one entry
     # per emitted record and is summed into `total_records`, so a statistic there
     # would corrupt the record count rather than add information.
@@ -1330,6 +1394,13 @@ def run_natural_judgment(
             # only the moment of writing moves, from per reference to per
             # document, which is already the checkpoint granularity.
             pending: list = []
+            marker_scope.tally_document(scope_counts, refs)
+            # Atomic claims are a pure function of the citing sentence, so one
+            # citance citing [52,53,54,55] extracts ONCE instead of once per
+            # reference. Scoped to the document -- a citance is a within-document
+            # object -- which captures the whole fanout while keeping the cache
+            # bounded on a corpus run.
+            claims_cache: dict = {}
             for ref in refs:
                 refs_seen += 1
                 executed_ids.add(ref.citation_id)
@@ -1364,7 +1435,8 @@ def run_natural_judgment(
                         item, extractor=extractor, coverage_judge=coverage_judge,
                         fetch_abstract=fetch_abstract, fetch_reflist=fetch_reflist,
                         fetch_fulltext=fetch_fulltext,
-                        coverage_judge_v3=coverage_judge_v3)
+                        coverage_judge_v3=coverage_judge_v3,
+                        claims_cache=claims_cache, scope_counts=scope_counts)
                     if rec.get("fulltext_incomplete_hold") is True:
                         # Its OWN tally, never `counts`. `counts` is one entry per
                         # emitted record and is summed into `total_records`, so an
@@ -1735,7 +1807,11 @@ def run_natural_judgment(
             "held_cocitation_covered": counts.get(DISP_HELD_COCITATION_COVERED, 0),
             "note": (
                 "A group is one SENTENCE OCCURRENCE and its members are the "
-                "references that occurrence gave its citance to. A claim a "
+                "references that occurrence gave its citance to -- EXCEPT where "
+                "marker attribution narrowed the sentence to its marker "
+                "clusters, in which case the unit is the cluster and the record "
+                "carries a marker_scope_id naming it (see the marker_scope "
+                "block). A claim a "
                 "co-cited reference established does not raise F6 against this "
                 "one; the pair is HELD (held_cocitation_covered), never predicted "
                 "and never cleared. F4 (overstatement) and F7 (wrong entity) are "
@@ -1744,6 +1820,11 @@ def run_natural_judgment(
                 "per group in groups_path -- a real defect, owned by the group."
             ),
         },
+        # MARKER ATTRIBUTION. Which claims each reference was actually cited for,
+        # and how many (reference, claim) pairs were therefore never asked.
+        # Published rather than absorbed: narrowing the question changes what
+        # every rate above is a rate OF.
+        "marker_scope": marker_scope.manifest_block(scope_counts),
         "predictions_path": pred_path,
         "annotation_queue_path": queue_path,
         "cocitation_groups_path": groups_path,

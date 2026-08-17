@@ -109,16 +109,39 @@ def group_id_of(item: dict) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def partition(items: "Sequence[dict]") -> dict:
-    """Group items by ``citance_group_id``, in first-appearance order.
+def claim_scope_of(item: dict) -> str:
+    """The MARKER CLUSTER this item's claims were actually scoped to, or "".
 
-    Items with no group id are each returned as their OWN single-member group
+    Set by the judging path (never the parser) and only when claim attribution
+    actually succeeded, so it names the scope the row was JUDGED in rather than
+    the scope the parser thought was available. Empty everywhere else, which is
+    read as "the whole sentence" -- i.e. the pre-attribution behaviour.
+    """
+    value = item.get("claim_scope_id")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def partition(items: "Sequence[dict]") -> dict:
+    """Group items by the scope they were judged in, in first-appearance order.
+
+    That scope is the ``citance_group_id`` -- the sentence occurrence -- EXCEPT
+    where marker attribution narrowed the claims to a marker cluster, in which
+    case it is the cluster. It has to be: aggregation is an index-wise join over
+    a shared claim list, and two clusters of one sentence carry DIFFERENT claim
+    lists. Keying them together would send every member of the second cluster
+    through ``EXCLUDED_CLAIMS_DIFFER`` and silently vaporize its coverage credit
+    -- the exact failure mode the exclusion exists to make visible, reached by
+    construction instead of by extractor drift.
+
+    A sentence that was not narrowed keys on ``citance_group_id`` exactly as
+    before. Items with neither are each returned as their OWN single-member group
     keyed by their citation_id, so a caller can treat every item uniformly
     without a second code path (acceptance row 10: no path divergence).
     """
     groups: dict = {}
     for item in items:
-        gid = group_id_of(item) or f"~solo~{item.get('citation_id')}"
+        gid = (claim_scope_of(item) or group_id_of(item)
+               or f"~solo~{item.get('citation_id')}")
         groups.setdefault(gid, []).append(item)
     return groups
 
@@ -279,6 +302,15 @@ def member_route(*, buckets, solo_route: str, aggregated: dict,
     return ROUTE_GROUP_COVERED
 
 
+def _cluster_text(item: dict) -> str:
+    """The marker text of the cluster this item sits in, e.g. ``"54,55"``."""
+    clusters = item.get("citance_marker_clusters") or []
+    index = item.get("citance_marker_cluster_index")
+    if isinstance(index, int) and 0 <= index < len(clusters):
+        return clusters[index].get("marker_text", "")
+    return ""
+
+
 def group_record(group_id: str, items: "Sequence[dict]", aggregated: dict,
                  routes: dict) -> dict:
     """The durable group-level record.
@@ -289,8 +321,15 @@ def group_record(group_id: str, items: "Sequence[dict]", aggregated: dict,
     materialized as its own list rather than left to be derived, because an
     uncovered claim is a real defect and a defect a reader has to compute is a
     defect that goes unread.
+
+    ``group_id`` stays the SENTENCE occurrence even when the aggregation unit was
+    a marker cluster; ``marker_scope_id`` names the cluster alongside it. Two
+    records of one sentence therefore share a ``citance_group_id`` and are told
+    apart by the scope id -- which is the honest shape, because they ARE one
+    sentence judged as two clauses.
     """
     first = items[0] if items else {}
+    scope_id = claim_scope_of(first)
     # Members whose membership was INFERRED from a rendered range's contiguous
     # numbering rather than asserted by an xref. Reported alongside the full
     # list, never merged into it: a group that is half deduction should not read
@@ -304,6 +343,11 @@ def group_record(group_id: str, items: "Sequence[dict]", aggregated: dict,
                if row["status"] == CLAIM_UNKNOWN]
     return {
         "citance_group_id": group_id,
+        # Present only when the sentence was actually narrowed, so a run with no
+        # marker attribution writes the group record it always wrote.
+        **({"marker_scope_id": scope_id,
+            "marker_cluster_index": first.get("citance_marker_cluster_index"),
+            "marker_cluster_text": _cluster_text(first)} if scope_id else {}),
         "citing_pmcid": first.get("citing_pmcid"),
         "citing_sentence": first.get("citing_sentence"),
         "size": len(items),

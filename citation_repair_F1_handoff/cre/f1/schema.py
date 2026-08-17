@@ -422,6 +422,30 @@ class Reference:
     # must be reportable.
     citance_group_inferred_members: list[str] = field(default_factory=list)
     citance_marker_inferred: bool = False
+    # MARKER CLUSTERS -- which claims this reference was actually cited FOR.
+    #
+    # The co-citation group above is the whole SENTENCE, and a sentence can cite
+    # two different things: "...antibodies 52,53 and pH sensitive fluorescent
+    # micelles 54,55..." cites 52,53 for the antibodies and 54,55 for the
+    # micelles. All four were asked all four claims, and B55 was flagged F6 on
+    # "fluorophore-labelled antibodies were successfully clinically translated".
+    # The verdict was right; the question was wrong.
+    #
+    # ``citance_marker_clusters`` is the sentence's clusters -- maximal runs of
+    # adjacent markers -- each with its index, its offset and end IN THE CITANCE
+    # STRING, the marker text it renders, its id ("<group_id>:c<NN>") and the
+    # citation_ids sitting in it. ``citance_marker_cluster_index`` /
+    # ``citance_marker_cluster_id`` name THIS reference's cluster.
+    #
+    # EMPTY IS THE COMMON CASE AND MEANS "unchanged": a sentence with one cluster
+    # records none at all, and so does an author-year document, for which the
+    # positional rule is undefined. ``citance_citation_style`` says which rule
+    # applied, so a whole-sentence row is never silently indistinguishable from a
+    # row nothing was tried on.
+    citance_citation_style: str = ""
+    citance_marker_clusters: list[dict] = field(default_factory=list)
+    citance_marker_cluster_index: int = -1
+    citance_marker_cluster_id: str = ""
 
     retrieved: RetrievedRecord = field(default_factory=RetrievedRecord)
     log: StageLog = field(default_factory=StageLog)

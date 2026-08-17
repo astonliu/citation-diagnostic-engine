@@ -1,0 +1,260 @@
+[
+ {
+  "id": "corp_identical_title_both_corporate",
+  "entry": "corporate",
+  "verdict": "SAME_WORK",
+  "defends": "CR14: case-only difference in the group name",
+  "w": {
+   "title": "Role of tubal surgery in the era of assisted reproductive technology: a committee opinion",
+   "authors": [
+    "Practice Committee of the American Society for reproductive medicine. Electronic address Aao"
+   ],
+   "year": 2021,
+   "volume": "115",
+   "pages": "1143-1150",
+   "journal": "Fertil Steril",
+   "doi": "10.1016/j.fertnstert.2021.01.051"
+  },
+  "r": {
+   "title": "Role of tubal surgery in the era of assisted reproductive technology: a committee  opinion.",
+   "authors": [
+    "Practice Committee of the American Society for Reproductive Medicine. Electronic  address: ASRM@asrm.org"
+   ],
+   "year": 2021,
+   "volume": "115",
+   "pages": "1143-1150",
+   "journal": "Fertil Steril",
+   "doi": "10.1016/j.fertnstert.2021.01.051"
+  }
+ },
+ {
+  "id": "corp_abbreviated_group_name",
+  "entry": "corporate",
+  "verdict": "SAME_WORK",
+  "defends": "bib13: citing article compressed the group name",
+  "w": {
+   "title": "Tissue plasminogen activator for acute ischemic stroke",
+   "authors": [
+    "National Institute of Neurological D and Stroke rt PASSG"
+   ],
+   "year": 1995,
+   "volume": "333",
+   "pages": "1581-1587",
+   "journal": "N. Engl. J. Med.",
+   "doi": "10.1056/NEJM199512143332401"
+  },
+  "r": {
+   "title": "Tissue plasminogen activator for acute ischemic stroke.",
+   "authors": [
+    "National Institute of Neurological Disorders and Stroke rt-PA Stroke Study Group"
+   ],
+   "year": 1995,
+   "volume": "333",
+   "pages": "1581-7",
+   "journal": "N Engl J Med",
+   "doi": "10.1056/NEJM199512143332401"
+  }
+ },
+ {
+  "id": "corp_thin_address_flags",
+  "entry": "corporate",
+  "verdict": "FLAG",
+  "defends": "entry fires, address reaches 2, not enough",
+  "w": {
+   "title": "Guidance on the assessment of dietary exposure",
+   "authors": [
+    "EFSA CONTAM Panel"
+   ],
+   "year": 2019,
+   "volume": "",
+   "pages": "",
+   "journal": "EFSA J",
+   "doi": ""
+  },
+  "r": {
+   "title": "Guidance on the assessment of dietary exposure.",
+   "authors": [
+    "Schrenk",
+    "Bignami"
+   ],
+   "year": 2019,
+   "volume": "17",
+   "pages": "5634",
+   "journal": "EFSA Journal",
+   "doi": ""
+  }
+ },
+ {
+  "id": "corp_different_titles_must_not_fire",
+  "entry": null,
+  "verdict": "FLAG",
+  "defends": "GINA vs GOLD -- corporate both sides, different papers",
+  "w": {
+   "title": "Global strategy for asthma management and prevention",
+   "authors": [
+    "Global Initiative for Asthma"
+   ],
+   "year": 2020,
+   "volume": "55",
+   "pages": "1900588",
+   "journal": "Eur Respir J",
+   "doi": "10.1183/13993003.00588-2019"
+  },
+  "r": {
+   "title": "Global strategy for the diagnosis and management of chronic obstructive pulmonary disease.",
+   "authors": [
+    "Global Initiative for Chronic Obstructive Lung Disease"
+   ],
+   "year": 2020,
+   "volume": "55",
+   "pages": "1900588",
+   "journal": "Eur Respir J",
+   "doi": "10.1183/13993003.00588-2019"
+  }
+ },
+ {
+  "id": "corp_missing_authors_must_not_fire",
+  "entry": null,
+  "verdict": "FLAG",
+  "defends": "reason `missing` is not reason `corporate`",
+  "w": {
+   "title": "Dietary reference values for sodium",
+   "authors": [],
+   "year": 2019,
+   "volume": "17",
+   "pages": "5778",
+   "journal": "EFSA J",
+   "doi": ""
+  },
+  "r": {
+   "title": "Dietary reference values for sodium.",
+   "authors": [
+    "Turck",
+    "Castenmiller"
+   ],
+   "year": 2019,
+   "volume": "17",
+   "pages": "5778",
+   "journal": "EFSA Journal",
+   "doi": ""
+  }
+ },
+ {
+  "id": "corp_one_word_swapped_must_not_fire",
+  "entry": null,
+  "verdict": "FLAG",
+  "defends": "smoking vs alcohol at high title_sim -- title_sim is not a path",
+  "w": {
+   "title": "The effect of smoking on cardiovascular outcomes in older adults",
+   "authors": [
+    "American Heart Association Committee"
+   ],
+   "year": 2018,
+   "volume": "72",
+   "pages": "100-110",
+   "journal": "J Am Coll Cardiol",
+   "doi": "10.1016/j.jacc.2018.01.001"
+  },
+  "r": {
+   "title": "The effect of alcohol on cardiovascular outcomes in older adults.",
+   "authors": [
+    "Benjamin",
+    "Muntner"
+   ],
+   "year": 2018,
+   "volume": "72",
+   "pages": "100-110",
+   "journal": "J Am Coll Cardiol",
+   "doi": "10.1016/j.jacc.2018.01.001"
+  }
+ },
+ {
+  "id": "corp_high_title_sim_is_not_a_path",
+  "entry": null,
+  "verdict": "FLAG",
+  "defends": "adults vs children at high title_sim",
+  "w": {
+   "title": "Prevalence of vitamin D deficiency among hospitalized adults in Europe",
+   "authors": [
+    "European Society for Clinical Nutrition Working Group"
+   ],
+   "year": 2017,
+   "volume": "36",
+   "pages": "1-9",
+   "journal": "Clin Nutr",
+   "doi": "10.1016/j.clnu.2017.01.001"
+  },
+  "r": {
+   "title": "Prevalence of vitamin D deficiency among hospitalized children in Europe.",
+   "authors": [
+    "Cederholm",
+    "Barazzoni"
+   ],
+   "year": 2017,
+   "volume": "36",
+   "pages": "1-9",
+   "journal": "Clin Nutr",
+   "doi": "10.1016/j.clnu.2017.01.001"
+  }
+ },
+ {
+  "id": "corp_one_sided_corporate",
+  "entry": "corporate",
+  "verdict": "SAME_WORK",
+  "defends": "corporate written, person roster resolved",
+  "w": {
+   "title": "Risk assessment of aflatoxins in food",
+   "authors": [
+    "EFSA CONTAM Panel"
+   ],
+   "year": 2020,
+   "volume": "18",
+   "pages": "6040",
+   "journal": "EFSA J",
+   "doi": "10.2903/j.efsa.2020.6040"
+  },
+  "r": {
+   "title": "Risk assessment of aflatoxins in food.",
+   "authors": [
+    "Schrenk",
+    "Bodin",
+    "Chipman"
+   ],
+   "year": 2020,
+   "volume": "18",
+   "pages": "6040",
+   "journal": "EFSA Journal",
+   "doi": "10.2903/j.efsa.2020.6040"
+  }
+ },
+ {
+  "id": "corp_person_authors_disagree_must_not_fire",
+  "entry": null,
+  "verdict": "FLAG",
+  "defends": "identical title, two PERSONAL rosters that disagree -- author IS discriminative here",
+  "w": {
+   "title": "Outcomes after transcatheter aortic valve replacement",
+   "authors": [
+    "Smith",
+    "Jones"
+   ],
+   "year": 2019,
+   "volume": "40",
+   "pages": "200-210",
+   "journal": "Eur Heart J",
+   "doi": "10.1093/eurheartj/ehz001"
+  },
+  "r": {
+   "title": "Outcomes after transcatheter aortic valve replacement.",
+   "authors": [
+    "Nguyen",
+    "Okonkwo"
+   ],
+   "year": 2019,
+   "volume": "40",
+   "pages": "200-210",
+   "journal": "Eur Heart J",
+   "doi": "10.1093/eurheartj/ehz001"
+  }
+ }
+]

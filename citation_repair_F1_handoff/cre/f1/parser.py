@@ -19,6 +19,7 @@ except ImportError:                               # pragma: no cover
     import xml.etree.ElementTree as etree         # type: ignore
     _PARSER = lambda p: etree.parse(p)            # noqa: E731
 
+from . import marker_scope
 from .schema import Reference, ClaimedRef
 
 
@@ -177,6 +178,15 @@ def _citation_node(ref):
 _BLOCK_TAGS = {"p", "title", "caption", "td", "th", "list-item", "disp-quote"}
 
 # Split into sentences while keeping each sentence's start offset (finditer).
+#
+# KNOWN DEFECT, logged not fixed (found while measuring marker clusters,
+# 2026-08-16; out of scope for that change and recorded so it is not re-found).
+# This splits on the period in "et al.", so an author-year document yields
+# sentence fragments like ", 2006)." -- and that fragment becomes the citance
+# every reference on it is judged against. ``sentence_spans.py`` protects
+# "Fig.", "Dr." and single-letter initials; neither guards "et al.". It affects
+# the three author-year documents of corpus_frozen_v1 (PMC12967000,
+# PMC13219232, PMC13295838) and no numeric-marker document.
 _SENT_RE = re.compile(r"[^.!?]*[.!?]+(?:\s+|$)|[^.!?]+$")
 
 
@@ -329,6 +339,48 @@ def _inferred_interior(text, entries, numbering, refs_by_id) -> list:
     return out
 
 
+def _sentence_clusters(seg: str, seg_start: int, entries) -> list:
+    """One sentence's MARKER CLUSTERS, with offsets into the normalized citance.
+
+    ``entries`` is the sentence's markers as ``(pos, rids, marker_text)`` in
+    document order, positioned against the raw serialized block; ``seg`` is the
+    raw sentence segment starting at ``seg_start``. Returns one dict per cluster
+    with its index, its offset and end IN THE CITANCE STRING, and the marker text
+    it renders.
+
+    The offsets are translated into citance coordinates here, at the only point
+    where both coordinate systems exist. Everything downstream sees the citance
+    alone -- the whitespace-collapsed sentence the extractor and the judge were
+    given -- so an untranslated offset would be silently wrong by however much
+    whitespace the XML happened to carry.
+    """
+    text, raw_to_norm = marker_scope.normalize_with_offsets(seg)
+
+    def _offset(pos: int) -> int:
+        i = pos - seg_start
+        if i < 0:
+            return 0
+        if i >= len(raw_to_norm):
+            return len(text)
+        return raw_to_norm[i]
+
+    out: list = []
+    for k, members in enumerate(marker_scope.cluster_markers(seg, [
+            (pos - seg_start, rids, mtext) for pos, rids, mtext in entries])):
+        first, last = entries[members[0]], entries[members[-1]]
+        rendered = [entries[i][2].strip() for i in members
+                    if (entries[i][2] or "").strip()]
+        out.append({
+            "index": k,
+            "offset": _offset(first[0]),
+            "end": _offset(last[0] + len(last[2] or "")),
+            "marker_text": ",".join(rendered),
+            "entries": list(members),
+            "members": [],           # citation_ids, filled once the group exists
+        })
+    return out
+
+
 def _span_index(pos: int, spans) -> int:
     """Index of the sentence span containing ``pos``.
 
@@ -375,6 +427,18 @@ def link_citances(root, refs_by_id: dict, ordered_ref_ids=()) -> None:
     safe, and each recovered member is recorded as INFERRED so a reader can tell
     a deduction from a link the publisher wrote.
 
+    MARKER CLUSTERS. The group above is the whole SENTENCE, and a sentence can
+    cite two different things: "...antibodies 52,53 and pH sensitive fluorescent
+    micelles 54,55..." cites 52,53 for the antibodies and 54,55 for the micelles.
+    Every marker's position is already resolved here; what was discarded is WHICH
+    MARKERS SIT TOGETHER. Each reference now also records the maximal run of
+    adjacent markers it belongs to, and that cluster's offset in the citance, so
+    the band can stop asking a reference about a clause it was never cited for.
+    Clustering is applied ONLY to numeric-marker documents -- the positional rule
+    is undefined for author-year markers, whose text is itself a name containing
+    letters -- and a sentence with exactly one cluster is left completely
+    untouched, which is the regression guard for the whole change.
+
     Best-effort: any failure here must never break reference extraction, so the
     caller wraps this in try/except.
     """
@@ -383,6 +447,12 @@ def link_citances(root, refs_by_id: dict, ordered_ref_ids=()) -> None:
     # numbering model that is wrong anywhere is not trusted anywhere.
     numbering = _positional_numbering(serialized, refs_by_id,
                                       ordered_ref_ids or ())
+    # Style is a property of the DOCUMENT, decided over every marker it renders
+    # before any sentence is clustered -- same all-or-nothing discipline as
+    # _positional_numbering, and for the same reason.
+    style = marker_scope.detect_citation_style(
+        [mtext for _text, markers in serialized for _pos, _rids, mtext in markers])
+    clustering = style == marker_scope.CITATION_STYLE_NUMERIC
     group_seq = 0
     for text, markers in serialized:
         spans = _sentence_spans(text)
@@ -397,21 +467,38 @@ def link_citances(root, refs_by_id: dict, ordered_ref_ids=()) -> None:
 
         claimed_by_span: dict = {}
         inferred_by_span: dict = {}
+        clusters_by_span: dict = {}
         for span_i in sorted(by_span):
             entries = by_span[span_i]
             sentence = _sentence_for(entries[0][0], spans)
+            # Marker clusters for THIS sentence, and the lookup that puts each
+            # reference in one. A single cluster is recorded as none at all: the
+            # whole point of the single-cluster case is that no byte of it moves.
+            clusters = (_sentence_clusters(spans[span_i][2], spans[span_i][0],
+                                           entries)
+                        if clustering and 0 <= span_i < len(spans) else [])
+            if len(clusters) < 2:
+                clusters = []
+            clusters_by_span[span_i] = clusters
+            cluster_of_entry = {e: c["index"] for c in clusters
+                                for e in c["entries"]}
+            cluster_of_pos = {entries[e][0]: k
+                              for e, k in cluster_of_entry.items()}
             # (sort key, ref). ASSIGNMENT happens explicit-first so an explicit
             # link always beats an inference to a reference; the key restores
             # RENDERED order afterwards, placing each inferred interior right
             # after the endpoint that opened its range. "1-5" therefore lists
             # B1..B5, not B1, B5, B2, B3, B4.
             claims: list = []
-            for pos, rids, mtext in entries:
+            for e_i, (pos, rids, mtext) in enumerate(entries):
                 for rid in rids:
                     ref = refs_by_id.get(rid)
                     if ref is None or ref.citance:    # first citance wins
                         continue
                     ref.citance = sentence
+                    ref.citance_citation_style = style
+                    ref.citance_marker_cluster_index = cluster_of_entry.get(
+                        e_i, -1)
                     if not ref.cited_reference_marker:
                         ref.cited_reference_marker = mtext
                     claims.append(((pos, 0, 0), ref))
@@ -421,6 +508,12 @@ def link_citances(root, refs_by_id: dict, ordered_ref_ids=()) -> None:
                 if ref is None or ref.citance:        # first citance still wins
                     continue
                 ref.citance = sentence
+                ref.citance_citation_style = style
+                # A recovered interior belongs to the cluster of the endpoint
+                # that OPENED its range: "16-18" renders as one adjacent run, so
+                # 17 is cited exactly where 16 and 18 are.
+                ref.citance_marker_cluster_index = cluster_of_pos.get(
+                    open_pos, -1)
                 ref.citance_marker_inferred = True
                 if not ref.cited_reference_marker:
                     # The number the article renders. Accurate, and the
@@ -443,10 +536,33 @@ def link_citances(root, refs_by_id: dict, ordered_ref_ids=()) -> None:
             member_ids = list(dict.fromkeys(m.citation_id for m in members))
             inferred_ids = list(dict.fromkeys(
                 m.citation_id for m in inferred_by_span.get(span_i, [])))
+            # Cluster ids extend the group id rather than replacing it --
+            # "<group>:c<NN>" -- so the sentence a cluster belongs to is readable
+            # straight off the id. citation_id and citance_group_id are untouched:
+            # Band 1's preband_contract joins on the first and the co-citation
+            # record keys on the second.
+            clusters = clusters_by_span.get(span_i) or []
+            for cluster in clusters:
+                cluster["id"] = f"{group_id}:c{cluster['index']:02d}"
+                cluster["members"] = [
+                    m.citation_id for m in members
+                    if m.citance_marker_cluster_index == cluster["index"]]
             for ref in members:
                 ref.citance_group_id = group_id
                 ref.citance_group_members = list(member_ids)
                 ref.citance_group_inferred_members = list(inferred_ids)
+                if not clusters:
+                    continue
+                # Copied per reference: the list is provenance carried on a
+                # durable record, and two references must never share one mutable
+                # object across the band.
+                ref.citance_marker_clusters = [
+                    {k: (list(v) if isinstance(v, list) else v)
+                     for k, v in cluster.items() if k != "entries"}
+                    for cluster in clusters]
+                own = ref.citance_marker_cluster_index
+                ref.citance_marker_cluster_id = (
+                    clusters[own]["id"] if 0 <= own < len(clusters) else "")
 
 
 def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:

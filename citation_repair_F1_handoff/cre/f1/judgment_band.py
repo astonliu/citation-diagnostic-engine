@@ -92,6 +92,7 @@ from .coverage_aggregate import no_usable_fulltext_dict
 # re-exported below under the public names this module has always used, so the
 # two vocabularies cannot drift and no manifest byte moves.
 from . import cocitation
+from . import marker_scope
 from .cocitation import (
     ROUTE_GROUP_COVERED, ROUTE_GROUP_COVERAGE_GAP, ROUTE_UNSUPPORTED_MEMBER)
 from .coverage_prompts_v3 import (
@@ -177,7 +178,7 @@ def build_item(ref) -> "dict | None":
     if exclusion_reason(ref) is not None:
         return None
     c = ref.claimed
-    return {
+    item = {
         "item_key": ref.citation_id,           # "<citing_pmcid>:<ref_id>"
         "citation_id": ref.citation_id,
         "citing_pmcid": ref.source_pmcid,
@@ -213,6 +214,52 @@ def build_item(ref) -> "dict | None":
         "proposed_route": None,
         "proposed_verdict": None,
     }
+    item.update(_marker_scope_provenance(ref))
+    return item
+
+
+def _marker_scope_provenance(ref) -> dict:
+    """The marker-cluster keys this item carries, or ``{}`` for the common case.
+
+    CONDITIONAL ON PURPOSE. A numeric single-cluster sentence -- the
+    overwhelming majority, and the regression guard for the whole marker
+    attribution change -- adds nothing, so its item row stays byte-identical.
+    Keys appear when the sentence actually split into two or more clusters, and
+    the STYLE alone appears for any document the positional rule does not apply
+    to, where the record must still say which rule applied.
+
+    Empty is therefore READ as "numeric, one cluster" downstream
+    (``marker_scope.scope_item_claims``). The two sides are a pair: widening what
+    this emits without widening what that assumes would report ordinary sentences
+    as style refusals.
+    """
+    style = getattr(ref, "citance_citation_style", "") or ""
+    clusters = list(getattr(ref, "citance_marker_clusters", None) or [])
+    if len(clusters) >= 2:
+        return {
+            "citance_citation_style": style,
+            "citance_marker_clusters": clusters,
+            "citance_marker_cluster_index": int(
+                getattr(ref, "citance_marker_cluster_index", -1)),
+            "citance_marker_cluster_id": getattr(
+                ref, "citance_marker_cluster_id", "") or "",
+        }
+    if style and style != marker_scope.CITATION_STYLE_NUMERIC:
+        return {"citance_citation_style": style}
+    return {}
+
+
+def _scope_record(scope: dict) -> dict:
+    """The durable form of one marker-scope decision.
+
+    ``claims`` is dropped -- ``attribution`` already carries every claim, its
+    cluster, this reference's cluster and whether the two matched, so keeping
+    both would let a reader find two claim lists on one row and have to decide
+    which is authoritative. Every skipped pair is named, not merely counted:
+    a claim that was never put to a reference and a claim the reference failed
+    must never be indistinguishable in the output.
+    """
+    return {k: v for k, v in scope.items() if k != "claims"}
 
 
 # ==========================================================================
@@ -461,11 +508,18 @@ def apply_cocitation_routing(items: "list[dict]") -> tuple:
     quarantined_by_group: dict = {}
     for it in items:
         if it.get("proposed_route") == ROUTE_PARSE_QUARANTINE:
-            gid = cocitation.group_id_of(it)
-            if gid:
-                quarantined_by_group.setdefault(gid, []).append(
-                    {"citation_id": it.get("citation_id"),
-                     "reason": cocitation.EXCLUDED_NO_VERDICTS})
+            row = {"citation_id": it.get("citation_id"),
+                   "reason": cocitation.EXCLUDED_NO_VERDICTS}
+            # Indexed under BOTH the sentence group and (when the parser found
+            # one) this row's marker cluster. A quarantined row never reaches the
+            # scoping step, so which of the two keys its siblings ended up
+            # aggregating under is not knowable here -- and a quarantined member
+            # that silently vanished from ``excluded_members`` would be a member
+            # nothing in the output accounts for. Exactly one key is ever read.
+            for key in (cocitation.group_id_of(it),
+                        it.get("citance_marker_cluster_id") or ""):
+                if key:
+                    quarantined_by_group.setdefault(key, []).append(row)
 
     group_records: list = []
     route_counts: dict = {}
@@ -494,11 +548,18 @@ def apply_cocitation_routing(items: "list[dict]") -> tuple:
             routes[item["citation_id"]] = final
             route_counts[final] = route_counts.get(final, 0) + 1
         if size > 1:
-            record = cocitation.group_record(gid, members, aggregated, routes)
+            # The SENTENCE id, never the partition key: when marker attribution
+            # narrowed this unit to one clause the key is a cluster id, and
+            # citance_group_id must keep meaning "the sentence occurrence".
+            record = cocitation.group_record(
+                cocitation.group_id_of(members[0]) or gid, members, aggregated,
+                routes)
             group_records.append(record)
             for item in members:
                 item["cocitation"] = {
                     "citance_group_id": record["citance_group_id"],
+                    **({"marker_scope_id": record["marker_scope_id"]}
+                       if "marker_scope_id" in record else {}),
                     "size": size,
                     "members": list(record["members"]),
                     "claims_covered": record["claims_covered"],
@@ -947,6 +1008,10 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
     cocitation_groups = 0
     cocitation_stats: dict = {}
     group_sizes: dict = {}
+    # MARKER ATTRIBUTION accounting. A (reference, claim) pair that was never
+    # asked has to be countable, or "we narrowed the question" and "the reference
+    # answered" become the same number.
+    scope_counts = marker_scope.new_counts()
     covered_claims_total = 0
     uncovered_claims_total = 0
     unknown_claims_total = 0
@@ -987,6 +1052,7 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                 done.add(pmcid)
                 continue
 
+            marker_scope.tally_document(scope_counts, refs)
             # Rows for THIS doc, held until it completes (see the docstring).
             doc_items: list = []
             doc_queue: list = []
@@ -1050,6 +1116,20 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                     # Copy: the cached list is shared by every reference on this
                     # citance, and each item record owns its own claims.
                     item["atomic_claims"] = list(claims_cache[sentence])
+                    # MARKER ATTRIBUTION. A reference is asked only the claims
+                    # its own marker cluster was cited for. Narrowing happens
+                    # here, BEFORE the judge, so a claim this reference was never
+                    # cited for cannot produce a verdict against it at all -- the
+                    # question is not asked rather than asked and then discounted.
+                    scope = marker_scope.scope_item_claims(
+                        item, item["atomic_claims"])
+                    item["atomic_claims"] = list(scope["claims"])
+                    if scope["status"] == marker_scope.SCOPE_SCOPED:
+                        item["claim_scope_id"] = scope["scope_id"]
+                    if marker_scope.should_record(scope):
+                        item["marker_scope"] = _scope_record(scope)
+                    marker_scope.tally(scope_counts, scope,
+                                       item.get("citing_pmcid") or "")
                     held_for_incomplete_fulltext = False
                     # MODE COMES FROM CONFIGURATION, never from the fetched value.
                     # Inferring it from the presence of cited_fulltext would let a
@@ -1088,6 +1168,14 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                                 no_usable_fulltext_dict() for _ in claims],
                             prompt_version=COVERAGE_PROMPT_VERSION_V3,
                             parser_version=RESPONSE_PARSER_VERSION_V3)
+                    # The cluster match, per verdict as well as per record: a
+                    # reader auditing one claim must not have to join back to the
+                    # row header to see which clause it belonged to.
+                    marker_scope.stamp_verdicts(item["coverage_verdicts"], scope)
+                    # Answered-and-failed, counted beside never-asked so the two
+                    # can never be read as one number.
+                    marker_scope.tally_verdicts(scope_counts,
+                                                item_buckets(item))
                     # Strict schema validation passes text that JSONL cannot
                     # encode (a lone surrogate parses as a perfectly good string).
                     # Check BOTH durable artifacts here, inside the guard, so the
@@ -1363,7 +1451,13 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                 "A group is one SENTENCE OCCURRENCE and its members are the "
                 "references that occurrence gave its citance to (first-citance-"
                 "wins, so a reference already carrying an earlier sentence "
-                "belongs to that sentence's group instead). GROUP_COVERED means "
+                "belongs to that sentence's group instead) -- EXCEPT where "
+                "marker attribution narrowed the sentence to its marker "
+                "clusters, in which case the unit is the cluster and the record "
+                "carries a marker_scope_id naming it. It has to be: aggregation "
+                "is an index-wise join over a shared claim list, and two "
+                "clusters of one sentence carry different claim lists. "
+                "GROUP_COVERED means "
                 "the group covers every claim and this member contributed; "
                 "GROUP_COVERAGE_GAP means at least one claim NO member covered; "
                 "UNSUPPORTED_MEMBER means this member engaged nothing at all and "
@@ -1372,6 +1466,7 @@ def run_band(xml_dir: str, out_dir: str, *, extractor: Extractor,
                 "nothing about this paper's counter-evidence."
             ),
         },
+        "marker_scope": marker_scope.manifest_block(scope_counts),
         "distinct_cited_pmids_looked_up": len(pubtype_cache),
         "items_path": items_path,
         "annotation_queue_path": queue_path,
