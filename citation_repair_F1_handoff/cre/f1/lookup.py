@@ -20,7 +20,9 @@ import re
 import requests
 from rapidfuzz import fuzz
 
-from .schema import Reference, RetrievedRecord
+from .schema import (Reference, RetrievedRecord, FETCH_NOT_ATTEMPTED,
+                     FETCH_ANSWERED_RECORD, FETCH_ANSWERED_ABSENT,
+                     FETCH_RESOLVER_ERROR, fetch_answered)
 from .ratelimit import NCBI, request_with_retry
 from .biblio_match import (match_score, flag_verdict, retrieve_candidates,
                            best_match, VERDICT_SAME_WORK_VARIANT)
@@ -69,9 +71,22 @@ def title_similarity(a: str, b: str) -> float:
 
 def fetch_pubmed(pmid: str, api_key: str = "", email: str = "",
                  session: requests.Session | None = None) -> RetrievedRecord:
-    """Retrieve the record the claimed PMID actually points to."""
+    """Retrieve the record the claimed PMID actually points to.
+
+    EVERY return path names its transport status, and ``resolved=False`` is no
+    longer self-describing: only ``FETCH_ANSWERED_ABSENT`` is evidence that the
+    claimed PMID is dead. Non-200 (including a 429 that survived every retry --
+    ``ratelimit.request_with_retry`` returns that final response rather than
+    raising), a connection error, and a missing response are all
+    ``FETCH_RESOLVER_ERROR``: NCBI did not answer, so nothing was learned.
+
+    Verified against live NCBI 2026-08-16: EFetch returns HTTP 200 with an empty
+    body for a nonexistent PMID (the genuine-dead case) and HTTP 400 for a
+    malformed one (a rejected request, not a reported absence).
+    """
     if not pmid:
-        return RetrievedRecord(resolved=False)
+        return RetrievedRecord(resolved=False,
+                               transport_status=FETCH_NOT_ATTEMPTED)
     params = {"db": "pubmed", "id": pmid, "rettype": "medline", "retmode": "text"}
     if api_key:
         params["api_key"] = api_key
@@ -79,11 +94,20 @@ def fetch_pubmed(pmid: str, api_key: str = "", email: str = "",
         params["email"] = email
     try:
         r = request_with_retry(session, EFETCH, params, limiter=NCBI, timeout=20)
-        if r is None or r.status_code != 200 or not r.text.strip():
-            return RetrievedRecord(resolved=False, pmid=pmid)
-        return _parse_medline(r.text, pmid)
     except requests.RequestException:
-        return RetrievedRecord(resolved=False, pmid=pmid)
+        return RetrievedRecord(resolved=False, pmid=pmid,
+                               transport_status=FETCH_RESOLVER_ERROR)
+    if r is None or r.status_code != 200:
+        return RetrievedRecord(resolved=False, pmid=pmid,
+                               transport_status=FETCH_RESOLVER_ERROR)
+    if not r.text.strip():
+        # Answered, and there is no such record. The one case that is evidence.
+        return RetrievedRecord(resolved=False, pmid=pmid,
+                               transport_status=FETCH_ANSWERED_ABSENT)
+    rec = _parse_medline(r.text, pmid)
+    rec.transport_status = (FETCH_ANSWERED_RECORD if rec.resolved
+                            else FETCH_ANSWERED_ABSENT)
+    return rec
 
 
 def _au_surname(au: str) -> str:
@@ -474,9 +498,37 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
         return True                        # continue to LLM filter + confirm path
 
     log.pmid_resolved = ref.retrieved.resolved
+    # Carry WHY into the durable record. Without this the log cannot tell a dead
+    # PMID from an NCBI outage after the fact, and both read as fabrication
+    # evidence forever.
+    log.pmid_transport_status = ref.retrieved.transport_status
     if not ref.retrieved.resolved:
-        log.mismatch_flagged = True        # dead PMID is a strong candidate
-        log.notes = "claimed PMID did not resolve"
+        # UNSCOREABLE is reachable on this path too. Only claimed-side signals
+        # can apply (there is no resolved record to judge), and running the gate
+        # BEFORE the early return is the whole point: a reference with no
+        # claimed title has nothing to search on, so a dead PMID must not carry
+        # it into the confirmation search -- where three searches that were
+        # never issued scored 0.0 and were presented as evidence of fabrication.
+        #
+        # Deliberately NOT hoisted above the resolved branch below:
+        # classify_unscoreable returns on its FIRST hit and checks resolved-side
+        # signals first, so hoisting would re-attribute buckets on the resolved
+        # path and move a measured number (unscoreable_by_reason).
+        bucket, reason = classify_unscoreable(ref.claimed, None)
+        if bucket:
+            log.unscoreable_reason = bucket
+            log.notes = f"UNSCOREABLE ({bucket}): {reason}"
+            return False               # decide() -> UNSCOREABLE (dropped)
+        log.mismatch_flagged = True    # a genuinely dead PMID is a candidate
+        if not fetch_answered(ref.retrieved.transport_status):
+            # NCBI did not answer. This is a candidate for HUMAN REVIEW, not for
+            # accusation -- decide() holds on the status, and the note must not
+            # assert an absence that was never observed.
+            log.notes = ("claimed PMID fetch did not answer "
+                         f"({ref.retrieved.transport_status}); resolution "
+                         f"unknown, not evidence of non-existence")
+        else:
+            log.notes = "claimed PMID did not resolve"
         return True
 
     # UNSCOREABLE gate: a non-title / placeholder / book-container pair carries

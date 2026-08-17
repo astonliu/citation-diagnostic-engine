@@ -14,7 +14,9 @@ import requests
 from typing import Callable, Iterable
 
 from .schema import (Reference, write_jsonl, UNVERIFIABLE, UNSCOREABLE,
-                     V_FORMATTING, V_UNCERTAIN)
+                     HUMAN_REVIEW, F1, V_FORMATTING, V_UNCERTAIN,
+                     FETCH_ANSWERED_ABSENT, FETCH_ANSWERED_RECORD,
+                     FETCH_RESOLVER_ERROR, fetch_answered)
 from .parser import iter_pmc_dir
 from .lookup import fetch_pubmed, compare_and_flag
 from .llm_filter import llm_filter
@@ -105,6 +107,13 @@ def process_reference(ref: Reference, complete, *, ncbi_key="",
     if ref.log.same_work_reason:
         return decide(ref, flagged, None, None, match_threshold)
 
+    # The claimed-PMID fetch never answered -> decide() will hold this row no
+    # matter what the LLM and the searches say. Short-circuit for the same
+    # reason as the branch above: do not buy evidence for a decision that has
+    # already been made, and during an NCBI outage this is the hot path.
+    if ref.log.pmid_present and not fetch_answered(ref.log.pmid_transport_status):
+        return decide(ref, flagged, None, None, match_threshold)
+
     # expensive path (flagged survivors only -- PMID candidates and no-ID
     # references whose cheap lookup found a poor match or nothing)
     verdict = llm_filter(ref, complete)
@@ -127,14 +136,34 @@ def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
     stream = refs if refs is not None else iter_pmc_dir(pmc_dir)
 
     prediction_records, log_records = [], []
-    counts: dict[str, int] = {}
+    # Seeded so a run that produced no F1 reports a ZERO rather than a missing
+    # key -- see f1_status below. Other labels keep the observed-only behavior.
+    counts: dict[str, int] = {F1: 0}
+    quarantined = 0
     for ref in stream:
-        process_reference(ref, complete, ncbi_key=ncbi_key,
-                          crossref_mailto=crossref_mailto,
-                          openalex_mailto=openalex_mailto,
-                          sim_threshold=sim_threshold,
-                          match_threshold=match_threshold,
-                          author_tripwire=author_tripwire, session=session)
+        try:
+            process_reference(ref, complete, ncbi_key=ncbi_key,
+                              crossref_mailto=crossref_mailto,
+                              openalex_mailto=openalex_mailto,
+                              sim_threshold=sim_threshold,
+                              match_threshold=match_threshold,
+                              author_tripwire=author_tripwire, session=session)
+        except Exception as e:                # noqa: BLE001 - quarantine, never abort
+            # ONE BAD ROW MUST NOT KILL THE RUN. A Crossref 200 whose `message`
+            # is a string raised AttributeError out of confirm() and took the
+            # whole batch with it. Same pattern as the strict-parser quarantine
+            # in judgment_run.py: name the row, hold it, keep going.
+            #
+            # HUMAN_REVIEW, deliberately: a reference we failed to process is
+            # unjudged, and unjudged must never be reported as a finding.
+            quarantined += 1
+            ref.label, ref.confidence = HUMAN_REVIEW, "LOW"
+            ref.rationale = ("Processing raised an unexpected error; the "
+                             "reference was quarantined unjudged.")
+            ref.log.decided_by = "quarantine_exception"
+            ref.log.notes = f"{type(e).__name__}: {e}"
+            print(f"[f1-run-quarantine] {ref.citation_id}: "
+                  f"{type(e).__name__}: {e}")
         counts[ref.label] = counts.get(ref.label, 0) + 1
         log_records.append(ref.to_log_record())
         # unverifiable AND unscoreable refs are dropped from the prediction set

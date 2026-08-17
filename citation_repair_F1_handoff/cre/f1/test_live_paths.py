@@ -468,14 +468,31 @@ def test_decide_all_errored_escalates_not_f1():
     assert out.log.decided_by == "confirm_all_errored"
 
 
-def test_decide_partial_error_still_decides_f1():
-    # one search succeeded (found nothing), others errored -> still F1-eligible
+def test_decide_partial_error_holds_not_f1():
+    # REPLACES test_decide_partial_error_still_decides_f1, which asserted the
+    # defect: one healthy-but-empty search licensed the accusation while another
+    # search had errored. ZD, 2026-08-16: F1 requires EVERY search to answer.
     ref = Reference("x", "", ClaimedRef(title="t", claimed_pmid="1"))
     ref.log.pmid_present = True
     ref.log.pmid_resolved = True
     out = decide(ref, True, S.V_FABRICATION,
                  {"pubmed": 0.0, "crossref": None, "openalex": None})
-    assert out.label == S.F1
+    assert out.label == S.HUMAN_REVIEW
+    assert out.log.decided_by == "confirm_incomplete_evidence"
+    # The rationale must name what was missing, not assert a complete sweep.
+    assert "crossref" in out.rationale and "openalex" in out.rationale
+
+
+def test_decide_partial_error_still_reaches_f2():
+    # A POSITIVE finding needs no complete sweep: one database returned the
+    # work, so an outage elsewhere is irrelevant. Guards F2 recall against the
+    # completeness gate above.
+    ref = Reference("x", "", ClaimedRef(title="t", claimed_pmid="1"))
+    ref.log.pmid_present = True
+    ref.log.pmid_resolved = True
+    out = decide(ref, True, S.V_FABRICATION,
+                 {"pubmed": 99.0, "crossref": None, "openalex": None})
+    assert out.label == S.F2
 
 
 # --------------------------------------------------------------------------

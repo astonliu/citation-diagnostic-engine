@@ -26,7 +26,8 @@ import math
 from collections import Counter
 from typing import Optional
 
-from .schema import F1, F2, UNVERIFIABLE, UNSCOREABLE, ClaimedRef, RetrievedRecord
+from .schema import (F1, F2, UNVERIFIABLE, UNSCOREABLE, ClaimedRef,
+                     RetrievedRecord, fetch_answered)
 from .biblio_match import (flag_verdict, VERDICT_MATCH,
                            VERDICT_WRONG_PAPER, VERDICT_SAME_WORK_VARIANT,
                            VERDICT_UNSCOREABLE, VERDICT_UNRESOLVED)
@@ -104,14 +105,37 @@ def summarize(log_records: list[dict],
     pmid_resolved = 0
     flagged_total = 0
     f2_count = 0
+    f1_count = 0
     override_cleared = 0          # cleared by the strong-corroboration override
     band_counts: Counter = Counter()
     flagged_ids_by_band: dict[str, list[str]] = {}
+    # F1 instrumentation. Counted over ALL records, including the UNSCOREABLE and
+    # UNVERIFIABLE rows skipped below, because "the check could not run" is
+    # exactly what those continues would otherwise hide.
+    f1_attempted = 0              # PMID-bearing: the F1 existence check applies
+    f1_answered = 0               # ...and the EFetch answered (dead or alive)
+    f1_transport_failed = 0       # ...and it did NOT answer -> held, no evidence
+    f1_confirm_complete = 0       # every confirmation search answered
+    f1_confirm_incomplete = 0     # at least one did not -> F1 unreachable
 
     for rec in log_records:
         lg = _lg(rec)
         label = rec.get("label")
         cid = rec.get("citation_id", "")
+        if label == F1:
+            f1_count += 1
+        if lg.get("pmid_present"):
+            f1_attempted += 1
+            if fetch_answered(lg.get("pmid_transport_status") or ""):
+                f1_answered += 1
+            else:
+                f1_transport_failed += 1
+        hits = lg.get("db_hits") or {}
+        if hits:
+            if all(v is not None for v in hits.values()):
+                f1_confirm_complete += 1
+            else:
+                f1_confirm_incomplete += 1
         if label == UNSCOREABLE or lg.get("unscoreable_reason"):
             unscoreable_by_reason[lg.get("unscoreable_reason") or "unspecified"] += 1
             continue                       # excluded from numerator AND denominator
@@ -151,8 +175,33 @@ def summarize(log_records: list[dict],
             "pmid_bearing": pmid_bearing,
             "pmid_resolved": pmid_resolved,
             "flagged_total": flagged_total,
+            "f1_count": f1_count,
             "f2_count": f2_count,
             "override_cleared": override_cleared,
+        },
+        # ATTEMPTED IS NOT THE SAME AS ANSWERED, and zero is not the same as
+        # "could not run" -- the F1 counterpart of judgment_run's seam_status,
+        # written for the same reason. F1 is the one label whose false positive
+        # is a public accusation that a real paper does not exist, so a run must
+        # never let "we found no fabrications" stand in for "we could not look".
+        # Every key is always present, including on a run with zero F1.
+        "f1_status": {
+            "attempted": f1_attempted,
+            "answered": f1_answered,
+            "transport_failed": f1_transport_failed,
+            "confirm_complete": f1_confirm_complete,
+            "confirm_incomplete": f1_confirm_incomplete,
+            "fired": f1_count,
+            "note": (
+                "'attempted' is PMID-bearing references the existence check "
+                "applies to; 'answered' is those whose PubMed fetch actually "
+                "replied; 'transport_failed' is those it did not, which are "
+                "HELD and can never be evidence; 'confirm_complete' is rows "
+                "where all three confirmation searches answered, the only rows "
+                "on which F1 is reachable. fired=0 with transport_failed>0 or "
+                "confirm_incomplete>0 has NOT found zero fabrications -- part "
+                "of the corpus was never checked."
+            ),
         },
         "unscoreable_by_reason": dict(unscoreable_by_reason),
         "flagged_band_counts": dict(band_counts),
@@ -218,6 +267,19 @@ def format_report(report: dict) -> str:
         f"  F2 labelled           : {c['f2_count']}",
         f"  base rate (F2/PMID-bearing): {report['base_rate_per_pmid_bearing']}",
     ]
+    f1s = report.get("f1_status")
+    if f1s:
+        # Printed next to the count so a zero is never read alone.
+        lines.append(
+            f"  F1 labelled           : {c['f1_count']}   "
+            f"[attempted {f1s['attempted']}, answered {f1s['answered']}, "
+            f"transport-failed {f1s['transport_failed']}, "
+            f"confirm complete/incomplete "
+            f"{f1s['confirm_complete']}/{f1s['confirm_incomplete']}]")
+        if f1s["transport_failed"] or f1s["confirm_incomplete"]:
+            lines.append(
+                "    ^ part of this corpus was NOT checked; "
+                "F1=0 here does not mean zero fabrications.")
     wp = report["wrong_paper_precision"]
     if wp.get("point") is not None:
         lines.append(f"  wrong-paper precision : {wp['point']} "

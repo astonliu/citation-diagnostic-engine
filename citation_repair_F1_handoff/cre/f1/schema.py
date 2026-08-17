@@ -38,6 +38,45 @@ HUMAN_REVIEW = "human_review"
 # dataset) exactly like UNVERIFIABLE — it is a coverage bucket, never ACCURATE.
 UNSCOREABLE = "unscoreable"
 
+# ---- Claimed-PMID retrieval transport status ----
+# THE DISTINCTION THAT TURNS AN OUTAGE INTO AN ACCUSATION.
+#
+# `resolved=False` used to mean two different things: "EFetch answered and this
+# PMID has no record" (real fabrication evidence) and "EFetch never answered"
+# (no evidence at all). A partial NCBI outage therefore labelled real, indexed
+# papers F1 — at HIGH confidence, because decide() reads an unresolved PMID as
+# the STRONGER signal. A dead PMID and a failed fetch were byte-identical in the
+# durable record.
+#
+# This is the same distinction `fulltext_reader.py` draws between `no_pmcid`
+# (the resolver ANSWERED and there is nothing) and `resolver_error` (the
+# resolver did not answer), and the vocabulary is deliberately shared — see the
+# docstring there, which records that conflating them corrupted a number once
+# already. Measured against live NCBI 2026-08-16: a nonexistent PMID returns
+# HTTP 200 with an EMPTY BODY, which is what makes ANSWERED_ABSENT detectable at
+# all; a malformed one returns 400, which is a RESOLVER_ERROR (the server
+# rejected the request, it did not report an absence).
+#
+# Only ANSWERED_ABSENT is evidence. RESOLVER_ERROR holds the reference.
+FETCH_NOT_ATTEMPTED = "not_attempted"     # no claimed PMID; no request was made
+FETCH_ANSWERED_RECORD = "answered_record"  # answered, record parsed -> resolved
+FETCH_ANSWERED_ABSENT = "answered_absent"  # answered, no such record -> evidence
+FETCH_RESOLVER_ERROR = "resolver_error"   # did NOT answer -> never evidence
+
+#: Statuses that carry no information about whether the claimed work exists.
+FETCH_NO_EVIDENCE = frozenset({FETCH_RESOLVER_ERROR})
+
+
+def fetch_answered(status: str) -> bool:
+    """True when the claimed-PMID fetch actually produced an answer.
+
+    An empty status is the pre-transport-status default carried by old cached
+    records. It is read as "answered" so replaying a historical log does not
+    silently reclassify every one of its rows as an outage.
+    """
+    return status not in FETCH_NO_EVIDENCE
+
+
 # ---- LLM filter verdicts ----
 V_FABRICATION = "fabrication"
 V_FORMATTING = "formatting_discrepancy"
@@ -281,12 +320,21 @@ class RetrievedRecord:
     language: str = ""
     publication_types: list[str] = field(default_factory=list)
     related_pmids: dict[str, list[str]] = field(default_factory=dict)
+    # Why ``resolved`` is what it is: one of the FETCH_* statuses above. Empty
+    # is the old-cache default and is read as "answered" (see fetch_answered).
+    # ``resolved=False`` alone is NOT evidence of anything until this is read.
+    transport_status: str = ""
 
 
 @dataclass
 class StageLog:
     pmid_present: bool = False
     pmid_resolved: bool = False
+    # One of the FETCH_* statuses. THE FIELD THAT KEEPS AN OUTAGE OUT OF THE
+    # RECORD AS AN ACCUSATION: without it, ``pmid_resolved=False`` in a durable
+    # log is unreadable — a dead PMID and a 429 that survived every retry look
+    # identical forever after. Empty is the old-cache default.
+    pmid_transport_status: str = ""
     title_similarity: Optional[float] = None    # 0..100 (token-sort, legacy scale)
     match_score: Optional[float] = None         # 0..1 composite (biblio_match.py)
     # Full field-agreement verdict tuple. Logged so the eval layer can BAND the
@@ -400,6 +448,9 @@ class Reference:
                 "title_similarity": self.log.title_similarity,
                 "match_score": self.log.match_score,
                 "pmid_resolved": self.log.pmid_resolved,
+                # Ships WITH pmid_resolved, always. A consumer that reads the
+                # boolean without the status can reconstruct the original defect.
+                "pmid_transport_status": self.log.pmid_transport_status,
                 "author_match": self.log.author_match,
                 "first_author_match": self.log.first_author_match,
                 "year_match": self.log.year_match,
