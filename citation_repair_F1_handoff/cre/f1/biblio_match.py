@@ -26,7 +26,9 @@ the model can't load. Stage 1 ships independently and has no such dependency.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass, field, replace
+from difflib import SequenceMatcher
 from typing import Optional
 
 import requests
@@ -37,7 +39,12 @@ from .ratelimit import CROSSREF, OPENALEX, request_with_retry
 from .textnorm import fold_bibliographic_text, fold_chemical_charges
 from .work_identity import (assess_same_work, first_author_equivalent,
                             doi_equivalent, journal_equivalent,
-                            is_distinctive_title)
+                            is_distinctive_title, version_chain_same_work,
+                            is_living_source_pair, strip_living_source_suffix,
+                            _strip_acronym_gloss, roman_conflict_suppressed,
+                            _first_pages_agree)
+from .f2_samework_rule import entry_language, entry_language_trigger
+from .journal_identity import journal_identity
 
 # ``Claimed`` is the handoff's name for the claimed-reference metadata object.
 Claimed = ClaimedRef
@@ -63,6 +70,19 @@ class FieldAgreement:
     volume_match: Optional[bool] = None
     pages_match: Optional[bool] = None
     doi_match: Optional[bool] = None
+    #: C5. Names WHICH repair removed a disagreement signal for this comparison
+    #: (C2 filtered an unjudgeable author, C4 un-inverted a corporate name, C3
+    #: stripped an editorial page suffix), or None. A repaired row must never take
+    #: the clean-match short-circuit: the repair removed a false signal, it did not
+    #: establish agreement, and a row reaching ``match`` leaves the audited
+    #: population. The artifacts' written_* fields are untouched either way.
+    repair_reason: "Optional[str]" = None
+    # F2-G (spec §8.1): how journal_match was decided and whether that method is
+    # authoritative enough for F2-C. Only issn_intersection / authority_alias /
+    # nlm_unique_id / manual_alias set ``journal_match_authoritative`` True;
+    # exact_text and containment_heuristic do not.
+    journal_match_method: str = ""
+    journal_match_authoritative: bool = False
 
 
 @dataclass
@@ -74,6 +94,15 @@ class MatchResult:
     override_fired: bool = False       # strong-corroboration override floored the score
     same_work_reason: str = ""          # auditable identity rule used by flag_verdict
     identity_signals: tuple[str, ...] = ()
+    # RULE L2: the single enumerated trigger that excluded this pair from the F2
+    # population -- one of f2_samework_rule.LANGUAGE_TRIGGERS, or "" when the row
+    # is not a cross-language exclusion. An exclusion is a recall cost, so the
+    # cause is persisted per record rather than inferred from a generic signal.
+    cross_language_trigger: str = ""
+    # F2-B (second defect): the claimed PMID resolved to a PREPRINT record while
+    # the citation itself reads as an ordinary article. Evidence TOWARD a fault,
+    # surfaced under its own reason (never folded into the same-work quarantine).
+    resolved_preprint: bool = False
 
 
 @dataclass
@@ -106,6 +135,9 @@ VERDICT_UNRESOLVED   = "unresolved"          # the claimed PMID did NOT resolve
 #   RESOLVED-side gate, separate from the claimed-side classify_unscoreable gate.
 #   Tri-state: only explicit ``resolved is False`` -- resolved=None (unknown) is
 #   NOT swept in.
+VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE = "out_of_scope_cross_language"
+#   Rule L2: title-string evidence shows a cross-language comparison.  This pair
+#   is outside F2's title-comparison population, not a match or review verdict.
 
 # An (near-)identical title means the identifier resolves to the SAME work, so a
 # field disagreement on it is a same-work variant, not a wrong paper. Title
@@ -227,6 +259,78 @@ def is_scoreable_title(title: str, journal: str = "") -> bool:
     return True
 
 
+# F2-D revival (2026-08-14): review-only and guarded by the full field/series
+# conjunction at the call site.  It can never route directly to ``match``.
+_F2D_STRICT_PREFIX_ENABLED = True
+
+
+def _strict_title_prefix(a: str, b: str) -> bool:
+    """True iff one NORMALIZED title is a strict prefix of the other at a word
+    boundary (the shorter is a truncation of the longer). NOT general
+    containment: 'either title inside the other' costs true positives (F2-D), so
+    a title embedded mid-string (the deliberately-untouched containment class,
+    e.g. 2280326 'Psychometric characteristics of the <claimed>') does not match.
+    Both sides must be distinctive so a trivially short fragment never prefixes an
+    unrelated title."""
+    na, nb = normalize_title(a), normalize_title(b)
+    if not na or not nb or na == nb:
+        return False
+    shorter, longer = (na, nb) if len(na) < len(nb) else (nb, na)
+    if not (is_distinctive_title(shorter) and is_distinctive_title(longer)):
+        return False
+    # Word-boundary prefix: the char in ``longer`` right after ``shorter`` must be
+    # a space, so 'metal' is not read as a prefix of 'metallurgy'.
+    return longer.startswith(shorter) and longer[len(shorter):len(shorter) + 1] == " "
+
+
+def _extension_token(token: str) -> str:
+    """Fold only transparent singular/third-person ``s`` variation.
+
+    Rule C is structural containment, not fuzzy similarity.  This lets
+    ``interface/interfaces`` and ``contribute/contributes`` remain the same word
+    while refusing a threshold-based stem or edit-distance relaxation.
+    """
+    if len(token) > 4 and token.endswith("s") and not token.endswith(
+            ("ss", "us", "is")):
+        return token[:-1]
+    return token
+
+
+def _strict_title_extension(a: str, b: str) -> bool:
+    """True when one title strictly contains the other's normalized word bag.
+
+    This includes a literal word-boundary prefix and the specified extension
+    shapes whose added words are inserted at the front, middle, or end.  Requiring
+    full multiset containment (not a coverage threshold) means a sibling paper
+    that substitutes even one content word does not qualify.
+    """
+    if _strict_title_prefix(a, b):
+        return True
+    at = [_extension_token(t) for t in normalize_title(a).split()]
+    bt = [_extension_token(t) for t in normalize_title(b).split()]
+
+    def join_compounds(tokens: list[str], other: list[str]) -> list[str]:
+        other_words = set(other)
+        joined: list[str] = []
+        i = 0
+        while i < len(tokens):
+            if i + 1 < len(tokens) and tokens[i] + tokens[i + 1] in other_words:
+                joined.append(tokens[i] + tokens[i + 1])
+                i += 2
+            else:
+                joined.append(tokens[i])
+                i += 1
+        return joined
+
+    ca = Counter(join_compounds(at, bt))
+    cb = Counter(join_compounds(bt, at))
+    if not ca or not cb or ca == cb:
+        return False
+    if not (is_distinctive_title(a) and is_distinctive_title(b)):
+        return False
+    return ((ca - cb) == Counter()) or ((cb - ca) == Counter())
+
+
 def jaro_winkler(a: str, b: str) -> float:
     """Prefix-weighted edit similarity in 0..1 (truncation-robust)."""
     return float(JaroWinkler.similarity(a, b))
@@ -327,7 +431,86 @@ def _surname_present(claimed_surname: str, cand_authors: list[str]) -> bool:
     return False
 
 
-def field_agreement(claimed: Claimed, cand: RetrievedRecord) -> FieldAgreement:
+_CORPORATE_AUTHOR_RE = re.compile(
+    r"\b(?:committee|association|society|college|academy|council|board|panel|"
+    r"agency|authority|federation|consortium|network|collaborat\w*|task\s+force|"
+    r"working\s+group|study\s+group|trial\s+group|investigators?|institute|"
+    r"foundation|ministry|department|organi[sz]ation|group)\b", re.I)
+_VANCOUVER_PERSON_RE = re.compile(
+    r"\b[A-Z][A-Za-z'\-]+\s*,?\s+(?:[A-Z]\.?\s*){1,5}\b")
+
+
+def _looks_like_personal_name(value: str) -> bool:
+    """Conservative personal-name pattern for Rule K's fallback only."""
+    text = (value or "").strip()
+    if _VANCOUVER_PERSON_RE.search(text):
+        return True
+    words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'\-]*", text)
+    # Full multi-part personal names are common and can exceed four tokens:
+    # ``Maria Del Carmen Garcia Lopez`` must never become corporate by length.
+    particles = {"al", "da", "de", "del", "della", "der", "di", "dos",
+                 "du", "la", "le", "van", "von"}
+    return (len(words) >= 2 and all(
+        w[0].isupper() or w.lower() in particles for w in words))
+
+
+def is_corporate_author(claimed: Claimed,
+                        cand: RetrievedRecord | None = None) -> bool:
+    """Rule K corporate-author predicate, including structural provenance."""
+    if getattr(claimed, "first_author_is_collab", False):
+        return True
+    if cand is not None and getattr(cand, "has_collective_author", False):
+        return True
+    value = claimed.authors[0] if claimed.authors else ""
+    if not value:
+        return False
+    if _CORPORATE_AUTHOR_RE.search(value):
+        return True
+    tokens = re.findall(r"\b[\w'\-]+\b", value, re.UNICODE)
+    return len(tokens) >= 4 and not _looks_like_personal_name(value)
+
+
+def _corporate_author_abbreviation_equivalent(claimed: Claimed,
+                                               cand: RetrievedRecord) -> bool:
+    """Recognize a collective name whose differing spans are initialisms.
+
+    Some JATS/Medline rows lose structural ``collab``/``CN`` provenance even
+    though both rendered author strings are plainly the same organization.  We
+    allow that fallback only when every changed token span is an exact
+    initialism expansion (``D`` -> ``Disorders`` and ``PASSG`` -> ``PA Stroke
+    Study Group``).  Ordinary one-word corporate changes therefore remain
+    conflicts rather than becoming a fuzzy name match.
+    """
+    if not claimed.authors or not cand.authors:
+        return False
+
+    def tokens(value: str) -> list[str]:
+        return re.findall(r"[a-z0-9]+", fold_bibliographic_text(value).lower())
+
+    def initials(parts: list[str]) -> str:
+        return "".join(part if len(part) <= 2 else part[0] for part in parts)
+
+    left = tokens(claimed.authors[0])
+    right = tokens(cand.authors[0])
+    if len(set(left) & set(right)) < 4:
+        return False
+    changed = False
+    for tag, i1, i2, j1, j2 in SequenceMatcher(a=left, b=right).get_opcodes():
+        if tag == "equal":
+            continue
+        changed = True
+        lspan, rspan = left[i1:i2], right[j1:j2]
+        if not lspan or not rspan:
+            return False
+        lcompact, rcompact = "".join(lspan), "".join(rspan)
+        if not (lcompact == initials(rspan) or rcompact == initials(lspan)):
+            return False
+    return changed
+
+
+def field_agreement(claimed: Claimed, cand: RetrievedRecord, *,
+                    repair: bool = True,
+                    living_source: bool | None = None) -> FieldAgreement:
     """Each field -> True / False / None (None = can't judge, missing on a side).
 
     * author : claimed first-author surname present in candidate authors
@@ -342,6 +525,20 @@ def field_agreement(claimed: Claimed, cand: RetrievedRecord) -> FieldAgreement:
     fa = FieldAgreement()
 
     # author
+    # C2/C4 act at COMPARISON TIME ONLY. ClaimedRef.authors and the emitted
+    # written_authors are left untouched in every artifact -- the corrupt value is
+    # the evidence for the JATS-tagging finding and must survive verbatim.
+    #
+    # C2: drop entries that cannot be names at all, so an unjudgeable field yields
+    # None rather than a confident False. "ICH S7A" is not a person and cannot
+    # DISAGREE with one; has_confident_disagreement counts a False here as a
+    # wrong-paper signal.
+    # C4: un-invert a corporate name a reference manager rendered as
+    # "Association AD", but only on an exact surname+initials match against a
+    # resolved roster entry.
+    if repair:
+        claimed, fa.repair_reason = repair_claimed_for_comparison(claimed, cand)
+
     claimed_sn = _first_author_surname(claimed.authors)
     if claimed_sn and cand.authors:
         fa.author_match = _surname_present(claimed_sn, cand.authors)
@@ -351,7 +548,14 @@ def field_agreement(claimed: Claimed, cand: RetrievedRecord) -> FieldAgreement:
     # the preprint year-tolerance below can require journal corroboration.
     cj, rj = _norm(claimed.journal), _norm(cand.journal)
     if cj and rj:
-        fa.journal_match = journal_equivalent(claimed.journal, cand.journal)
+        # F2-G: layered comparison (ISSN / NLM authority / manual-alias ahead of
+        # the unchanged containment fallback). With no pinned snapshot loaded the
+        # authority is empty, so this returns the SAME True/False containment
+        # result as before -- behavior is unchanged until a snapshot is dropped in.
+        jm, method, authoritative = journal_identity(claimed.journal, cand.journal)
+        fa.journal_match = jm
+        fa.journal_match_method = method
+        fa.journal_match_authoritative = authoritative
 
     # year: agree within +/-1. A 2-year gap is read as CAN'T-JUDGE (None, never a
     # penalty) ONLY when the resolved year is epub/preprint-derived (year_from_dep)
@@ -363,7 +567,9 @@ def field_agreement(claimed: Claimed, cand: RetrievedRecord) -> FieldAgreement:
     # of the already-documented, instrumented override residual -- it cannot touch a
     # large-gap paper-series F2 (19-yr gap), a sparse ref (author not True), or a
     # same-author-but-different-journal wrong paper.
-    if claimed.year and cand.year:
+    if living_source is None:
+        living_source = is_living_source_pair(claimed, cand)
+    if not living_source and claimed.year and cand.year:
         gap = abs(int(claimed.year) - int(cand.year))
         if gap <= 1:
             fa.year_match = True
@@ -373,13 +579,23 @@ def field_agreement(claimed: Claimed, cand: RetrievedRecord) -> FieldAgreement:
         else:
             fa.year_match = False
 
-    # volume / pages (digits only)
+    # volume (digits only) / pages (F2-A: canonicalize elided end pages + dashes)
     cv, rv = _digits(claimed.volume), _digits(cand.volume)
     if cv and rv:
         fa.volume_match = cv == rv
-    cp, rp = _digits(claimed.pages), _digits(cand.pages)
+    cp = _canonical_pages(claimed.pages, strip_editorial=repair)
+    rp = _canonical_pages(cand.pages, strip_editorial=repair)
     if cp and rp:
         fa.pages_match = cp == rp
+        # C5 for C3: set ONLY when stripping CHANGED the outcome -- pages that
+        # already agreed need no repair, and flagging them would divert rows that
+        # were never in the wrong-paper band (measured: 59 such rows on the seed-37
+        # frame before this was tightened).
+        if fa.pages_match and fa.repair_reason is None:
+            cp_raw = _canonical_pages(claimed.pages, strip_editorial=False)
+            rp_raw = _canonical_pages(cand.pages, strip_editorial=False)
+            if cp_raw != rp_raw:
+                fa.repair_reason = "page_editorial_suffix"
 
     if claimed.claimed_doi and cand.doi:
         fa.doi_match = doi_equivalent(claimed.claimed_doi, cand.doi)
@@ -391,11 +607,184 @@ def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
 
+# F2-A: dash characters PubMed / citing sources use in a page range. Folded to a
+# plain hyphen before the elided-end-page expansion so '117–32' and '117-32'
+# canonicalize identically.
+_PAGE_DASHES = "‐‑‒–—―−"   # ‐ ‑ ‒ – — ― −
+# A single range segment: optional alpha prefix + start digits, '-', optional alpha
+# prefix + end digits, then a suffix (e.g. '.e4').
+_PAGE_SEGMENT_RE = re.compile(r"^([a-z]*)(\d+)-([a-z]*)(\d+)(.*)$")
+
+
+def _expand_end(start: str, end: str) -> str:
+    """Expand an elided end page against the start (F2-A / spec §7.1 step 6).
+
+    ``width = 10 ** len(end)``; carry the start's high digits onto the end and step
+    up by ``width`` until the end is not below the start. Format the result with at
+    least the start's original digit width so leading zeroes survive
+    (``001-9 -> 001-009``), allowing a longer result when a boundary is crossed
+    (``1199-8 -> 1199-1208``)."""
+    start_i = int(start)
+    width = 10 ** len(end)
+    candidate = start_i - (start_i % width) + int(end)
+    while candidate < start_i:
+        candidate += width
+    return str(candidate).zfill(len(start))
+
+
+def _canonical_segment(seg: str) -> str:
+    """Canonicalize one already-folded range segment (spec §7.1 steps 4-8)."""
+    m = _PAGE_SEGMENT_RE.match(seg)
+    if not m:
+        return seg                       # non-range (S100, e0224455, xii-xv): as-is
+    p_start, start, p_end, end, suffix = m.groups()
+    # Step 5: two DIFFERENT alpha prefixes are two different locators -> unexpanded.
+    if p_start and p_end and p_start != p_end:
+        return seg
+    prefix = p_start or p_end            # step 7: preserve a shared prefix once
+    # Step 6: expand only when the end has fewer digits than the start.
+    end_out = _expand_end(start, end) if len(end) < len(start) else end
+    return f"{prefix}{start}-{end_out}{suffix}"
+
+
+#: C3. Exposure measured at aa118ca: 147 of 58,906 rows (0.25%), 2 of the 110
+#: flagged (7.3x enrichment). Anchored to ';' so it can only ever remove trailing
+#: editorial matter, never part of a range.
+_PAGE_EDITORIAL_SUFFIX = re.compile(
+    r"\s*;\s*(?:quiz|discussion|author reply|reply|erratum|comment)\b.*$", re.I)
+
+
+def _implausible_author(name: str) -> bool:
+    """An author entry that cannot be a personal or corporate name.
+
+    STRUCTURAL ONLY: a digit, or a bracket/colon, in an author field is never a
+    name -- it is a document code ("ICH M3 (R2)", "ICH S7A") or a section number
+    the publisher glued on ("...Committee: 3"). T1 (2026-08-12) established that
+    9 of 9 audited parse-boundary rows carry the wrong string INSIDE a JATS tag as
+    PMC serves it, five of them in structured <element-citation>, so the parser
+    read the tags faithfully and the corruption is upstream.
+
+    DELIBERATELY NOT a token-count or capitalization rule. Three-or-more-
+    capitalized-tokens was tested and fires on "American Diabetes Association",
+    "Garcia Lopez Martinez", "Van Der Berg" and "Maria Del Carmen Garcia Lopez";
+    every threshold that spares those also spares real corruptions. The
+    name-list-in-one-surname case needs a signal that is not a token count and is
+    out of scope."""
+    n = (name or "").strip()
+    if not n:
+        return False
+    # Normalize away the two corruptions this codebase ALREADY recovers, before
+    # judging. Without this, C2 discards wholesale exactly the entries D2b and the
+    # acronym-gloss rule were built to repair -- a coarser rule silently undoing a
+    # finer one:
+    #   * a colon-introduced trailing section number ("...Committee: 3", D2b);
+    #   * a parenthetical acronym glossing the words beside it ("World Medical
+    #     Association (WMA)"), which _strip_acronym_gloss already handles.
+    n = re.sub(r"\s*:\s*\d+\s*$", "", n)
+    n = _strip_acronym_gloss(n).strip()
+    if not n:
+        return False
+    # A DIGIT, and only a digit. The spec also proposed brackets/colons, but both
+    # named targets ("ICH S7A", "ICH M3 (R2)") carry digits, and a parenthetical
+    # that is NOT an acronym gloss is ordinary in a real corporate name --
+    # "International Committee for Pediatric Care (ICPC)" is a legitimate body, and
+    # filtering it destroyed the two-organization guard that keeps it apart from
+    # the National committee sharing its DOI.
+    return bool(re.search(r"\d", n))
+
+
+def _uninvert_corporate(written: str, resolved_authors: list) -> "str | None":
+    """Reverse a reference manager's corporate-name inversion, or ``None``.
+
+    A manager that treats a corporate author as a person emits Vancouver shape --
+    last word as surname, initials of the preceding words as given initials:
+    "American Diabetes Association" -> "Association AD". MEDLINE stores a corporate
+    name unsegmented in CollectiveName "exactly as they appear in the journal", so
+    this shape is never produced by the RESOLVED side; it is always citing-side
+    corruption.
+
+    BOTH conditions are required -- last word equal AND the initials of every
+    preceding word equal, in order -- so an ordinary Vancouver personal name has no
+    multi-word roster entry to match and is left alone."""
+    m = re.fullmatch(r"([A-Z][A-Za-z'\-]+)[ ,]+([A-Z]{1,5})\.?", (written or "").strip())
+    if not m:
+        return None
+    surname, inits = m.group(1), m.group(2)
+    for r in resolved_authors or []:
+        toks = re.findall(r"[A-Za-z][A-Za-z'\-]*", r or "")
+        if len(toks) >= 2 and toks[-1].lower() == surname.lower():
+            if "".join(t[0] for t in toks[:-1]).upper() == inits.upper():
+                return r
+    return None
+
+
+def repair_claimed_for_comparison(claimed, cand):
+    """``(claimed_for_comparison, repair_reason)`` -- C2 + C4, applied ONCE.
+
+    Used by BOTH ``field_agreement`` and ``flag_verdict``. It has to be both: the
+    field comparison and ``assess_same_work`` must see the SAME author list, or a
+    row is repaired for the fields and then blocked by an identity rule still
+    reading the corrupt value (PMC8012337:CR14 -- every field agrees after C4
+    un-inverts 'Association AD', but the corporate-conflict block was still
+    comparing the inverted form and hard-returned wrong-paper).
+
+    Returns a COPY. ``ClaimedRef.authors`` and the emitted ``written_authors`` are
+    never mutated -- the corrupt value is the evidence for the JATS-tagging
+    finding and has to survive verbatim in every artifact."""
+    repair_reason = None
+    authors = [a for a in (claimed.authors or []) if not _implausible_author(a)]
+    if (claimed.authors or []) and not authors:
+        repair_reason = "implausible_author_field"
+    if authors:
+        restored = _uninvert_corporate(authors[0], cand.authors)
+        if restored is not None:
+            authors = [restored] + authors[1:]
+            repair_reason = "corporate_name_inverted"
+    if repair_reason is None:
+        return claimed, None
+    return replace(claimed, authors=authors), repair_reason
+
+
+def _canonical_pages(s: str, *, strip_editorial: bool = True) -> str:
+    """Canonicalize a page range so an elided end page compares equal to its
+    written-out form (F2-A, spec §7.1). PubMed elides the shared leading digits of
+    the end page (``141-4``, ``1083-91``, ``3143-421``, and with a boundary carry
+    ``1199-8``) and uses hyphens where citations use en/em dashes (``117–32``,
+    ``925–8.e4``); shared page-side prefixes (``S141-S144`` vs ``S141-4``) and
+    comma-separated multi-segment ranges (``123-5,130-2``) also canonicalize here.
+
+    1. ``None``/empty/whitespace -> ``""`` so the caller keeps ``pages_match``
+       tri-state (``None`` when either side is absent).
+    2. Fold every dash in ``_PAGE_DASHES`` to ``-``, remove internal whitespace,
+       lowercase.
+    3. Canonicalize each comma-separated segment independently, preserving order.
+
+    A bare start page is NOT expanded to a range (step 9) -- it simply has no ``-``
+    and is returned folded."""
+    if not s:
+        return ""
+    t = s.strip().lower()
+    # C3: MEDLINE appends EDITORIAL matter to a page range -- "212-8; quiz 276",
+    # "E2; discussion 38-9", "1083-91; author reply 92". Those are a different
+    # item printed after the article, not part of its extent, so the two sides
+    # occupy the SAME pages and pages_match must not read False. Stripped FIRST,
+    # before dash folding, so the suffix's own dashes never enter the range.
+    if strip_editorial:
+        t = _PAGE_EDITORIAL_SUFFIX.sub("", t)
+    for d in _PAGE_DASHES:
+        t = t.replace(d, "-")
+    t = re.sub(r"\s+", "", t)
+    if not t:
+        return ""
+    return ",".join(_canonical_segment(seg) for seg in t.split(","))
+
+
 # =====================================================================
 # Composite score + best match
 # =====================================================================
 def match_score(claimed: Claimed, cand: RetrievedRecord,
-                accept: float = 0.85) -> MatchResult:
+                accept: float = 0.85, *, repair: bool = True,
+                living_source: bool | None = None) -> MatchResult:
     """Title similarity, nudged by confirmatory field agreement and pulled down
     by confident field DISagreement, with a STRONG-CORROBORATION OVERRIDE.
 
@@ -424,7 +813,8 @@ def match_score(claimed: Claimed, cand: RetrievedRecord,
     recall set, not assumed away here.
     """
     ts = title_sim(claimed.title, cand.title)
-    f = field_agreement(claimed, cand)
+    f = field_agreement(claimed, cand, repair=repair,
+                        living_source=living_source)
     score = ts
     # confirmatory boosts
     if f.author_match:
@@ -442,17 +832,24 @@ def match_score(claimed: Claimed, cand: RetrievedRecord,
         score -= 0.10
 
     # --- strong-corroboration override -------------------------------------
-    disagree = sum(1 for v in (f.author_match, f.year_match, f.journal_match,
-                               f.volume_match, f.pages_match) if v is False)
+    # n_field_disagreements: a COUNT over all five fields INCLUDING journal,
+    # unconditional (no title-sim gate). Distinct from flag_verdict's
+    # ``has_confident_disagreement`` boolean, which excludes journal and gates
+    # volume/pages on title_sim -- keep the names separate so a journal-comparison
+    # (F2-G) change is traceable through the override but not misread as
+    # wrong-paper evidence.
+    n_field_disagreements = sum(
+        1 for v in (f.author_match, f.year_match, f.journal_match,
+                    f.volume_match, f.pages_match) if v is False)
     # Fire ONLY when both high-entropy fields agree and nothing contradicts.
     # author_match is True AND journal_match is True already implies neither of
-    # those disagrees; ``disagree == 0`` additionally blocks a contradicting
-    # year/volume/pages (same author+journal but year off by 5 -> likely a
-    # different work, do not rescue).
+    # those disagrees; ``n_field_disagreements == 0`` additionally blocks a
+    # contradicting year/volume/pages (same author+journal but year off by 5 ->
+    # likely a different work, do not rescue).
     first_author_ok = (f.first_author_match is True or
                        (f.first_author_match is None and f.author_match is True))
     override_fired = (first_author_ok and f.journal_match is True
-                      and disagree == 0 and score < accept)
+                      and n_field_disagreements == 0 and score < accept)
     if override_fired:
         score = accept
     # -----------------------------------------------------------------------
@@ -475,19 +872,129 @@ _PREPRINT_VENUE_TOKENS = ("arxiv", "biorxiv", "biorvix", "medrxiv", "chemrxiv",
                           "ssrn", "research square", "researchsquare",
                           "preprints.org", "preprint", "osf",
                           "psyarxiv", "techrxiv", "authorea")
-_PREPRINT_DOI_PREFIXES = ("10.1101/", "10.48550/", "10.21203/",
+# Preprint-ONLY registrants: a bare prefix is decisive.
+#   10.48550 arXiv, 10.21203 Research Square, 10.26434 ChemRxiv,
+#   10.31234 PsyArXiv, 10.31219 OSF.
+_PREPRINT_DOI_PREFIXES = ("10.48550/", "10.21203/",
                           "10.26434/", "10.31234/", "10.31219/")
+# F2-B: 10.1101 is Cold Spring Harbor Laboratory Press, which registers
+# bioRxiv/medRxiv AND real CSHL journals (Genome Res, Genes Dev, Learn Mem, CSH
+# Perspect Biol/Med, CSH Protoc, CSH Symp). Only the date-stamped DOI form
+# (10.1101/2020.02.08.939660) is a preprint; 10.1101/gr.209601.116 and
+# 10.1101/gad.1255404 are journal articles. A pattern, not a bare prefix, so the
+# 79 seed-37 CSHL-journal rows stop reading as a preprint signal.
+_PREPRINT_DOI_DATESTAMP_RE = re.compile(r"^10\.1101/\d{4}\.\d{2}\.\d{2}\.")
+
+
+def _is_preprint_doi(doi: str) -> bool:
+    """True iff ``doi`` is a preprint DOI: a preprint-only registrant prefix, or
+    the date-stamped 10.1101 form (a bare 10.1101 prefix is NOT enough -- it is
+    shared with CSHL journals)."""
+    doi = (doi or "").lower()
+    if not doi:
+        return False
+    if any(doi.startswith(p) for p in _PREPRINT_DOI_PREFIXES):
+        return True
+    return bool(_PREPRINT_DOI_DATESTAMP_RE.match(doi))
 
 
 def is_preprint_source(claimed) -> bool:
     """True iff the CLAIMED citation names a preprint venue (journal string)
-    or carries a preprint-registrant DOI prefix. Signal is on the claimed
-    (citing-side) metadata only -- the resolved record is the published work."""
+    or carries a preprint-registrant DOI. Signal is on the claimed (citing-side)
+    metadata only -- the resolved record is the published work."""
     j = (claimed.journal or "").lower()
     if any(tok in j for tok in _PREPRINT_VENUE_TOKENS):
         return True
-    doi = (claimed.claimed_doi or "").lower()
-    return any(doi.startswith(p) for p in _PREPRINT_DOI_PREFIXES)
+    return _is_preprint_doi(claimed.claimed_doi)
+
+
+def is_preprint_resolved(resolved) -> bool:
+    """True iff the RESOLVED record is itself a preprint -- a preprint-server
+    journal, a date-stamped/preprint-registrant DOI, or a MEDLINE 'Preprint'
+    publication type (F2-B, second defect).
+
+    This is the INVERSE of :func:`is_preprint_source`. A citation that reads as
+    an ordinary journal article whose claimed PMID resolves to a preprint is a
+    genuine F2 subtype and was previously undetectable (the detector only ever
+    inspected the claimed side). A preprint on the RESOLVED side is evidence
+    TOWARD a fault -- the opposite direction from a preprint on the claimed side
+    -- so the caller surfaces it under its own reason, never folding it into the
+    same-work quarantine."""
+    j = (resolved.journal or "").lower()
+    if any(tok in j for tok in _PREPRINT_VENUE_TOKENS):
+        return True
+    if _is_preprint_doi(resolved.doi):
+        return True
+    return "preprint" in {p.lower() for p in (resolved.publication_types or [])}
+
+
+# Declared preprint<->published version relations, as they appear in a resolved
+# record's ``related_pmids`` map (hyphen and underscore spellings both seen).
+_VERSION_RELATION_KEYS = ("preprint", "has-preprint", "has_preprint",
+                          "is-preprint-of", "is_preprint_of",
+                          "is-version-of", "is_version_of")
+
+
+def _version_relation_evidence(claimed, cand, f: FieldAgreement) -> bool:
+    """Whether a preprint<->published VERSION relation is actually ESTABLISHED
+    (spec §14.3) -- a claim about provenance needs provenance evidence, not two
+    titles looking alike. True on either:
+
+      * a declared version relation on the resolved record (an
+        is-preprint-of / has-preprint / is-version-of link in ``related_pmids``);
+      * the claimed side reads as a preprint AND the DOIs do not CONFIDENTLY
+        disagree (``doi_match is not False``).
+
+    The refutation is keyed on the DOI, NOT on year or journal: a genuine
+    preprint->published pair normally CHANGES venue (arXiv -> the journal) and
+    DRIFTS the year by the publication lag, so a journal or year disagreement is
+    expected and cannot refute the relation (requiring them to agree would wrongly
+    reject 35264587, the canonical F2_V3_5 preprint retitle). A confident DOI
+    disagreement is a mismatch of a globally-unique work identifier and DOES
+    refute it: PMC12733676:B29 carries two different DOIs (Least Squares GAN vs
+    "On the Effectiveness of..."), so it is a different paper, not a version.
+
+    The authoritative network relations (Crossref is-preprint-of, the bioRxiv
+    published-DOI link) are established upstream in resolve_a.py; the offline
+    matcher has the record's related_pmids and the DOI agreement."""
+    rel = getattr(cand, "related_pmids", None) or {}
+    if any(k in rel for k in _VERSION_RELATION_KEYS):
+        return True
+    return is_preprint_source(claimed) and f.doi_match is not False
+
+
+def _physical_location_conjunction(f: FieldAgreement) -> bool:
+    """The F2-C physical-location signal: canonicalized pages, volume, and journal
+    all agree and the DOIs do not confidently disagree. Shared by the ordinary-
+    match short-circuit (so a physical-location row is NOT cleared to ``match``
+    before the same-work branch is reached -- spec §5.4 step 5 precedes step 8,
+    and §10: F2-C may move a row to review_same_work_variant, never to match) and
+    by the F2-C branch itself, so the two can never drift apart."""
+    return (f.pages_match is True and f.volume_match is True
+            and f.journal_match is True and f.doi_match is not False)
+
+
+def _confident_disagreement(f, title_sim: float) -> bool:
+    """The BOOLEAN wrong-paper signal, as a function so it can also be evaluated on
+    the UNREPAIRED comparison (C5 needs to know whether a repair is what removed
+    it)."""
+    return bool(
+        (f.first_author_match is False)
+        or (f.author_match is False) or (f.year_match is False)
+        or ((f.volume_match is False or f.pages_match is False)
+            and title_sim < SAME_WORK_TITLE_SIM_MIN))
+
+
+def _repair_moved_it_out(original_claimed, cand, accept: float) -> bool:
+    """Whether the row WOULD have carried a confident disagreement without the
+    C2/C3/C4 repair.
+
+    C5 exists to stop a repair CLEARING a row out of the audited population -- not
+    to move rows that were already matching cleanly. Without this check the
+    diversion fired on any row a repair touched, and on the seed-37 frame that took
+    59 rows out of ``match`` that had never been in the wrong-paper band."""
+    raw = match_score(original_claimed, cand, accept=accept, repair=False)
+    return _confident_disagreement(raw.fields, raw.title_sim)
 
 
 def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
@@ -524,19 +1031,152 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
 
     Compute F2 precision primarily over VERDICT_WRONG_PAPER.
     Call is_scoreable_title on both titles before calling this."""
-    m = match_score(claimed, cand, accept=accept)
+    # RULE L2 (cross-language exclusion) is computed HERE but applied BELOW, after
+    # assess_same_work has had first refusal.  Two changes, one rationale.
+    #
+    # The BRACKET arm is gone.  It read only the resolved side, so it could not
+    # tell "this record is a translation" from "this reference and this record are
+    # the same work in two languages" -- the record-side signal L2 was founded to
+    # avoid, in another costume.  Only script and stopword remain, and both read
+    # BOTH title strings.
+    #
+    # The check MOVED below assess_same_work.  As an early return it preempted the
+    # TRANSLATION_* identity routes (RULE D, RULE F, translated_title_metadata,
+    # translated_title_shared_anchors), which answer the same question with year,
+    # venue, volume, first-page and roster corroboration and name their answer.
+    # Those routes land a pair in review_same_work_variant -- AUDITED and NAMED --
+    # whereas L2 drops it out of the precision denominator with no reason
+    # recorded.  A wrongly excluded row inflates the F2 precision estimate and is
+    # never seen again, which is worse than a false positive an adjudicator clears
+    # in a minute.  So the named routes decide first and L2 claims only what they
+    # decline; for what they DO decline, L2 remains a HARD exclusion.
+    language_trigger = entry_language_trigger(claimed.title, cand.title)
+
+    # RULE S comparison-time copies: retain original titles in every artifact,
+    # but remove the living source's trailing publisher/city segment while title
+    # identity is judged.  Its year is unjudgeable in field_agreement.
+    living_source = is_living_source_pair(claimed, cand)
+    claimed_for_comparison = claimed
+    cand_for_comparison = cand
+    # Whether the strip actually SHORTENED a title, not merely whether the pair is
+    # a living source. Only a title this matcher modified carries the artificial
+    # similarity the near-identical-title gate below has to discount; a living
+    # chapter cited without the container is untouched and keeps the ordinary gate.
+    living_strip_modified_title = False
+    if living_source:
+        claimed_for_comparison = replace(
+            claimed, title=strip_living_source_suffix(claimed.title))
+        cand_for_comparison = replace(
+            cand, title=strip_living_source_suffix(cand.title))
+        living_strip_modified_title = (
+            claimed_for_comparison.title != claimed.title
+            or cand_for_comparison.title != cand.title)
+
+    # C2/C4 repair applied ONCE, up front, so the field comparison and the identity
+    # assessment below read the same author list (see repair_claimed_for_comparison).
+    _claimed_original = claimed_for_comparison
+    claimed, _repair = repair_claimed_for_comparison(
+        claimed_for_comparison, cand_for_comparison)
+    cand = cand_for_comparison
+    m = match_score(claimed, cand, accept=accept, living_source=living_source)
     f = m.fields
-    # Tri-state: only a REAL disagreement (is False) counts; None (unparsed) does
-    # not. A confident author/year disagreement.
-    disagree = ((f.first_author_match is False)
-                or (f.author_match is False) or (f.year_match is False)
-                # A coordinate mismatch below the near-identical-title gate is
-                # an adjacent-record signal, not harmless pagination formatting.
-                # This prevents a same-journal/volume neighbour from being
-                # auto-cleared solely by the composite's other boosts.
-                or ((f.volume_match is False or f.pages_match is False)
-                    and m.title_sim < SAME_WORK_TITLE_SIM_MIN))
-    identity = assess_same_work(claimed, cand, title_similarity=m.title_sim)
+    # has_confident_disagreement: a BOOLEAN wrong-paper signal. Tri-state -- only a
+    # REAL disagreement (is False) counts; None (unparsed) does not. NOTE
+    # journal_match is DELIBERATELY EXCLUDED here (unlike match_score's
+    # n_field_disagreements count): a journal disagreement blocks the override
+    # rescue (via that count) but does NOT by itself signal a wrong paper, because
+    # the containment journal comparator is a weak feature (F2-G §8.1) and a
+    # genuine same work routinely changes venue (preprint->journal). volume/pages
+    # count only BELOW the near-identical-title gate (an adjacent-record signal,
+    # not harmless pagination formatting). If excluding journal here is ever
+    # reconsidered, it needs its own measurement first.
+    has_confident_disagreement = (
+        (f.first_author_match is False)
+        or (f.author_match is False) or (f.year_match is False)
+        or ((f.volume_match is False or f.pages_match is False)
+            and m.title_sim < SAME_WORK_TITLE_SIM_MIN))
+    identity = assess_same_work(claimed, cand, title_similarity=m.title_sim,
+                                living_source=living_source)
+
+    # RULE L2 applied -- see the note at the top of this function for why it is
+    # here and not at the entry point.  assess_same_work has now had first
+    # refusal, so:
+    #   * a TRANSLATION_* (or any other) identity proof WINS and the pair is
+    #     quarantined under that route's own NAME, audited, excluded from the F2
+    #     count but recoverable from the stored frame;
+    #   * everything the identity rules DECLINE is a hard exclusion -- the pair is
+    #     outside F2's title-comparison population, not a wrong paper.
+    # Placed before the series-conflict pre-emption on purpose: a declined
+    # cross-language pair leaves as out_of_scope_cross_language, never as
+    # review_wrong_paper.
+    #
+    # BLOCKING GUARD (contract): neither arm may return VERDICT_MATCH. Moving this
+    # check below C2/C4, match_score and assess_same_work exposes cross-language
+    # pairs to the clean-match early return further down, which they could never
+    # reach as an entry-point return. Both arms below terminate, so no
+    # cross-language pair can fall through to it. test_f2_seed47_prerescore_rules
+    # asserts the count is zero.
+    if language_trigger:
+        if identity.same_work:
+            m.same_work_reason = identity.reason
+            m.identity_signals = identity.signals
+            return VERDICT_SAME_WORK_VARIANT, m
+        m.cross_language_trigger = language_trigger
+        m.identity_signals = ("cross_language_title_strings", language_trigger)
+        return VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE, m
+
+    # A serial/part/edition conflict is affirmative distinct-work evidence and
+    # pre-empts every new DOI/corporate/title-extension rescue.
+    if identity.blocked_by == "series_ordinal_conflict":
+        return VERDICT_WRONG_PAPER, m
+
+    corporate = is_corporate_author(_claimed_original, cand)
+    corporate_provenance = bool(
+        getattr(_claimed_original, "first_author_is_collab", False)
+        or getattr(cand, "has_collective_author", False))
+
+    # RULE A: the collective-author comparator can disagree on two formatting
+    # representations of the same organization.  Exact title and every physical
+    # field identify one record; quarantine under a named route rather than
+    # letting that single author representation force HIGH.
+    corporate_abbreviation = _corporate_author_abbreviation_equivalent(
+        _claimed_original, cand)
+    if (corporate and (corporate_provenance or corporate_abbreviation)
+            and _repair is None
+            and identity.blocked_by == "corporate_author_conflict"
+            and normalize_title(claimed.title) == normalize_title(cand.title)
+            and all(v is True for v in (f.year_match, f.journal_match,
+                                        f.volume_match, f.pages_match,
+                                        f.doi_match))):
+        m.same_work_reason = "corporate_all_fields_identical"
+        m.identity_signals = ("corporate_author", "canonical_title", "all_fields")
+        return VERDICT_SAME_WORK_VARIANT, m
+
+    # RULE K (corporate author, three of four anchors) was specified here and is
+    # CUT as of 2026-08-14, unimplemented rather than narrowed.  Measured exposure
+    # was 1/1, 1/1, 0/0 across seeds 37/43/45 -- two firings in three frames, and
+    # ZERO on seed 45, the seed whose corporate false positives motivated it --
+    # against five documented interaction defects: C4 dissolved the very conflict
+    # K arbitrated and K then pre-empted the C5 repair branch below so
+    # _repair_moved_it_out never ran; K's corporate predicate (is_corporate_author)
+    # is wider than both the identity block's and C4's, admitting any four-token
+    # author that _looks_like_personal_name rejects; K's DOI-disagreement arm
+    # routed a row the corporate block would have sent to WRONG_PAPER into
+    # FORMATTING, the lowest band; and K applied none of RULE A2's five
+    # refutations (_distinct_organizations and _roster_contradicted among them).
+    # Two firings does not buy five defects.  It can be re-specified against a
+    # FRESH seed if the frames later show large clean exposure -- never against
+    # seed 47 after adjudication.
+    #
+    # RULE B (exact shared DOI, first author differs) is likewise CUT, and no
+    # other DOI-anchored relaxation replaces it.  It cleared 6 rows across seeds
+    # 43 and 45 and 2 were labelled TRUE_F2: one clearing in three destroyed a
+    # real detection.  A DOI does not certify a work (DOI Handbook §2.3.2-2.3.3),
+    # and seed 45 holds eleven genuine F2 rows sharing DOI, volume, first page AND
+    # journal with the resolved record.  Rule B is an address rule, so no
+    # threshold separates those from the false positives and narrowing had no
+    # headroom.  Guarded by test_shared_doi_never_clears_a_wrong_paper_row.
+    #
     # A corporate-author or series/edition conflict is AFFIRMATIVE evidence that
     # these are distinct records (two organizations, or two editions of a
     # serial): never let a high composite assembled from shared bibliographic
@@ -547,26 +1187,109 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # return (adversarial review, 2026-07-15). Those blocks keep their original
     # semantics -- suppress same-work rescue, let the score/disagreement path
     # decide.
-    if identity.blocked_by in ("corporate_author_conflict",
-                               "series_ordinal_conflict"):
+    if identity.blocked_by == "corporate_author_conflict":
+        return VERDICT_WRONG_PAPER, m
+    # F2-B (second defect): the citation reads as an ordinary journal article but
+    # its claimed PMID resolved to a PREPRINT record. Evidence TOWARD a fault --
+    # surfaced under its own reason (``resolved_preprint_target``), NOT folded
+    # into the same-work quarantine. A same-work PROOF pre-empts it (a preprint
+    # that is provably the same work -- shared DOI / overwhelming anchor -- is a
+    # version, not a wrong paper); otherwise the row is routed to the HIGH review
+    # band so this previously-undetectable subtype is seen (audited, never
+    # auto-labelled F2). Checked BEFORE the clean-MATCH early return so a
+    # confirmatory boost cannot silently clear a preprint-resolved row.
+    m.resolved_preprint = (is_preprint_resolved(cand)
+                           and not is_preprint_source(claimed))
+    if m.resolved_preprint and not identity.same_work:
+        m.same_work_reason = "resolved_preprint_target"
+        m.identity_signals = ("resolved_preprint",)
         return VERDICT_WRONG_PAPER, m
     # Clean accepted pairs are ordinary matches, not review variants.  For a
     # pair that would otherwise be reviewed, prefer a specific identity proof
     # over the generic near-title gate so the live path can route safely.
-    if not disagree and m.score >= accept:
+    #
+    # EXCEPTION (spec §5.4 / §10 / §10.1): a physical-location row whose match
+    # DEPENDS ON CORROBORATION (title_sim < MATCH_ACCEPT_SCORE, so the score only
+    # reached ``accept`` via author/journal boosts or the strong-corroboration
+    # override) must NOT short-circuit to ``match`` -- it falls through so F2-C (or
+    # a stronger identity proof) rebands it to review_same_work_variant with an
+    # auditable reason. §10.1 forbids exactly this silent lift (PMC10424567:R78 at
+    # title_sim 0.567 must not become ``match``), and the rev-5 traceability
+    # guardrail forbids suppressing a row with no rule named. A GENUINE title match
+    # (title_sim >= accept) with agreeing coordinates is an ordinary same_record
+    # and stays ``match`` (§5.4 step 3) -- e.g. a perfectly-cited reference. Net
+    # HIGH membership is unchanged either way.
+    # C5: a row whose author comparison was REPAIRED (C2 filtered an unjudgeable
+    # entry, or C4 un-inverted a corporate name) must not clear here. The repair
+    # removed a disagreement signal rather than establishing agreement, and a row
+    # that reaches ``match`` leaves the audited population and is never seen by a
+    # human. review_same_work_variant is audited and is excluded from the F2 count
+    # either way, so routing there costs nothing in precision.
+    # _repair is the authority: the hoisted call above already consumed the repair,
+    # so field_agreement's own (idempotent) pass sees nothing left to do.
+    repair_reason = _repair or f.repair_reason
+    if repair_reason is None and roman_conflict_suppressed(claimed.title, cand.title):
+        repair_reason = "roman_not_in_series_context"
+    if (repair_reason is not None and not has_confident_disagreement
+            and m.score >= accept
+            and (repair_reason == "roman_not_in_series_context"
+                 or _repair_moved_it_out(_claimed_original, cand, accept))):
+        m.same_work_reason = repair_reason
+        m.identity_signals = ("repaired_comparison",)
+        return VERDICT_SAME_WORK_VARIANT, m
+    living_year_revision = bool(
+        living_source and claimed.year and cand.year
+        and abs(int(claimed.year) - int(cand.year)) > 1)
+    if living_source and identity.same_work and living_year_revision:
+        m.same_work_reason = identity.reason
+        m.identity_signals = identity.signals
+        return VERDICT_SAME_WORK_VARIANT, m
+    if (living_source and living_year_revision and not identity.same_work
+            and not has_confident_disagreement and m.score >= accept):
+        # Year demotion must never turn a formerly reviewed living chapter into a
+        # clean match when its two title revisions are not identity-proven.
+        m.identity_signals = ("living_source", "year_unjudgeable",
+                              "title_revision_unproven")
+        return VERDICT_FORMATTING, m
+    if not has_confident_disagreement and m.score >= accept and not (
+            _physical_location_conjunction(f) and m.title_sim < accept):
         return VERDICT_MATCH, m
     if identity.same_work:
         m.same_work_reason = identity.reason
         m.identity_signals = identity.signals
         return VERDICT_SAME_WORK_VARIANT, m
+    # RULE S CORROBORATION FLOOR (seed-43 gate, PMC10932574:b26-inj-2346250-125).
+    # When the living-source strip SHORTENED a title, the similarity feeding the
+    # gate below is partly this matcher's own doing: on that row title_sim rose
+    # 0.9021 -> 0.9778 across the strip and crossed SAME_WORK_TITLE_SIM_MIN, and
+    # near_identical_title then cleared a labelled TRUE_F2 whose author_match and
+    # first_author_match were BOTH False and whose year, journal, volume, pages and
+    # DOI were all None. Title similarity alone must not outvote two explicit
+    # author disagreements backed by zero address evidence.
+    #
+    # So a strip-modified title reaches the gate only with at least one agreeing
+    # address field -- the coordinates a revision cannot silently change. Tri-state
+    # throughout: only ``is True`` corroborates, ``None`` never does. first_page is
+    # used rather than full pages_match because the constraint asks for the first
+    # page and a living chapter has no stable extent.
+    #
+    # This does NOT touch RULE S's own targets: a living chapter whose first author
+    # agrees is claimed upstream by ``living_chapter_revision`` in assess_same_work
+    # and never reaches this branch.
+    living_strip_corroborated = (
+        f.year_match is True or f.journal_match is True
+        or f.volume_match is True or f.doi_match is True
+        or _first_pages_agree(claimed, cand))
+
     # SAME_WORK_VARIANT quarantine -- checked FIRST. A near-identical title means
     # the PMID resolves to the same work, so author/year drift on it is a
     # revision / metadata-drift signature, not wrong-paper evidence. Requires a
     # real disagreement (so an unparsed-field ``None`` never diverts).
-    if (m.title_sim >= SAME_WORK_TITLE_SIM_MIN and disagree
+    if (m.title_sim >= SAME_WORK_TITLE_SIM_MIN and has_confident_disagreement
             and is_distinctive_title(claimed.title)
             and is_distinctive_title(cand.title)
-            and not identity.blocked_by):
+            and not identity.blocked_by
+            and (not living_strip_modified_title or living_strip_corroborated)):
         m.same_work_reason = "near_identical_title"
         m.identity_signals = ("title_sim>=0.92",)
         return VERDICT_SAME_WORK_VARIANT, m
@@ -583,11 +1306,106 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # the denominator -- it is a true negative, not an ambiguous same-work row.
     # SAME_WORK_VARIANT is audited (not auto-cleared), so any rare misfire is
     # still seen by a human.
+    # VERSION-CHAIN same-work quarantine (spec §15.2). Two records that are nodes
+    # of ONE publication lineage -- preprint <-> conference paper <-> extended
+    # journal version, and conference abstract <-> full paper -- are the SAME WORK.
+    # Identifiers legitimately change between nodes (the abstract and the paper get
+    # different DOIs, often different venues, and a publication-lag year gap), so
+    # identifier inequality ALONE must not route such a pair to wrong-paper.
+    #
+    # Checked BEFORE the preprint branch on purpose: that branch refutes a version
+    # relation on a confident DOI disagreement (§14.3), which is the correct test
+    # for "is this preprint the same work as this published record" but the WRONG
+    # test for a lineage, where a changed DOI is expected. The refutation itself is
+    # untouched -- it still governs every row this rule does not claim.
+    if version_chain_same_work(claimed, cand, title_similarity=m.title_sim,
+                               preprint_source=is_preprint_source(claimed)):
+        m.same_work_reason = "version_chain_same_work"
+        m.identity_signals = ("non_final_node", "title_sim", "content_coverage",
+                              "roster_containment")
+        return VERDICT_SAME_WORK_VARIANT, m
     first_author_ok = (f.first_author_match is True or
                        (f.first_author_match is None and f.author_match is True))
-    if is_preprint_source(claimed) and first_author_ok and disagree:
-        m.same_work_reason = "preprint_published_version"
+    if is_preprint_source(claimed) and first_author_ok and has_confident_disagreement:
+        # A version relation is a claim about PROVENANCE, so it needs provenance
+        # evidence -- title similarity alone cannot establish it (spec §14.3/§15).
+        # PMC12733676:B29 (Least Squares GAN vs "On the Effectiveness of..."), with
+        # doi/journal/year all disagreeing, is a DIFFERENT paper and must not be
+        # quarantined as a preprint's published version.
+        if _version_relation_evidence(claimed, cand, f):
+            m.same_work_reason = "preprint_published_version"
+            m.identity_signals = ("preprint_source", "first_author",
+                                  "version_relation")
+            return VERDICT_SAME_WORK_VARIANT, m
+        # Preprint SHAPE only, no provenance evidence: not established as a version
+        # family -> route to review as a possible wrong paper, not same-work.
+        m.same_work_reason = "preprint_shape_unconfirmed"
         m.identity_signals = ("preprint_source", "first_author")
+        return VERDICT_WRONG_PAPER, m
+    # PHYSICAL-LOCATION same-work quarantine (F2-C; depends on F2-A). Two distinct
+    # articles cannot occupy the same page range of the same volume of the same
+    # journal. When the CANONICALIZED pages agree AND volume agrees AND journal
+    # agrees, the claimed identifier points at the correct physical article, so a
+    # TITLE divergence is a description defect, not a wrong paper.
+    #
+    # The CONJUNCTION is load-bearing: bare page agreement is weak (ranges like
+    # 1-12 are ubiquitous), and it correctly does NOT fire on PMC8015328:ref011 (a
+    # TRUE_F2 where the DOI agrees but volume and pages do not). first_author_match
+    # is deliberately NOT part of the conjunction -- written_authors is corrupted by
+    # the same defect F2-E fixes.
+    #
+    # Two AFFIRMATIVE distinct-work signals defer to WRONG_PAPER, because a shared
+    # page range then reads as a mis-assembled / coincident citation, not one work:
+    #   * doi_match is False -- both DOIs present and DISAGREE (seed-29 37192094:
+    #     two real BMJ Leader papers, different DOIs, coincident vol 7 pp 266-272);
+    #   * a confident field disagreement (author/year) -- the run-on-DOI adversarial
+    #     rows (shared DOI, unrelated title, different author) stay HIGH.
+    # A physical-location match with neither signal is a description defect on the
+    # same work -> quarantine (audited), never silently cleared.
+    if _physical_location_conjunction(f) and not has_confident_disagreement:
+        m.same_work_reason = "physical_location_same_work"
+        m.identity_signals = ("pages", "volume", "journal")
+        return VERDICT_SAME_WORK_VARIANT, m
+    # RULE C / F2-D revival: one title is a strict word-level extension of the
+    # other, never mere partial coverage.  The ordinary arm retains §11's full
+    # volume/first-author/year not-False conjunction.  Two specified realistic
+    # rows carry a lone bad volume even though exact DOI, venue, year, pages and
+    # first-author all identify the work; that stronger physical-identity arm is
+    # equally review-only and is the only circumstance in which volume=False is
+    # tolerated.  DOI disagreement is never tolerated by either arm.  Series/
+    # part/edition conflicts already hard-returned above.
+    strict_extension = _strict_title_extension(claimed.title, cand.title)
+    ordinary_extension_guard = (
+        f.volume_match is not False
+        and f.first_author_match is not False
+        and f.year_match is not False
+        and f.doi_match is not False
+        and any(v is True for v in (f.volume_match, f.first_author_match,
+                                    f.year_match)))
+    exact_identity_extension_guard = (
+        f.volume_match is False
+        and f.first_author_match is True
+        and f.year_match is True
+        and f.journal_match is True
+        and f.pages_match is True
+        and f.doi_match is True)
+    author_typo_extension_guard = (
+        f.first_author_match is False
+        and f.author_match is False
+        and f.year_match is True
+        and f.journal_match is True
+        and f.volume_match is True
+        and f.pages_match is True
+        and f.doi_match is True)
+    if (_F2D_STRICT_PREFIX_ENABLED and strict_extension
+            and (ordinary_extension_guard or exact_identity_extension_guard
+                 or author_typo_extension_guard)):
+        m.same_work_reason = "strict_prefix_title"
+        m.identity_signals = ("strict_title_extension",
+                              "exact_physical_identity" if
+                              (exact_identity_extension_guard
+                               or author_typo_extension_guard) else
+                              "volume_first_author_year_not_false")
         return VERDICT_SAME_WORK_VARIANT, m
     # A confident disagreement on a NON-identical title is wrong-paper evidence
     # and MUST stay in the HIGH band even when confirmatory field boosts lifted
@@ -595,7 +1413,7 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
     # to a genuine F2 (16639420: +0.05 for the now-parsed matching author pushes
     # its year-mismatched score past accept). Mirrors lookup.compare_and_flag's
     # flag rule; guarantees C1 (never drop a genuine wrong-paper from HIGH).
-    if disagree:
+    if has_confident_disagreement:
         return VERDICT_WRONG_PAPER, m
     # No confident disagreement below the same-work threshold.
     if m.score >= accept:
@@ -695,7 +1513,8 @@ def _json_or_none(resp):
         return None
 
 
-def _crossref_candidates(claimed: Claimed, n: int, session) -> list[RetrievedRecord]:
+def _crossref_candidates(claimed: Claimed, n: int, session,
+                         errors: Optional[list] = None) -> list[RetrievedRecord]:
     query = " ".join(str(p) for p in (
         claimed.title, claimed.authors[0] if claimed.authors else "",
         claimed.year or "", claimed.journal) if p)
@@ -704,9 +1523,13 @@ def _crossref_candidates(claimed: Claimed, n: int, session) -> list[RetrievedRec
                                   {"query.bibliographic": query, "rows": n},
                                   limiter=CROSSREF, timeout=20)
     except requests.RequestException:
+        if errors is not None:
+            errors.append("crossref_candidates")   # transport error, not a miss
         return []
     data = _json_or_none(resp)
     if data is None:
+        if errors is not None:
+            errors.append("crossref_candidates")   # non-200: errored search
         return []
     out = []
     for it in data.get("message", {}).get("items", []) or []:
@@ -715,15 +1538,20 @@ def _crossref_candidates(claimed: Claimed, n: int, session) -> list[RetrievedRec
     return out
 
 
-def _openalex_candidates(claimed: Claimed, n: int, session) -> list[RetrievedRecord]:
+def _openalex_candidates(claimed: Claimed, n: int, session,
+                         errors: Optional[list] = None) -> list[RetrievedRecord]:
     try:
         resp = request_with_retry(session, OPENALEX_URL,
                                   {"search": claimed.title, "per-page": n},
                                   limiter=OPENALEX, timeout=20)
     except requests.RequestException:
+        if errors is not None:
+            errors.append("openalex_candidates")
         return []
     data = _json_or_none(resp)
     if data is None:
+        if errors is not None:
+            errors.append("openalex_candidates")
         return []
     out = []
     for it in data.get("results", []) or []:
@@ -733,17 +1561,19 @@ def _openalex_candidates(claimed: Claimed, n: int, session) -> list[RetrievedRec
 
 
 def retrieve_candidates(claimed: Claimed, n: int = 5,
-                        session: requests.Session | None = None
-                        ) -> list[RetrievedRecord]:
+                        session: requests.Session | None = None,
+                        errors: Optional[list] = None) -> list[RetrievedRecord]:
     """Query Crossref ``query.bibliographic`` and OpenAlex ``search`` and parse
     the top-n of each into ``RetrievedRecord``. Dedup by DOI, then by normalized
     title. Reuses the shared CROSSREF / OPENALEX rate limiters.
 
-    Returns an empty list when both searches error or find nothing -- a network
-    failure is indistinguishable here from a true no-find, and the caller treats
-    "no candidates" as "not confidently matched" (escalate, never F1)."""
-    cands = _crossref_candidates(claimed, n, session) + \
-        _openalex_candidates(claimed, n, session)
+    Returns an empty list when both searches error or find nothing. Pass a list as
+    ``errors`` to DISTINGUISH the two: a transport failure or non-200 appends a
+    marker, so the F2-F cascade can route a thrown request to ``undetermined``
+    (retrieval_incomplete, spec §14.6) instead of conflating it with a clean miss
+    -- a flaky run must not silently shrink the scoreable population."""
+    cands = _crossref_candidates(claimed, n, session, errors=errors) + \
+        _openalex_candidates(claimed, n, session, errors=errors)
 
     deduped: list[RetrievedRecord] = []
     seen_doi: set[str] = set()

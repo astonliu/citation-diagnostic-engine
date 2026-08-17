@@ -43,6 +43,10 @@ _CORPORATE_RE = re.compile(
 _LIVING_SOURCES = ("statpearls", "ncbi bookshelf", "bookshelf")
 _AUTHOR_SUFFIX_ONLY = {"jr", "junior", "sr", "senior", "filho", "neto"}
 _ROMAN_RE = re.compile(r"\b(?:i|ii|iii|iv|v|vi|vii|viii|ix|x)\b", re.I)
+# Dotted ``i.v.`` / ``v.i.`` is a route abbreviation, not two series ordinals.
+# Mask only that abbreviation before extracting Roman tokens: ``I.`` and ``II.``
+# section labels (including the AM1-BCC guard) remain visible to the rule.
+_DOTTED_IV_ABBREVIATION_RE = re.compile(r"\b(?:i\s*\.\s*v|v\s*\.\s*i)\s*\.", re.I)
 # A 4-digit publication/edition year embedded in a title -- used to detect serial
 # annual editions (e.g. "...Statistics-2017 Update" vs "...-2019 Update").
 _TITLE_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
@@ -66,6 +70,21 @@ _GENERIC_TITLES = {
 # (e.g. P1025). An "e"-locator ("e171-232") is an ordinary electronic article
 # and is deliberately NOT matched.
 _SUPPLEMENT_PAGE_RE = re.compile(r"^\s*[SP]\d", re.I)
+# An ABSTRACT locator -- the page field of a non-final lineage node (§15.2). Wider
+# than _SUPPLEMENT_PAGE_RE on purpose, and deliberately NOT the same predicate:
+#   [SP]\d   supplement / poster page   S100, P1025
+#   [E]\d    e-locator                  e46, e022455
+#   \d{1,4}  a bare abstract NUMBER     207   (no end page -- an abstract book's
+#            with an optional letter     207A   running number, not a page RANGE)
+# The two are kept apart because _SUPPLEMENT_PAGE_RE is a page-PARITY predicate
+# (_first_pages_agree: "S344" and "344" are different physical slots), and 2,725
+# claimed rows in the seed-37 frame carry a bare-number page while 1,336 carry an
+# e-page. Widening the parity predicate to cover them was measured to stop
+# ``overwhelming_bibliographic_anchor`` firing on 4 frame rows -- a change to a
+# rule the §24 register fences off (LR-1) -- for no gain, since only the abstract
+# rules need the wider shapes. Verified: an ordinary page RANGE never matches.
+_ABSTRACT_LOCATOR_RE = re.compile(
+    r"^\s*(?:[SP]\d|E\d+[A-Za-z]?\s*$|\d{1,4}[A-Za-z]?\s*$)", re.I)
 # Editorial reprint/republication prefixes a journal prepends to a re-run of an
 # earlier work (e.g. J Immunol "Pillars Article:"; "Classic Article",
 # "Reprinted from"). General series markers, not one journal's brand.
@@ -101,6 +120,30 @@ CONFERENCE_ABSTRACT_CONTENT_COVERAGE_MIN = 0.77
 # study inside a drug's trial family -- its few tokens are trivially covered by ANY
 # sibling trial's full title, so it must not be read as an abstract->full match.
 CONFERENCE_ABSTRACT_MIN_DISTINCTIVE_TOKENS = 6
+# RULE A2: minimum boundary-tolerant content agreement (best of the two
+# directions) required before an exact shared DOI is read as same-work. Set from
+# the adjudicated separation, with margin on both sides: the 21-case
+# false-positive packet floors at 0.833 once boundaries are ignored, while the
+# committed DOI-sharing negatives that are NOT already excluded by a series or
+# organization conflict reach only 0.750 (an adjacent article) and 0.667 (the
+# contaminated-DOI TRUE_F2, PMC8015328:ref011).
+DOI_BOUNDARY_AGREEMENT_MIN = 0.80
+# --- §15.2 version chain -------------------------------------------------------
+# Two records that are nodes of ONE publication lineage (preprint <-> conference
+# paper <-> extended journal version; conference abstract <-> full paper) are the
+# SAME WORK. Identifiers legitimately change between nodes, so DOI/journal/volume/
+# year inequality cannot by itself route such a pair to review_wrong_paper.
+#
+# These floors are LOWER than RULE B's because RULE B must survive the sibling-
+# TRIAL problem (serial trialists publishing different trials with the same core
+# team and a shared drug/disease title template), which it solves with roster
+# containment >= 0.75 AND coverage >= 0.77 AND title >= 0.87. The version chain is
+# a different question -- is the claimed side a non-final NODE of this same work --
+# and it is gated first on an abstract locator or a preprint venue, which no
+# sibling-trial pair carries. The destination is the AUDITED same-work band, never
+# ``match``, so the bar is a routing bar, not an auto-clear bar.
+VERSION_CHAIN_TITLE_MIN = 0.80
+VERSION_CHAIN_ROSTER_MIN = 0.60
 # Fraction of the resolved title's distinctive tokens that must be reconstructable
 # from the claimed author+title fields for RULE E (a true shifted-field artifact
 # splits ONE title across the two slots; a consortium author whose name merely
@@ -134,6 +177,38 @@ def is_distinctive_title(text: str) -> bool:
     value = canonical_title(text)
     tokens = [t for t in value.split() if len(t) >= 3 and t not in _STOP]
     return value not in _GENERIC_TITLES and len(value) >= 18 and len(tokens) >= 2
+
+
+def is_living_source_pair(claimed: ClaimedRef,
+                          resolved: RetrievedRecord) -> bool:
+    """Whether either side identifies an in-place revised living source.
+
+    Source detection is deliberately separate from title comparison.  The
+    written title can contain the trailing ``StatPearls. Treasure Island``
+    container while the venue field is sparse; conversely MEDLINE can put the
+    source in the resolved journal.  No stored field is rewritten.
+    """
+    source = canonical_title(" ".join((
+        claimed.title or "", claimed.journal or "", claimed.raw or "",
+        resolved.title or "", resolved.journal or "",
+    )))
+    return any(token in source for token in _LIVING_SOURCES)
+
+
+_LIVING_TITLE_SUFFIX_RE = re.compile(
+    r"\s*[.:;]\s*(?=(?:statpearls|ncbi\s+bookshelf|bookshelf)\b)", re.I)
+
+
+def strip_living_source_suffix(title: str) -> str:
+    """Return the chapter title before a trailing living-source container.
+
+    This is comparison-time normalization only.  For example,
+    ``Ewing Sarcoma. StatPearls. Treasure`` compares as ``Ewing Sarcoma`` while
+    the artifact continues to emit the original written title verbatim.
+    """
+    value = title or ""
+    parts = _LIVING_TITLE_SUFFIX_RE.split(value, maxsplit=1)
+    return parts[0].strip() if len(parts) > 1 and parts[0].strip() else value
 
 
 def _norm_doi(value: str) -> str:
@@ -212,6 +287,24 @@ def _first_author_aliases(authors: list[str]) -> set[str]:
     # remains position-zero-to-position-zero evidence; it never searches later
     # coauthors.
     aliases = {cleaned, tokens[0], tokens[-1]}
+    # A HYPHENATED compound surname is the same relation as a space-separated one
+    # ("Kost-Alimova" cited as "Alimova", exactly as "Romeo Casabona" is cited as
+    # "Romeo"), but canonical_title collapses an intra-word hyphen to a SINGLE
+    # token ("kostalimova"), so the component never reaches the alias set above.
+    # Split the raw value on hyphens so both spellings of one relation behave the
+    # same way. Position zero only, as everywhere else in this helper.
+    # NOTE (D4, seed 43, 2026-08-12): a hyphenated compound surname is NOT aliased
+    # component-wise here, though a space-separated one is (``tokens[0]`` /
+    # ``tokens[-1]`` below), so "Kost-Alimova" cited as "Alimova" stays a
+    # disagreement. Adding the split was implemented and measured, then WITHHELD:
+    # it moves PMC8114883 into ``match`` while its DOIs CONFIDENTLY disagree,
+    # because ``has_confident_disagreement`` excludes doi_match and first-author
+    # was the only signal holding that row in the audited pool. Dropping a
+    # DOI-disagreeing row out of the review population is a recall loss in the
+    # matcher. Closing the gap belongs in ``has_confident_disagreement`` and is
+    # corpus-wide -- 340 of seed 43's ``match`` rows carry ``doi_match is False``
+    # (0.61%), up to 4x the current review volume -- so it is measured and
+    # authorized separately (§24 LR-5, CONTRADICTIONS#F2-29).
     # Preserve multi-token surname particles (``de la Cruz``, ``van der Berg``)
     # as an additional alias when a provider supplies a leading given name.
     i = len(tokens) - 2
@@ -231,6 +324,13 @@ def _corporate_author_format_key(value: str) -> str:
     expansion, or fuzzy matching: distinct organizations retain distinct keys.
     """
     value = fold_bibliographic_text(value or "").lower()
+    # A COLON-introduced trailing number is a document locator the citing paper
+    # appended to the organization's name, not part of it: the ADA Standards of
+    # Care are cited as "American Diabetes Association Professional Practice
+    # Committee: 3", where 3 is the SECTION. Deliberately requires the colon -- a
+    # BARE trailing number can be the distinguishing designator of a numbered body
+    # ("Working Group 1" vs "Working Group 2"), so it is left in place.
+    value = re.sub(r"\s*:\s*\d+\s*$", "", value)
     # "&" is the typographic form of the conjunction "and" in institutional
     # names; folding it is a formatting equivalence, not a token change.
     value = re.sub(r"[&＆]", " and ", value)
@@ -248,6 +348,271 @@ def _corporate_author_equivalent(claimed: ClaimedRef,
         return False
     a, b = _corporate_author_format_key(left), _corporate_author_format_key(right)
     return bool(a and b and a == b)
+
+
+# A parenthetical acronym that merely GLOSSES the words beside it ("World Medical
+# Association (WMA)", "National Cholesterol Education Program (NCEP) Expert
+# Panel"). Bounded to a single unspaced token so a parenthetical QUALIFIER that
+# names a sub-body ("(Adult Treatment Panel III)") can never match and is kept as
+# real tokens.
+_ACRONYM_GLOSS_RE = re.compile(r"\s*\(\s*([A-Za-z][A-Za-z.&\-]{1,15})\s*\)")
+
+
+def _strip_acronym_gloss(value: str) -> str:
+    """Remove a parenthetical acronym whose letters are the initials of the tokens
+    immediately before (or after) it -- the expansion is present in the SAME
+    string, so the acronym adds no information and is pure typography.
+
+    This is deliberately NOT acronym EXPANSION: "AAP Committee on Nutrition" vs
+    "American Academy of Pediatrics Committee on Nutrition" carries its expansion
+    in the OTHER string, replacing tokens, and is left untouched (it stays a
+    genuine token change -- see
+    ``test_corporate_abbreviation_is_a_token_change_and_stays_high``).
+    """
+    text = value or ""
+
+    def repl(match: "re.Match[str]") -> str:
+        letters = re.sub(r"[^a-z]", "", match.group(1).lower())
+        if len(letters) < 2:
+            return match.group(0)
+        before = re.sub(r"[^\w\s]", " ", text[:match.start()]).split()
+        after = re.sub(r"[^\w\s]", " ", text[match.end():]).split()
+        for words in (before[-len(letters):], after[:len(letters)]):
+            if (len(words) == len(letters)
+                    and "".join(w[0].lower() for w in words) == letters):
+                return " "
+        return match.group(0)
+
+    return _ACRONYM_GLOSS_RE.sub(repl, text)
+
+
+def _corporate_name_tokens(value: str) -> list[str]:
+    return _corporate_author_format_key(_strip_acronym_gloss(value)).split()
+
+
+def _corporate_token_equivalent(left: str, right: str, *, terminal: bool) -> bool:
+    """Whether two institutional-name tokens are the SAME word."""
+    if left == right:
+        return True
+    # A spelling/localization variant of one word ("anaesthesiologists" vs
+    # "anesthesiologists", 0.985). Threshold RAISED 0.92 -> 0.95: at 0.92 it wrongly
+    # equated the DISTINCT first tokens "international" / "interventional" (0.9227),
+    # clearing two different societies as one; the genuine spelling variant (0.985)
+    # is well above 0.95, and "national" / "international" (0.789) is far below.
+    if (min(len(left), len(right)) >= 6
+            and JaroWinkler.similarity(left, right) >= 0.95):
+        return True
+    # JATS truncates the FINAL token of a long institutional name ("...Committee
+    # on Taxonomy of, V" for "...on Taxonomy of Viruses"). Allowed at the closing
+    # token only, and ONLY when the longer token is a genuine truncated WORD
+    # (length >= 5) -- so short alphanumeric group designators are NOT equated
+    # ("Group A" vs "Group AB": "a"/"ab" are distinct groups, not a truncation).
+    return (terminal and bool(left and right)
+            and max(len(left), len(right)) >= 5
+            and (left.startswith(right) or right.startswith(left)))
+
+
+def _corporate_name_contained(inner: list[str], outer: list[str]) -> bool:
+    """Whether ``inner`` occurs as a CONTIGUOUS run inside ``outer``."""
+    if not inner or len(inner) > len(outer):
+        return False
+    last = len(inner) - 1
+    return any(
+        all(_corporate_token_equivalent(inner[i], outer[start + i],
+                                        terminal=(i == last))
+            for i in range(len(inner)))
+        for start in range(len(outer) - len(inner) + 1))
+
+
+def _corporate_names_conflict(claimed: ClaimedRef,
+                              resolved: RetrievedRecord) -> bool:
+    """AFFIRMATIVE evidence that two institutional authors are DIFFERENT bodies.
+
+    Absence of a format-key match is not that evidence: a parenthetical acronym,
+    a truncated trailing token, or periods where commas belong are one
+    organization written two ways.
+
+    Containment is NOT identity. Two names where neither contains the other
+    conflict outright ("National" vs "International" Committee for Pediatric Care).
+    Two names in a strict CONTAINMENT relation -- one carrying EXTRA distinctive
+    tokens ("American Academy of Pediatrics" vs "...Committee on Nutrition") -- are
+    the same body only when they cite the SAME document, which shows up as an
+    IDENTICAL title; when the titles diverge, the extra tokens distinguish a parent
+    from its subunit's different work, and that is a conflict. Equal-length mutual
+    containment is identity ("World Medical Association (WMA)" vs "World Medical
+    Association") and never conflicts.
+    """
+    left = _corporate_name_tokens(claimed.authors[0] if claimed.authors else "")
+    right = _corporate_name_tokens(resolved.authors[0] if resolved.authors else "")
+    if not left or not right:
+        return True
+    if not (_corporate_name_contained(left, right)
+            or _corporate_name_contained(right, left)):
+        return True                      # neither contains the other -> conflict
+    if len(left) == len(right):
+        return False                     # equal length + contained = identity
+    # Strict containment: one name has EXTRA distinctive tokens. Same body only if
+    # the titles are identical (canonical form); divergent titles -> conflict.
+    ct, rt = canonical_title(claimed.title), canonical_title(resolved.title)
+    return not (ct != "" and ct == rt)
+
+
+def _distinct_organizations(claimed: ClaimedRef,
+                            resolved: RetrievedRecord) -> bool:
+    """Affirmative evidence that two INSTITUTIONAL authors are different bodies.
+
+    Deliberately narrower than ``_corporate_names_conflict``, and used only on the
+    DOI-anchored path. That predicate treats a strict containment with divergent
+    titles as a conflict, which is right when the only evidence is the strings --
+    a parent body's document is not its subunit's different document. When an exact
+    DOI already pins ONE record, the remaining question is just "are these two
+    different organizations", and the answer is: only if the SHORTER name carries a
+    token the longer one cannot account for. Extra tokens on the longer name are the
+    ordinary case (a truncated or partially-parsed institutional name), never
+    evidence of a second body.
+
+    False for a non-institutional pair, so the DOI path is unaffected by it.
+    """
+    left_raw = claimed.authors[0] if claimed.authors else ""
+    right_raw = resolved.authors[0] if resolved.authors else ""
+    if not (_CORPORATE_RE.search(left_raw) and _CORPORATE_RE.search(right_raw)):
+        return False
+    left = _corporate_name_tokens(left_raw)
+    right = _corporate_name_tokens(right_raw)
+    if not left or not right:
+        return True
+    short, long = (left, right) if len(left) <= len(right) else (right, left)
+    return any(
+        not any(_corporate_token_equivalent(s, l, terminal=False) for l in long)
+        for s in short)
+
+
+def _doi_anchored_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
+                            title_similarity: float):
+    """RULE A2 -- exact shared DOI read against the citation's slots as a WHOLE.
+
+    RULE A requires the first-author POSITION to agree and a NEAR-IDENTICAL title,
+    so it cannot see the dominant false-positive shape: a reference whose
+    author/title/journal BOUNDARY was parsed in the wrong place. One misplaced
+    boundary makes the author, the title and the journal each look wrong, and the
+    matcher then counts three "independent" disagreements that are really one
+    parsing fault -- a group author left in the title slot, or the journal name
+    swallowed into it.
+
+    An exact DOI is a globally-unique work identifier, so it is treated here as
+    overwhelming. Five affirmative counter-signals still refute it, each
+    load-bearing against a committed negative:
+      * a series/edition conflict (annual editions sharing a run-on DOI);
+      * two genuinely DIFFERENT organizations (National vs International Committee
+        for Pediatric Care; "AAP" vs "American Academy of Pediatrics");
+      * a roster the citation contradicts outright -- the report-vs-article
+        carriers 14741909 and 34249371, whose CONTENT matches almost perfectly but
+        whose author lists have nothing in common;
+      * a supplement/article locator mismatch: a meeting abstract at S344 and the
+        article at 344-352 are different physical slots of one volume, so a shared
+        DOI is a carrier, not proof;
+      * content that agrees in NEITHER direction, which is what a contaminated DOI
+        looks like (PMC8015328:ref011, Paurodontella persica vs compostiocola,
+        0.667; an adjacent article, 0.750).
+    A version-chain node is left to §15.2's rule, which names the relation more
+    precisely than "shared DOI" does.
+
+    Returns evidence or None. The destination is the AUDITED same-work band, never
+    ``match``: a shared DOI is strong enough to lift a row out of the wrong-paper
+    band, not to clear it.
+    """
+    if not doi_equivalent(claimed.claimed_doi, resolved.doi):
+        return None
+    if _series_conflict(claimed.title, resolved.title):
+        return None
+    if _distinct_organizations(claimed, resolved):
+        return None
+    if _roster_contradicted(claimed, resolved):
+        return None
+    if _is_supplement_locator(claimed.pages) != _is_supplement_locator(resolved.pages):
+        return None
+    if version_chain_same_work(claimed, resolved, title_similarity=title_similarity,
+                               preprint_source=False):
+        return None
+    if _boundary_tolerant_agreement(claimed, resolved) < DOI_BOUNDARY_AGREEMENT_MIN:
+        return None
+    return WorkIdentityEvidence(True, "shared_doi_same_work",
+                                ("exact_doi", "boundary_tolerant_content",
+                                 "agreement>=%.2f" % DOI_BOUNDARY_AGREEMENT_MIN))
+
+
+def _roster_contradicted(claimed: ClaimedRef, resolved: RetrievedRecord) -> bool:
+    """The resolved roster shares NO name with anything the citation says.
+
+    This is the guard that keeps the DOI path off the report-vs-article carriers:
+    a citation naming a DOCUMENT ("WHO", "NICE") whose DOI resolves to a journal
+    piece ABOUT that document has near-identical CONTENT but a completely
+    different roster (seed 29: 14741909 "WHO" -> a Letter by Guilbert; 34249371
+    NICE -> a 15-author article). Content agreement cannot separate those from a
+    boundary shift; the roster can.
+
+    Names are looked for across the citation's author AND title slots, so a
+    roster displaced into the title by the very boundary shift this path exists
+    to tolerate still counts (PMC9374052: the author slot holds "BJ" while the
+    title slot holds "Singh D, Madrigal A, ..."). Returns False when either side
+    has no usable roster -- absence of evidence is not contradiction.
+    """
+    resolved_names = _slot_tokens(*(resolved.authors or []))
+    if not resolved_names:
+        return False
+    claimed_side = _slot_tokens(*(list(claimed.authors or []) + [claimed.title or ""]))
+    if not claimed_side:
+        return False
+    return not (resolved_names & claimed_side)
+
+
+def _slot_tokens(*parts: str) -> set:
+    """Distinctive tokens of a citation slot group, boundaries ignored."""
+    return {t for t in canonical_title(" ".join(p or "" for p in parts)).split()
+            if len(t) >= 4 and t not in _STOP}
+
+
+def _boundary_tolerant_agreement(claimed: ClaimedRef,
+                                 resolved: RetrievedRecord) -> float:
+    """How well the two records agree on CONTENT once slot boundaries are ignored.
+
+    Each title is scored against the UNION of the other record's author, title and
+    journal text, so a title that leaked into the author or journal slot (or a
+    group author left in the title) still matches -- one boundary shift stops
+    producing several apparently independent field disagreements.
+
+    The BEST of the two directions is returned, because the two failure shapes are
+    asymmetric: a citing paper often abbreviates a long title down to a fragment
+    (PMC13189598, "Late stent thrombosis" for a paper whose full title runs 20
+    words -- forward coverage 0.231, reverse 1.000), and just as often pads a short
+    title with the journal name. Requiring both directions would reject the very
+    cases this is for; requiring either keeps a contaminated DOI out, because those
+    disagree in BOTH directions.
+    """
+    w_title, r_title = _slot_tokens(claimed.title), _slot_tokens(resolved.title)
+    w_union = _slot_tokens(claimed.title, claimed.journal, *(claimed.authors or []))
+    r_union = _slot_tokens(resolved.title, resolved.journal, *(resolved.authors or []))
+    forward = len(r_title & w_union) / len(r_title) if r_title else 0.0
+    reverse = len(w_title & r_union) / len(w_title) if w_title else 0.0
+    return max(forward, reverse)
+
+
+def _corporate_physically_sufficient(claimed: ClaimedRef,
+                                     resolved: RetrievedRecord) -> bool:
+    """PHYSICAL proof that two records are the same work, independent of how the
+    institutional author is spelled: an exact shared DOI, or agreement on the
+    full physical slot (venue AND volume AND first page AND year).
+
+    Format-key equality is a convenience, never the proof -- string shape alone
+    must not be read as "same organization".
+    """
+    if doi_equivalent(claimed.claimed_doi, resolved.doi):
+        return True
+    return bool(claimed.year and resolved.year
+                and int(claimed.year) == int(resolved.year)
+                and journal_equivalent(claimed.journal, resolved.journal)
+                and _volume_agrees(claimed, resolved)
+                and _first_pages_agree(claimed, resolved))
 
 
 def first_author_equivalent(claimed: ClaimedRef, resolved: RetrievedRecord) -> bool:
@@ -342,10 +707,95 @@ def _edition_ordinals(title: str) -> set[int]:
     return out
 
 
+#: A roman numeral counts as a SERIES ORDINAL only in series context. `_ROMAN_RE`
+#: alone matches a bare i, v or x anywhere in a title, which is how "X-ray" and the
+#: hybrid-binomial "Populus x canadensis" came to be read as ordinals and forced
+#: same-work pairs to wrong-paper.
+#:
+#: (a) preceded by a series keyword, or (b) segment-initial AND closed by '.' or
+#: ':' -- the shape a real ordinal actually takes ("Part II.", ": I. The decision
+#: scheme"). A letter buried mid-phrase is not an ordinal.
+_SERIES_KEYWORD_ROMAN_RE = re.compile(
+    r"\b(?:part|pt|no|number|vol|volume|chapter|chap|section|sect|series|book)\.?\s+"
+    r"(i|ii|iii|iv|v|vi|vii|viii|ix|x)\b", re.I)
+_SEGMENT_INITIAL_ROMAN_RE = re.compile(
+    r"(?:^|[:;.–—-])\s*(i|ii|iii|iv|v|vi|vii|viii|ix|x)\s*[.:]\s", re.I)
+
+
+def _roman_series_ordinals(title: str) -> set[str]:
+    """Roman ordinals in SERIES CONTEXT only. Raw title, after the dotted-i.v. mask
+    exactly as before."""
+    text = _DOTTED_IV_ABBREVIATION_RE.sub(" ", title or "")
+    out = {m.group(1).lower() for m in _SERIES_KEYWORD_ROMAN_RE.finditer(text)}
+    out |= {m.group(1).lower() for m in _SEGMENT_INITIAL_ROMAN_RE.finditer(text)}
+    return out
+
+
+def _roman_stems(title: str) -> "list[tuple[str, str]]":
+    """``(token, stem)`` for every roman occurrence, stem = the raw text before it.
+
+    Ungated on purpose: this is the SECOND part of the rule, catching a series pair
+    whose ordinals sit outside the shapes above but whose surrounding text is
+    otherwise the same title."""
+    text = _DOTTED_IV_ABBREVIATION_RE.sub(" ", title or "")
+    return [(m.group(0).lower(), text[:m.start()]) for m in _ROMAN_RE.finditer(text)]
+
+
+def _roman_stem_conflict(claimed_title: str, resolved_title: str) -> bool:
+    """Conflict when an ordinal present on ONE side only sits on a near-identical
+    stem on the other.
+
+    UNMATCHED-ONLY IS LOAD-BEARING. An earlier revision compared every cross-pair
+    with ``ta != tb``, including ordinals present on BOTH sides, and added 43 rows
+    to review_wrong_paper frame-wide; under this form 0 of those 43 fire. An
+    ordinal appearing on both sides is shared context, not a discriminator."""
+    left, right = _roman_stems(claimed_title), _roman_stems(resolved_title)
+    if not left or not right:
+        return False
+    left_tokens = {t for t, _ in left}
+    right_tokens = {t for t, _ in right}
+    # DEFERRED import, and it has to be: biblio_match imports THIS module at load
+    # time, so a module-level import would be circular. _pair_sim and
+    # normalize_title are the functions the 0.96 floor was calibrated against --
+    # substituting work_identity's own JaroWinkler would be a different scale and
+    # would silently invalidate the frame-wide measurement behind this rule. By the
+    # time this runs (from flag_verdict) biblio_match is fully loaded.
+    from .biblio_match import _pair_sim, normalize_title
+
+    for ta, stem_a in left:
+        if ta in right_tokens:
+            continue                      # present on both sides -> not a discriminator
+        for tb, stem_b in right:
+            if tb in left_tokens:
+                continue
+            if _pair_sim(normalize_title(stem_a), normalize_title(stem_b)) >= 0.96:
+                return True
+    return False
+
+
+def roman_conflict_suppressed(claimed_title: str, resolved_title: str) -> bool:
+    """True when the OLD ungated roman rule would have fired and the gated one
+    does not -- i.e. C1 is what took this row out of the wrong-paper band.
+
+    C5 needs this: a row that only stopped conflicting because a bare ``i``/``v``/
+    ``x`` no longer counts as an ordinal must not thereby CLEAR to ``match``. The
+    gate removed a false signal; it did not establish that the two are the same
+    work."""
+    def ungated(title):
+        text = _DOTTED_IV_ABBREVIATION_RE.sub(" ", title or "")
+        return {t.lower() for t in _ROMAN_RE.findall(text)}
+    a, b = ungated(claimed_title), ungated(resolved_title)
+    if not (a and b and a != b):
+        return False                       # the old rule would not have fired
+    return not _series_conflict(claimed_title, resolved_title)
+
+
 def _series_conflict(claimed_title: str, resolved_title: str) -> bool:
-    a = {x.lower() for x in _ROMAN_RE.findall(claimed_title or "")}
-    b = {x.lower() for x in _ROMAN_RE.findall(resolved_title or "")}
+    a = _roman_series_ordinals(claimed_title)
+    b = _roman_series_ordinals(resolved_title)
     if a and b and a != b:
+        return True
+    if _roman_stem_conflict(claimed_title, resolved_title):
         return True
     # Serial annual/periodic editions differ only by an embedded 4-digit year
     # ("...Statistics-2017 Update" vs "...-2019 Update"; "Standards of Care-2019"
@@ -376,8 +826,19 @@ def _derivative_block(claimed: ClaimedRef, resolved: RetrievedRecord) -> str:
         return "series_ordinal_conflict"
     left_raw = claimed.authors[0] if claimed.authors else ""
     right_raw = resolved.authors[0] if resolved.authors else ""
+    # A corporate-author conflict is AFFIRMATIVE two-organization evidence, so the
+    # block is NOT raised merely because the format keys differ. It is lifted only
+    # when BOTH hold: the two names are not in conflict (neither carries a
+    # distinctive word the other cannot account for), AND the pair is physically
+    # proven to be one work (exact shared DOI, or venue+volume+first-page+year).
+    # Either condition alone is insufficient -- the National vs International
+    # Committee for Pediatric Care pair shares a run-on DOI and stays blocked on
+    # the name conflict, while a merely similar-looking name with no physical
+    # anchor stays blocked for want of proof.
     if (_CORPORATE_RE.search(left_raw) and _CORPORATE_RE.search(right_raw)
-            and not _corporate_author_equivalent(claimed, resolved)):
+            and not _corporate_author_equivalent(claimed, resolved)
+            and not (not _corporate_names_conflict(claimed, resolved)
+                     and _corporate_physically_sufficient(claimed, resolved))):
         return "corporate_author_conflict"
     ct, rt = canonical_title(claimed.title), canonical_title(resolved.title)
     return ""
@@ -567,6 +1028,12 @@ def _is_supplement_locator(pages: str) -> bool:
     return bool(_SUPPLEMENT_PAGE_RE.match(pages or ""))
 
 
+def is_abstract_locator(pages: str) -> bool:
+    """The page field reads as an ABSTRACT locator rather than an article page
+    range -- a supplement/poster page, an e-locator, or a bare abstract number."""
+    return bool(_ABSTRACT_LOCATOR_RE.match(pages or ""))
+
+
 def _is_reprint_record(resolved: RetrievedRecord) -> bool:
     """The resolved record is an editorial reprint/republication of an earlier
     work: a reprint title prefix OR a MEDLINE reprint publication type."""
@@ -630,6 +1097,86 @@ def _roster_containment(claimed: ClaimedRef, resolved: RetrievedRecord) -> float
     return len(ca & ra) / len(ca)
 
 
+def _lineage_surname_set(authors: list[str]) -> set[str]:
+    """Surname proxies for a lineage roster, WITHOUT ``_surname_set``'s >=4-char
+    floor.
+
+    That floor silently drops every short romanized surname -- Mao, Li, Xie, Lau,
+    Liu, Sun, Hu, Ma -- so ``_roster_containment`` reads 0.00 for an all-short
+    roster that in fact matches perfectly (PMC12733676:B29: Mao/Li/Xie/Lau against
+    Mao/Li/Xie/Lau/Wang/Smolley). ``_surname_set`` is left alone because it feeds
+    RULE B, whose thresholds were calibrated against its output; changing it would
+    move that rule frame-wide. Recorded as a defect of ``_surname_set`` in its own
+    right -- the blindness is systematic for CJK-romanized names.
+    """
+    out: set[str] = set()
+    for a in authors or []:
+        for t in canonical_title(a).split():
+            if len(t) >= 2:
+                out.add(t)
+    return out
+
+
+def _lineage_roster_containment(claimed: ClaimedRef,
+                                resolved: RetrievedRecord) -> float:
+    ca, ra = _lineage_surname_set(claimed.authors), _lineage_surname_set(resolved.authors)
+    if not ca or not ra:
+        return 0.0
+    return len(ca & ra) / len(ca)
+
+
+def version_chain_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
+                            title_similarity: float,
+                            preprint_source: bool) -> bool:
+    """§15.2: whether the pair are two nodes of ONE publication lineage.
+
+    Gated first on the claimed side reading as a NON-FINAL node -- an abstract
+    locator or a preprint venue. That gate is what separates this rule from RULE
+    B's hard case: the sibling-TRIAL family (serial trialists running different
+    trials with one core team and a shared drug/disease title template). Then one
+    of two routes must establish the lineage:
+
+      ROUTE 1 (shared identifier across nodes). The claimed abstract record
+      carries the FULL PAPER's DOI -- the venue, volume and pages all differ
+      because they are different nodes, but the identifier is the same work's
+      (PMC9829249:R20: an Atherosclerosis abstract at e46 carrying the JACC
+      paper's DOI). An exact DOI agreement across a node boundary is direct
+      lineage evidence and needs no content threshold beyond a title floor.
+
+      ROUTE 2 (content lineage). No shared identifier, so the claim rests on
+      content: this is RULE B's evidence with its TITLE and ROSTER floors relaxed
+      (0.87 -> 0.80, 0.75 -> 0.60), because a lineage node is routinely retitled
+      and re-rostered between the abstract and the paper, while RULE B's other two
+      guards are kept AT FULL STRENGTH. Those two are what exclude the sibling
+      trials, and relaxing them is what made the first draft of this rule swallow
+      the whole adversarial-hardening negative set:
+        * distinctive-token count >= 6 excludes a generic abstract title
+          ("Empagliflozin in heart failure", 3 tokens) that ANY sibling's full
+          title trivially covers;
+        * content coverage >= 0.77 excludes a sibling whose population/endpoint
+          qualifier diverges (DAPA-HF "Reduced" vs "Mildly Reduced or Preserved"
+          scores 0.75).
+
+    Identifier DISAGREEMENT is not a conjunct of either route: changing
+    identifiers is the defining property of a lineage, not evidence against it.
+
+    ``preprint_source`` is passed in rather than computed here: the preprint
+    predicates live in biblio_match, which imports this module.
+    """
+    if not (is_abstract_locator(claimed.pages) or preprint_source):
+        return False
+    if title_similarity < VERSION_CHAIN_TITLE_MIN:
+        return False
+    if _lineage_roster_containment(claimed, resolved) < VERSION_CHAIN_ROSTER_MIN:
+        return False
+    if doi_equivalent(claimed.claimed_doi, resolved.doi):
+        return True                                          # ROUTE 1
+    return (len(_distinctive_title_tokens(claimed.title))
+            >= CONFERENCE_ABSTRACT_MIN_DISTINCTIVE_TOKENS
+            and _abstract_content_coverage(claimed, resolved)
+            >= CONFERENCE_ABSTRACT_CONTENT_COVERAGE_MIN)     # ROUTE 2
+
+
 def _distinctive_title_tokens(title: str) -> set[str]:
     return {t for t in canonical_title(title).split() if len(t) >= 4 and t not in _STOP}
 
@@ -665,11 +1212,15 @@ def _reprint_recites_original(claimed: ClaimedRef, resolved: RetrievedRecord) ->
 
 
 def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
-                     title_similarity: float) -> WorkIdentityEvidence:
+                     title_similarity: float,
+                     living_source: bool | None = None) -> WorkIdentityEvidence:
     """Return a proof-backed same-work/ambiguous-family reason, if one exists."""
     ct, rt = canonical_title(claimed.title), canonical_title(resolved.title)
     if not ct or not rt:
         return WorkIdentityEvidence(False)
+
+    if living_source is None:
+        living_source = is_living_source_pair(claimed, resolved)
 
     # RULE A (exact shared DOI). A DOI is a globally unique work identifier: an
     # exact match on it, with the first-author POSITION agreeing and a
@@ -692,7 +1243,56 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
 
     blocked = _derivative_block(claimed, resolved)
     if blocked:
+        # A corporate-author conflict is not decisive against an EXACT shared DOI
+        # when the two institutional names are not different bodies. RULE A2 is
+        # offered the row HERE rather than letting it fall through to the ordinary
+        # rules -- falling through would let the institutional-document rules clear
+        # a parent body's work against its committee's DIFFERENT work (AAP
+        # "Dietary guidance for infants" vs "...for children", one shared DOI).
+        if blocked == "corporate_author_conflict":
+            anchored = _doi_anchored_same_work(claimed, resolved,
+                                               title_similarity=title_similarity)
+            if anchored is not None:
+                return anchored
         return WorkIdentityEvidence(False, blocked_by=blocked)
+
+    # Living NCBI chapters are revised in place.  Their publisher/current-revision
+    # year is not the date the citing author read, and a trailing source/city
+    # segment has already been stripped on the comparison-time copies.  Route the
+    # exact/containment shape before generic title identity so every firing keeps
+    # the named, auditable living-source reason.
+    if (living_source
+            and ((first_author_equivalent(claimed, resolved)
+                  and len(ct.split()) >= 2 and (ct in rt or rt in ct))
+                 or ct == rt)):
+        return WorkIdentityEvidence(True, "living_chapter_revision",
+                                    ("living_source",
+                                     "first_author" if first_author_equivalent(
+                                         claimed, resolved) else "exact_title",
+                                     "title_containment"))
+
+    # RULE A2 (exact shared DOI + boundary-tolerant content). RULE A above requires
+    # the first-author POSITION to agree and a near-identical TITLE, so it cannot
+    # see the dominant false-positive shape: a reference whose author/title/journal
+    # BOUNDARY was parsed in the wrong place. One misplaced boundary makes the
+    # author, the title and the journal each look wrong, and the matcher then counts
+    # three "independent" disagreements that are really one parsing fault -- e.g. a
+    # group author left in the title slot, or the journal name swallowed into it.
+    #
+    # An exact DOI is a globally-unique work identifier, so it is treated here as
+    # overwhelming evidence, checked against the citation's slots as a WHOLE rather
+    # than field by field (_boundary_tolerant_agreement). Three affirmative
+    # counter-signals still refute it, and each is load-bearing against a committed
+    # negative:
+    #   * a series/edition conflict  (annual editions sharing a run-on DOI);
+    #   * two genuinely DIFFERENT organizations (National vs International
+    #     Committee for Pediatric Care; "AAP" vs "American Academy of Pediatrics");
+    #   * content that does not agree in EITHER direction, which is what a
+    #     contaminated DOI looks like (PMC8015328:ref011, Paurodontella persica vs
+    #     compostiocola, scores 0.667; an adjacent article scores 0.750).
+    # The destination is the AUDITED same-work band, never ``match``: a shared DOI
+    # is strong enough to lift a row out of the wrong-paper band, not to auto-clear
+    # it (§16.2).
     first_author = first_author_equivalent(claimed, resolved)
     first_author_typo = _first_author_typo(claimed, resolved)
     author_overlap = _author_overlap(claimed, resolved)
@@ -884,7 +1484,7 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
     # out -- its few tokens are trivially covered by any sibling trial's full title
     # (the coverage guard is necessarily asymmetric, since a genuine full paper adds
     # a subtitle), so specificity is required to disambiguate a drug's trial family.
-    if (_is_supplement_locator(claimed.pages)
+    if (is_abstract_locator(claimed.pages)
             and len(_distinctive_title_tokens(claimed.title)) >= CONFERENCE_ABSTRACT_MIN_DISTINCTIVE_TOKENS
             and _roster_containment(claimed, resolved) >= CONFERENCE_ROSTER_CONTAINMENT_MIN
             and _abstract_content_coverage(claimed, resolved) >= CONFERENCE_ABSTRACT_CONTENT_COVERAGE_MIN
@@ -932,16 +1532,6 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
         return WorkIdentityEvidence(True, "corporate_title_prefix",
                                     ("institutional_document", "corporate_prefix"))
 
-    # Living NCBI chapters are revised in place and may be renamed between dates.
-    source = canonical_title(claimed.journal + " " + resolved.journal)
-    gap = abs((claimed.year or 0) - (resolved.year or 0)) if claimed.year and resolved.year else 99
-    if (any(token in source for token in _LIVING_SOURCES) and gap <= 3
-            and ((first_author and len(ct.split()) >= 2 and ct in rt) or ct == rt)):
-        return WorkIdentityEvidence(True, "living_chapter_revision",
-                                    ("living_source",
-                                     "first_author" if first_author else "exact_title",
-                                     "title_containment"))
-
     # Institutional declarations/guidelines with the same venue and several
     # distinctive anchors are edition-family ambiguity, not HIGH-confidence F2.
     shared = _distinctive_shared_tokens(claimed.title, resolved.title)
@@ -967,5 +1557,13 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
         return WorkIdentityEvidence(True, "single_token_metadata_typo",
                                     ("first_author", "journal",
                                      "locator" if locator else "year_transposition"))
+
+    # RULE A2 as a LAST RESORT, deliberately after every specific rule so it
+    # changes no existing reason code: it only ever converts a row that would
+    # otherwise fall through to wrong-paper.
+    anchored = _doi_anchored_same_work(claimed, resolved,
+                                       title_similarity=title_similarity)
+    if anchored is not None:
+        return anchored
 
     return WorkIdentityEvidence(False)
