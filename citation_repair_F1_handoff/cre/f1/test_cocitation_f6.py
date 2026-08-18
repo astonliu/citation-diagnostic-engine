@@ -31,6 +31,7 @@ import json
 import pytest
 
 from . import cocitation as cc
+from . import adjudication_packet as ap
 from . import judgment_band as jb
 from . import judgment_run as jr
 from .judgment_engine import (ClaimSupport, DiscriminatorContractError,
@@ -808,18 +809,34 @@ def test_orchestrator_record_carries_range_expansion_provenance(tmp_path):
         _article(refs, [f"A collectively cited claim {_dash_range(1, 4)}."]),
         encoding="utf-8")
     out = tmp_path / "out"
-    jr.run_natural_judgment(
+    manifest = jr.run_natural_judgment(
         str(xml_dir), str(out),
         extractor=lambda _s: [CLAIM_A],
-        coverage_judge=lambda claims, _ev: [SUPPORTS for _ in claims],
+        coverage_judge=lambda claims, _ev: [CONTRADICTS for _ in claims],
         fetch_abstract=lambda pmid: f"Abstract {pmid}.",
         preband_disposition={f"PMC1000:B{i}": "cleared" for i in range(1, 5)})
-    rows = {json.loads(l)["citation_id"]: json.loads(l) for l in
-            (out / "judgment_predictions.jsonl").read_text().splitlines()}
+    ordered_rows = [json.loads(line) for line in
+                    (out / "judgment_predictions.jsonl").read_text().splitlines()]
+    rows = {row["citation_id"]: row for row in ordered_rows}
     inferred = ["PMC1000:B2", "PMC1000:B3"]
     for cid, rec in rows.items():
         assert rec["citance_group_inferred_members"] == inferred
         assert rec["citance_marker_inferred"] is (cid in inferred)
+
+    # The same provenance must survive the final human-readable instrument.
+    # The fixture runner is intentionally non-production and therefore leaves
+    # model/code identity blank; fill only those header facts for this offline
+    # renderer test rather than weakening the packet's production guard.
+    manifest.update(model="offline-fixture", effort="offline",
+                    code_commit="fixture-commit")
+    packet = ap.build_packet(ordered_rows, manifest)
+    row = next(row for row in packet["rows"]
+               if row["citation_id"] == "PMC1000:B1")
+    assert row["co_cited_siblings"] == [
+        {"citation_id": "PMC1000:B2", "provenance": "inferred"},
+        {"citation_id": "PMC1000:B3", "provenance": "inferred"},
+        {"citation_id": "PMC1000:B4", "provenance": "asserted"},
+    ]
 
 
 def test_orchestrator_still_predicts_f6_when_no_sibling_covers(tmp_path,
