@@ -111,6 +111,7 @@ _DASHES = r"\-‐‑‒–—―"
 #: A numeric marker: one number, or several joined inside a single <xref>.
 _NUMERIC_MARKER_RE = re.compile(rf"^\d+(?:\s*[,{_DASHES}]\s*\d+)*$")
 _HAS_LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
+_BARE_YEAR_RE = re.compile(r"^(?:19|20)\d{2}$")
 
 
 def detect_citation_style(marker_texts) -> str:
@@ -128,6 +129,10 @@ def detect_citation_style(marker_texts) -> str:
               if isinstance(t, str) and t.strip()]
     if not labels:
         return CITATION_STYLE_UNKNOWN
+    # JATS commonly puts only the year inside xref and leaves the surname in
+    # prose. Marker shape alone cannot distinguish that from a numeric style.
+    if any(_BARE_YEAR_RE.match(label) for label in labels):
+        return CITATION_STYLE_AUTHOR_YEAR
     if all(_NUMERIC_MARKER_RE.match(label) for label in labels):
         return CITATION_STYLE_NUMERIC
     if any(_HAS_LETTER_RE.search(label) for label in labels):
@@ -509,11 +514,14 @@ def new_counts() -> dict:
         "claims_asked": 0,
         "claims_not_asked": 0,
         "claims_assessed_negative": 0,
+        "claims_model_assessed": 0,
         "fallback_reasons": {},
         "citation_style_documents": {},
         "multi_cluster_sentences": 0,
         "marker_bearing_sentences": 0,
         "multi_reference_sentences": 0,
+        "positional_multi_reference_sentences": 0,
+        "positional_multi_cluster_sentences": 0,
         "cluster_count_distribution": {},
     }
 
@@ -536,12 +544,17 @@ def manifest_block(counts: dict) -> dict:
         "claims_asked": counts["claims_asked"],
         "claims_not_asked": counts["claims_not_asked"],
         "claims_assessed_negative": counts["claims_assessed_negative"],
+        "claims_model_assessed": counts["claims_model_assessed"],
         "fallback_reasons": dict(sorted(counts["fallback_reasons"].items())),
         "citation_style_documents": dict(sorted(
             counts["citation_style_documents"].items())),
         "marker_bearing_sentences": counts["marker_bearing_sentences"],
         "multi_reference_sentences": counts["multi_reference_sentences"],
         "multi_cluster_sentences": counts["multi_cluster_sentences"],
+        "positional_multi_reference_sentences":
+            counts["positional_multi_reference_sentences"],
+        "positional_multi_cluster_sentences":
+            counts["positional_multi_cluster_sentences"],
         "cluster_count_distribution": dict(sorted(
             counts["cluster_count_distribution"].items(),
             key=lambda kv: int(kv[0]))),
@@ -556,9 +569,11 @@ def manifest_block(counts: dict) -> dict:
             "applies only to numeric-marker documents; an "
             "author-year document and any sentence whose claims could not all be "
             "attributed keep whole-sentence behaviour, counted under "
-            "fallback_reasons. multi_cluster_sentences over "
-            "multi_reference_sentences is this run's equivalent of the 76/274 "
-            "(27.7%) measured over corpus_frozen_v1 on 2026-08-16."
+            "fallback_reasons. The comparable numeric-only population is "
+            "positional_multi_cluster_sentences over "
+            "positional_multi_reference_sentences; the all-style counters are "
+            "reported separately and must not be compared with the 76/274 "
+            "numeric-only baseline."
         ),
     }
 
@@ -594,11 +609,15 @@ def tally_document(counts: dict, refs) -> None:
         if seen["members"] < 2:
             continue
         counts["multi_reference_sentences"] += 1
+        if style == CITATION_STYLE_NUMERIC:
+            counts["positional_multi_reference_sentences"] += 1
         key = str(seen["clusters"])
         counts["cluster_count_distribution"][key] = (
             counts["cluster_count_distribution"].get(key, 0) + 1)
         if seen["clusters"] >= 2:
             counts["multi_cluster_sentences"] += 1
+            if style == CITATION_STYLE_NUMERIC:
+                counts["positional_multi_cluster_sentences"] += 1
 
 
 def tally(counts: dict, block: dict, document: str = "") -> None:
@@ -631,10 +650,7 @@ def tally(counts: dict, block: dict, document: str = "") -> None:
 #: imported by the parser); the two are string literals in a frozen manifest
 #: contract, so they are restated here and pinned against ``cocitation``'s
 #: definitions by a test rather than left to drift.
-_NEGATIVE_BUCKETS = ("coverage_contradicted", "coverage_off_topic")
-
-
-def tally_verdicts(counts: dict, buckets) -> None:
+def tally_verdicts(counts: dict, verdicts) -> None:
     """Count the claims that were ASKED and came back negative, in place.
 
     Published beside ``claims_not_asked`` so the two are impossible to conflate.
@@ -643,5 +659,10 @@ def tally_verdicts(counts: dict, buckets) -> None:
     must never be indistinguishable in the output, and the surest way to keep
     them distinguishable is to print both numbers next to each other.
     """
-    counts["claims_assessed_negative"] += sum(
-        1 for bucket in (buckets or []) if bucket in _NEGATIVE_BUCKETS)
+    for verdict in verdicts or []:
+        if not isinstance(verdict, dict):
+            continue
+        if verdict.get("established") is False:
+            counts["claims_assessed_negative"] += 1
+        if verdict.get("scope") in {"abstract", "fulltext"}:
+            counts["claims_model_assessed"] += 1

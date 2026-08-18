@@ -42,9 +42,10 @@ from .work_identity import (assess_same_work, first_author_equivalent,
                             is_distinctive_title, version_chain_same_work,
                             is_living_source_pair, strip_living_source_suffix,
                             _strip_acronym_gloss, roman_conflict_suppressed,
-                            _first_pages_agree)
+                            _first_pages_agree, roster_containment_diagnostic)
 from .f2_samework_rule import entry_language, entry_language_trigger
 from .journal_identity import journal_identity
+from .f2_thresholds import SAME_WORK_TITLE_SIM_MIN
 
 # ``Claimed`` is the handoff's name for the claimed-reference metadata object.
 Claimed = ClaimedRef
@@ -94,6 +95,11 @@ class MatchResult:
     override_fired: bool = False       # strong-corroboration override floored the score
     same_work_reason: str = ""          # auditable identity rule used by flag_verdict
     identity_signals: tuple[str, ...] = ()
+    identity_disposition: str = ""
+    roster_containment_measurable: bool = False
+    roster_containment_value: "Optional[float]" = None
+    roster_claimed_surnames_measured: int = 0
+    roster_resolved_surnames_measured: int = 0
     # RULE L2: the single enumerated trigger that excluded this pair from the F2
     # population -- one of f2_samework_rule.LANGUAGE_TRIGGERS, or "" when the row
     # is not a cross-language exclusion. An exclusion is a recall cost, so the
@@ -149,9 +155,6 @@ VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE = "out_of_scope_cross_language"
 # both as review_same_work_variant while staying clear of the genuine-F2 guards
 # (all title_sim < 0.92). The gate expression is unchanged and stays source-agnostic;
 # newly-crossed rows are surfaced (never silently moved) via reband audit.
-SAME_WORK_TITLE_SIM_MIN = 0.92
-
-
 # =====================================================================
 # Title scoring (containment-aware, so truncation doesn't tank the score)
 # =====================================================================
@@ -817,13 +820,15 @@ def match_score(claimed: Claimed, cand: RetrievedRecord,
                         living_source=living_source)
     score = ts
     # confirmatory boosts
-    if f.author_match:
+    # Unknown still forfeits the calibrated corroborating boost; changing that
+    # sparse-author bias would be a banding change.
+    if f.author_match is True:
         score += 0.05
-    if f.year_match:
+    if f.year_match is True:
         score += 0.05
-    if f.journal_match:
+    if f.journal_match is True:
         score += 0.03
-    if f.volume_match or f.pages_match:
+    if f.volume_match is True or f.pages_match is True:
         score += 0.02
     # disqualifying penalties
     if f.author_match is False:
@@ -1029,8 +1034,9 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
                              formatting/translation variant of the SAME paper.
                              Low priority, never auto-cleared.
 
-    Compute F2 precision primarily over VERDICT_WRONG_PAPER.
-    Call is_scoreable_title on both titles before calling this."""
+    Compute F2 precision primarily over VERDICT_WRONG_PAPER. Real callers apply
+    ``classify_unscoreable`` first; ``is_scoreable_title`` is a different gate
+    and is intentionally not wired here."""
     # RULE L2 (cross-language exclusion) is computed HERE but applied BELOW, after
     # assess_same_work has had first refusal.  Two changes, one rationale.
     #
@@ -1097,6 +1103,12 @@ def flag_verdict(claimed: Claimed, cand: RetrievedRecord,
             and m.title_sim < SAME_WORK_TITLE_SIM_MIN))
     identity = assess_same_work(claimed, cand, title_similarity=m.title_sim,
                                 living_source=living_source)
+    m.identity_disposition = identity.disposition
+    roster_diag = roster_containment_diagnostic(claimed, cand)
+    m.roster_containment_measurable = roster_diag["measurable"]
+    m.roster_containment_value = roster_diag["value"]
+    m.roster_claimed_surnames_measured = roster_diag["claimed_surnames_measured"]
+    m.roster_resolved_surnames_measured = roster_diag["resolved_surnames_measured"]
 
     # RULE L2 applied -- see the note at the top of this function for why it is
     # here and not at the entry point.  assess_same_work has now had first

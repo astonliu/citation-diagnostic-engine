@@ -109,7 +109,14 @@ class EntityAssessment:
                 raise DiscriminatorContractError(
                     "confirmed F7 evidence requires two normalized entity keys"
                 )
-            if self.claimed_entity_key.strip() == self.evidence_entity_key.strip():
+            # CASE-FOLDED. "HGNC:6407" and "hgnc:6407" are one entity key, and a
+            # raw .strip() compare accepted that pair as two -- letting a
+            # normalizer whose case drifted produce a confirmed wrong-entity
+            # accusation against the very same gene. This is the contract
+            # boundary, so it holds the line for every future producer, not only
+            # for the one in ``f7_entity`` that also checks it now.
+            if (self.claimed_entity_key.strip().casefold()
+                    == self.evidence_entity_key.strip().casefold()):
                 raise DiscriminatorContractError(
                     "confirmed F7 entity keys must differ"
                 )
@@ -117,11 +124,17 @@ class EntityAssessment:
                 raise DiscriminatorContractError(
                     "an entity mismatch is F7 only when the relation is supported"
                 )
+        # Case-folded for the same reason and in the same direction as the guard
+        # above: two keys differing only in case are ONE key, so SAME_ENTITY over
+        # them is consistent and must not raise. Folding only one of the two
+        # comparisons would leave a pair that is neither a legal SAME_ENTITY nor
+        # a legal mismatch.
         if (
             self.state is EntityState.SAME_ENTITY
             and _nonblank(self.claimed_entity_key)
             and _nonblank(self.evidence_entity_key)
-            and self.claimed_entity_key.strip() != self.evidence_entity_key.strip()
+            and (self.claimed_entity_key.strip().casefold()
+                 != self.evidence_entity_key.strip().casefold())
         ):
             raise DiscriminatorContractError(
                 "SAME_ENTITY conflicts with different normalized keys"

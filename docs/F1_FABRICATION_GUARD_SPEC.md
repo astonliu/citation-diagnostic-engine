@@ -689,3 +689,430 @@ cosmetic, so the diminishing-returns test is not met. **Round 2 is warranted.**
 (L-1/L-3/L-6 are one defect at three layers, and there may be a fourth); the `preband_contract`
 join accounting, which no finder reached in depth; and `biblio_match`'s two `RetrievedRecord`
 construction sites (`:655`, `:680`), which this round confirmed exist but did not trace.
+
+
+---
+
+# Audit loop — F1 stratum, round 2 (2026-08-17)
+
+**Label:** F1 — fabricated / non-existent reference.
+
+**Method.** One auditor over the F1 surface, then three independent checkers — Reality, Blast radius, Cost. Every checker opened every cited line itself and re-ran the auditor's probe rather than trusting the pasted output. **A finding lands only on unanimous LAND with all three checkers at ≥95% confidence**; a unanimous LAND carrying any vote below 95 is demoted to DEFER automatically.
+
+**Result: 3 findings → 1 LAND · 2 DEFER · 0 ASK-ZD · 0 REJECT.**
+
+**Stratum status: `INCOMPLETE-CHECKERS-FAILED`. Clear-streak 0/3.** The stratum has not converged. Saturation is advisory only and cannot end a stratum (ZD, 2026-08-17): the sole exit is three consecutive rounds in which the checkers accept nothing.
+
+**⚠ 4 further findings from the next round are UNADJUDICATED** — the auditor raised them and the checkers died on a session limit before grading them. They are recorded as unadjudicated, **not** as rejected, and **not** as a clear round.
+
+---
+
+## Landed findings
+
+### L-1 · The adjudication harness — the only thing in the package that mints gold — drops the transport word, so an NCBI outage is handed to the human adjudicator as "(claimed PMID did not resolve)"
+
+**Cite:** `cre/f1/adjudicate.py:70-72 (evidence_view) and cre/f1/adjudicate.py:150-152 (write_worklist); gold minted at cre/f1/adjudicate.py:84` · **REPRODUCED** · **verdict: LAND** · checker confidence 95–96
+
+**Decision conflict:** Direct conflict with the CLOSED 2026-08-16 transport decision, recorded in code in three places I read this session.
+
+(1) `cre/f1/schema.py:333-336`: "One of the FETCH_* statuses. THE FIELD THAT KEEPS AN OUTAGE OUT OF THE RECORD AS AN ACCUSATION: without it, ``pmid_resolved=False`` in a durable log is unreadable -- a dead PMID and a 429 that survived every retry look identical forever after." `adjudicate.py:72` renders the RESOLVED line from precisely that unreadable boolean.
+
+(2) `cre/f1/decide.py:163-166`, the rationale wording that was deliberately changed by the same fix: "The rationale states only what was observed: a PMID that ANSWERED and had no record did not 'resolve to a different paper', and saying so asserted a resolution that never happened." `adjudicate.py:72` asserts a NON-resolution that was never observed — the same error the machine rationale was rewritten to stop making.
+
+(3) `/home/claude/work/cre-f3f7/docs/F1_FABRICATION_GUARD_SPEC.md:196`, acceptance row: "run where the F1 check could not run | manifest | distinguishable from zero". Satisfied at the manifest layer (`eval_report.py:186-203`, `f1_status`), NOT at the adjudication layer — which is where the label that reaches the dataset is actually decided. And spec `:199-200`: "Precision-first. Ambiguity escalates to human review; it never becomes an accusation." The row IS escalated. The harness then removes the evidence that it was ambiguous.
+
+Unadjudicated gap, not a policy I am inventing: `adjudicate.py` appears nowhere in `F1_FABRICATION_GUARD_SPEC.md` (I grepped it), and appears in none of round 1's LANDED, DEFERRED, REJECTED or BLOCKED-ON-ZD items. I am naming no threshold and no constant — the fix is to carry fields that already exist (`pmid_transport_status`, `decided_by`, `rationale`) into the two views, which is a display decision for ZD, not a numeric one.
+
+```
+cre/f1/adjudicate.py:70-72 --
+            "  RESOLVED  : " + (_fmt(retr.get("title"), retr.get("authors"),
+                                     retr.get("year"), retr.get("pmid"))
+                                if retr.get("resolved") else "(claimed PMID did not resolve)"),
+
+cre/f1/adjudicate.py:150-152 --
+    def write_worklist(self, path: str) -> None:
+        cols = ["citation_id", "predicted_label", "title_similarity",
+                "llm_verdict", "claimed_title", "resolved_title",
+                "db_hits", "verdict", "final_label", "note"]
+```
+
+**Mechanism.** Hop 1 — the status is minted correctly. `cre/f1/lookup.py:98-99` stamps `FETCH_RESOLVER_ERROR` on a non-200 EFetch. Hop 2 — it is copied correctly. `cre/f1/lookup.py:504` (`log.pmid_transport_status = ref.retrieved.transport_status`). Hop 3 — the guard fires correctly. `cre/f1/run.py:114` short-circuits before `llm_filter` and `confirm`, and `cre/f1/decide.py:74-81` labels the row `HUMAN_REVIEW`/`LOW` with `decided_by="pmid_fetch_no_answer"`. Hop 4 — it survives serialisation correctly. `cre/f1/schema.py:477` puts it in `PredictionRecord.evidence["pmid_transport_status"]`; `cre/f1/schema.py:503-504` puts it in the log JSONL under both `retrieved.transport_status` and `log.pmid_transport_status`. Hop 5 — IT IS DROPPED. `cre/f1/adjudicate.py:122` selects candidates whose label is in `REVIEW_LABELS = {F1, F2, "human_review"}` (`:37`), so the rows the transport guard just created are exactly the rows this harness reviews. `cre/f1/adjudicate.py:72` then renders the RESOLVED line from `retr.get("resolved")` alone — the boolean `cre/f1/schema.py:333-336` says is unreadable — and prints the affirmative sentence "(claimed PMID did not resolve)" for a fetch that never answered. `cre/f1/adjudicate.py:150-152` is worse: the headless worklist, the path the module's own docstring at `:16-21` names as the way to produce gold at scale, emits ten columns and not one of them is `pmid_transport_status`, `transport_status`, `decided_by`, `pmid_resolved` or even `rationale` — all four of which are sitting in `c.log` and `c.pred["evidence"]`, which the method already has in hand. Hop 6 — the human's verdict becomes gold. `cre/f1/adjudicate.py:190-192` (`apply_worklist`) accepts any `final_label` in `TAXONOMY_LABELS`, `:196-199` (`_collect`) calls `to_gold()` on every `confirm`, and `cre/f1/adjudicate.py:83` resolves the label as `self.final_label or self.predicted_label`. `cre/f1/adjudicate.py:84` is the only `GoldRecord(` construction site in the entire package (verified by `grep -rn "GoldRecord(" --include=*.py cre/ | grep -v /test_`). The gold that comes out is what `cre/f1/eval_report.py:225` (`_precision_on_band`) measures published precision against. I also swept for any other unqualified non-resolution assertion (`grep -rn "did not resolve|no PubMed record" --include=*.py cre/ | grep -v /test_`): the only other two are `cre/f1/decide.py:219` and `cre/f1/lookup.py:531`, and both are correctly guarded — `decide.py:219` sits after the `:74` transport guard (the comment at `:213` says so explicitly) and `lookup.py:531` is the `else` arm of `if not fetch_answered(...)` at `:523`. `adjudicate.py:72` is the only unguarded one, and it is the human-facing one.
+
+**Reproduction.**
+
+```
+REPRODUCED. `/tmp/p2/probe_adj.py` — two references identical in every claimed field, differing only in what NCBI does (503 vs 200-with-empty-body). Real `run.process_reference`, real `Adjudicator`; only the injected `session` object is stubbed.
+
+```
+=== Adjudicator.evidence_view() (interactive path) ===
+[PMC1:r1]  predicted: human_review  (decided_by=pmid_fetch_no_answer)
+  rationale : The claimed PMID could not be checked: the PubMed fetch did not answer (resolver_error). Whether it resolves is unknown; held for human review rather than reported as a finding.
+  CLAIMED   : 'A totally real indexed paper about widgets.'  | Smith | 2020 | id=99999999
+  RESOLVED  : (claimed PMID did not resolve)
+  similarity: None   author_match=None   year_match=None
+  llm       : None
+  db_hits   : {}
+
+[PMC1:r2]  predicted: F1  (decided_by=confirm_not_found_f1)
+  rationale : Claimed title not found in PubMed, Crossref, or OpenAlex; claimed PMID did not resolve.
+  CLAIMED   : 'A totally real indexed paper about widgets.'  | Smith | 2020 | id=99999999
+  RESOLVED  : (claimed PMID did not resolve)
+  similarity: None   author_match=None   year_match=None
+  llm       : fabrication
+  db_hits   : {'pubmed': 0.0, 'crossref': 0.0, 'openalex': 0.0}
+```
+
+The outage row and the genuine-F1 row print the SAME RESOLVED line. Note the row's own rationale directly contradicts the line printed two lines below it — code vs. the text the same function emits.
+
+The headless path, which has no rationale column at all:
+
+```
+=== write_worklist() CSV (headless path -> gold) ===
+citation_id,predicted_label,title_similarity,llm_verdict,claimed_title,resolved_title,db_hits,verdict,final_label,note
+PMC1:r1,human_review,,,A totally real indexed paper about widgets.,,{},,,
+PMC1:r2,F1,,fabrication,A totally real indexed paper about widgets.,,"{""pubmed"": 0.0, ""crossref"": 0.0, ""openalex"": 0.0}",,,
+```
+
+Everything a human could use to tell an outage from an absence is blank. Closing the loop — I filled `verdict=confirm, final_label=F1` on the OUTAGE row and ran `apply_worklist` + `save_gold`:
+
+```
+=== gold minted from the OUTAGE row: 1 record(s) ===
+  citation_id= PMC1:r1  label= F1  source= adjudicated_from_f1_detector
+  any transport key in gold record?  NONE
+```
+
+A gold F1 record for a reference whose existence was never checked, carrying no trace that the check never ran.
+```
+
+**Why it matters.** F1's false positive is a public accusation that a real, indexed paper does not exist. Every machine-side guard against that accusation is intact — the fetch layer names the status, the decide layer holds on it, the manifest layer reports `transport_failed`. But the accusation is not ultimately made by the machine: `adjudicate.py` is the harness that takes the machine's HUMAN_REVIEW holds and asks a person to convert them into gold, and it is the one layer that throws the word away. So the guard does not fail loudly — it succeeds, routes the row to a human exactly as designed, and then hands that human a view in which the outage row is indistinguishable from a fabrication. The escalation the whole precision-first design rests on terminates in a blank CSV cell.
+
+It is also self-reinforcing in the worst direction. Gold from `adjudicate.py:84` is the denominator `eval_report._precision_on_band` (`eval_report.py:225`) measures F1/F2 precision against. A transport-failure row confirmed as F1 becomes gold F1, which then makes the detector's precision look BETTER, not worse — the error is invisible to the very instrument built to catch it. And the corruption scales with outage severity: the worse NCBI is behaving during a run, the more all-blank rows land in the worklist, and the more of them look like fabrications.
+
+This is the defect class named in the brief, one layer further out than round 1 reached. A path that never ran and a path that ran and found nothing are indistinguishable in the output — except the "output" here is not a manifest counter, it is a human being's screen.
+
+**Live-service check.** FAILED TEST, not a negative result — and I did not route around it. All three provider domains are refused by this session's egress policy at the CONNECT stage:
+
+```
+$ curl -sS 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=31665581&rettype=medline&retmode=text' --cacert /root/.ccr/ca-bundle.crt
+curl: (56) CONNECT tunnel failed, response 403
+HTTP 000
+$ curl -sS "$HTTPS_PROXY/__agentproxy/status" | jq -r '[.recentRelayFailures[].host]|unique'
+['api.crossref.org:443', 'api.openalex.org:443', 'eutils.ncbi.nlm.nih.gov:443']
+  "detail": "gateway answered 403 to CONNECT (policy denial or upstream failure)"
+```
+
+So I could NOT verify EFetch's HTTP status codes, `querytranslation` or `warninglist` myself this session, and I make no claim about them. Per the proxy README, a 403 is an organization policy denial and must be reported, not retried or bypassed.
+
+What I could establish through the sanctioned PubMed connector: PMID 31665581 is a real, indexed paper — "Purple Urine after Catheterization", N Engl J Med 2019;381(18):e33, DOI [10.1056/NEJMicm1905446](https://doi.org/10.1056/NEJMicm1905446) (according to PubMed) — while PMID 99999999 returns nothing (`count: 1` for two requested ids). That is the shape of the harm: a real indexed paper on one side, a nonexistent id on the other, and this harness renders them identically to the human whenever the fetch fails.
+
+Critically, the finding does not depend on any live measurement. `FETCH_RESOLVER_ERROR` is produced by `cre/f1/lookup.py:97-102` on ANY `requests.RequestException`, on `r is None`, and on ANY non-200 — including, per `cre/f1/lookup.py:196-199`, a 429 that survived every retry in `ratelimit.request_with_retry`. It is a state the code mints from its own control flow, and I reproduced it end to end above.
+
+**Checkers.**
+
+- **reality** — LAND (95%) · citation verified: yes
+  Real, reproduced byte-for-byte by me from a rewritten probe, and reachable in the only gold-minting path the package has. I did not inherit the auditor's probe: I wrote /tmp/rc/f1.py from the description, drove the real cre.f1.run.process_reference with two stubbed sessions (EFetch 503 vs EFetch 200-empty-body), serialised through the real write_jsonl, and loaded the real Adjudicator. Output matched the dossier exactly, including the gold record. Reachability is the crux and it holds: adjudicate.py:84 is the sole GoldRecord construction site in the whole package, eval_report.py:96 names Adjudicator as where `gold` comes from, and eval_report.py:225-247 makes that gold the denominator of the published wrong-paper precision. The outage row is guaranteed to arrive here because decide.py:74-81 labels it HUMAN_REVIEW and adjudicate.py:37 puts "human_review" in REVIEW_LABELS. So the machine's
+- **blast-radius** — LAND (96%) · citation verified: yes
+  BLAST RADIUS IS NEAR-ZERO AND THE BUG IS AT THE GOLD-MINTING LAYER. Fix risk: adjudicate.py is NOT in GOVERNING_MODULES (production_launcher.py:65-69) — no governed digest moves, CONTRADICTIONS 65 is not deepened. test_mint_v1.py pins only synthetic cre/f1/freeze/mod_<role>.py modules, so no acceptance-record digest literal moves. band_prompts.py is untouched. adjudicate.py is imported by exactly one file in the package (test_adj.py) and by nothing in the pipeline; `grep -rn 'evidence_view|write_worklist|apply_worklist|Adjudicator('` returns only adjudicate.py's own docstring and test_adj.py. test_adj.py has no test functions (`pytest cre/f1/test_adj.py -q` -> "no tests ran") but its module-level asserts execute at collection; I ran it as a script and it passes. Its only wording-sensitive assert is line 40, `"did not resolve" not in v`, evaluated on candidate c1 whose retrieved.resolved
+- **cost** — LAND (96%) · citation verified: yes
+  COST VERDICT: this is the cheapest finding in the stratum to act on and the most expensive to leave. FIX TOUCHES: `cre/f1/adjudicate.py` only (plus `cre/f1/test_adj.py`). GOVERNED MODULES MOVED: NONE. `adjudicate.py` is absent from GOVERNING_MODULES, which I read from code at `cre/f1/production_launcher.py:65-70`, and the digest loop at `cre/f1/production_launcher.py:126` iterates only that tuple, so no launcher digest moves and CONTRADICTIONS 65 is not deepened. Not covered by FROZEN_SOURCE_BLOB_OID (`cre/f1/freeze/semantic_validator_v1.py:66`) or PINNED_SCHEMA_SHA256/BYTES (`cre/f1/freeze/schema_gate.py:20-21`). PUBLISHED FIGURE MOVED: NONE, and I checked rather than assumed — `find /home/claude/work/cre-f3f7 -name '*gold*'` returns nothing, so no gold artifact exists in this tree, and the seed-47 adjudication of record ran through a SEPARATE Colab instrument (`f2_seed47_labels.csv` ->
+
+---
+
+## Deferred
+
+### D-1 · The author trip-wire note tells the log the claimed first author "appears later in the resolved author list" when it appears nowhere in it — it reads a substring-tolerant roster-wide flag as positional evidence, on F1 and F2 rows
+
+**Cite:** `cre/f1/lookup.py:581-583 (relation ternary), emitted at cre/f1/lookup.py:584-585; the flag that drives it is set at cre/f1/biblio_match.py:347 via _surname_present at cre/f1/biblio_match.py:324-326` · **REPRODUCED** · **verdict: DEFER** · checker confidence 80–95
+
+**Decision conflict:** `cre/f1/lookup.py:598-601` records a closed decision in this file: the trip-wire must "compare position zero to position zero", because "the older anywhere-in-roster check mislabeled a claimed first author found only as a coauthor as a clean trip-wire pass." That fix was applied to the *signal* (`_record_author_tripwire`, `cre/f1/lookup.py:391-395`, keys on `first_author_match` only). The note at `cre/f1/lookup.py:581-583` re-introduces the abandoned reading in the *description*, and does so through a flag that is strictly weaker than the roster check the comment rejected — `_surname_present` (`cre/f1/biblio_match.py:324-326`) will report True on a mere substring, so `author_match is True` does not even establish roster membership, let alone position.
+
+```
+cre/f1/lookup.py:579-585
+    flagged = _flag_decision(m, accept, author_tripwire=author_tripwire)
+    if flagged:
+        if author_tripwire and m.fields.first_author_match is False:
+            relation = ("appears later in the resolved author list"
+                        if m.fields.author_match is True
+                        else "does not match the resolved first author")
+            log.notes = (f"claimed first author {ref.claimed.authors[0]!r} "
+                         f"{relation}; positional author trip-wire fired.")
+
+cre/f1/biblio_match.py:321-327
+        ctoks = c.split()
+        if last and last in ctoks:                  # surname token appears
+            return True
+        if len(c) >= 4 and len(claimed_surname) >= 4 and \
+                (c in claimed_surname or claimed_surname in c):
+            return True
+    return False
+
+cre/f1/lookup.py:598-602 (the comment that settles the position-vs-roster question)
+    # Trip-wire audit signal: compare position zero to position zero.  The older
+    # anywhere-in-roster check mislabeled a claimed first author found only as a
+    # coauthor as a clean trip-wire pass, even though `_flag_decision` correctly
+    # flagged that positional mismatch.
+    _record_author_tripwire(log, m, enabled=author_tripwire)
+```
+
+**Mechanism.** Hop 1 — the claimed side is a bare surname in production. `cre/f1/parser.py:87-99` (`_surnames_under`) collects only the text of `<surname>` elements, and `cre/f1/parser.py:102-136` (`_authors_from`) returns that list, so `ClaimedRef.authors` is e.g. `['Wang']`, not `'Wang T'`. Hop 2 — the resolved side is also a bare surname: `cre/f1/lookup.py:206` does `authors = [_au_surname(a) for a in fields.get("AU", [])]`, so MEDLINE `AU  - Wangler MF` becomes `'Wangler'`. Hop 3 — `cre/f1/biblio_match.py:345-347` computes `fa.author_match = _surname_present(claimed_sn, cand.authors)`. `_surname_present` first tries token membership (`cre/f1/biblio_match.py:322`), which fails for `wang` against `['wangler']`, then falls through to the **substring** branch at `cre/f1/biblio_match.py:324-326`, where `claimed_surname in c` -> `'wang' in 'wangler'` -> True. `author_match` is now True although the claimed surname is not any author of the record. Hop 4 — `cre/f1/biblio_match.py:348` computes `fa.first_author_match = first_author_equivalent(...)`, which at `cre/f1/work_identity.py:253-258` intersects position-zero alias sets built by `cre/f1/work_identity.py:179-222`: `{'wang'}` vs `{'wangler'}`, disjoint -> False. Hop 5 — `cre/f1/lookup.py:578` flags the row via `_flag_decision`'s third disjunct (`cre/f1/lookup.py:387`). Hop 6 — `cre/f1/lookup.py:580` enters the trip-wire note branch, and `cre/f1/lookup.py:581-583` selects the `"appears later in the resolved author list"` arm **solely because `author_match is True`** — but `author_match` is roster-wide AND substring-tolerant, so True does not establish either "appears" or "later". Hop 7 — the row proceeds through `cre/f1/run.py:119-125` to `cre/f1/decide.py`, reaching F1 at `decide.py:211-221` when the three searches answer empty, or F2 at `decide.py:167-173` when one finds the title. Hop 8 — the sentence is persisted: `cre/f1/schema.py:496-505` (`to_log_record`) serialises `asdict(self.log)` including `notes`, written by `cre/f1/run.py:175` to `out_logs`. This is exactly the conflation `cre/f1/lookup.py:598-601` says was already fixed once in the *signal*; it survives in the *sentence*.
+
+**Reproduction.**
+
+```
+Executed `/tmp/p/live2.py` (real MEDLINE record shape for PMID 38746221, whose first author is Wangler MF — confirmed live this session; claimed authors in the production bare-surname shape):
+
+```
+resolved authors parsed from real MEDLINE AU: ['Wangler', 'Yamamoto']
+flagged=True author_match=True first_author_match=False
+NOTE -> claimed first author 'Wang' appears later in the resolved author list; positional author trip-wire fired.
+'Wang' present anywhere in roster ['Wangler', 'Yamamoto'] ? False
+label='F1' conf='MED' decided_by='confirm_not_found_f1'
+rationale: Claimed title not found in PubMed, Crossref, or OpenAlex; claimed PMID resolves to an unrelated paper.
+```
+
+And on an F2 row, `/tmp/p/note.py` (claimed 'Smith' vs resolved first author 'Smithson B'):
+
+```
+field_agreement: author_match=True first_author_match=False year=True journal=True
+flagged      = True
+log.author_match       = True
+log.first_author_match = False
+log.author_tripwire    = True
+NOTES -> claimed first author 'Smith' appears later in the resolved author list; positional author trip-wire fired.
+
+resolved authors[0] = Smithson B | claimed authors = ['Smith']
+is 'Smith' anywhere LATER than position 0 in the resolved roster?  False
+
+FINAL label='F2' conf='MED' decided_by='confirm_found_f2'
+rationale: Claimed work found in a database but the claimed PMID resolves to a different paper: wrong reference.
+notes shipped in log record: claimed first author 'Smith' appears later in the resolved author list; positional author trip-wire fired.
+```
+
+The second run also shows the mirror case: the substring branch is not needed for the note to be wrong in general, but it is what makes `author_match` True while the surname is absent from the roster.
+```
+
+**Why it matters.** This is the mandated defect class applied to a sentence: the code writes an assertion it has not established, into the durable per-reference log, on rows that carry the F1 accusation. Its reach is bounded and I state that plainly — `log.notes` is written to `out_logs` by `cre/f1/run.py:175` and is available to `eval_report.summarize` (`cre/f1/run.py:180`), but it is NOT in `to_prediction()`'s evidence dict (`cre/f1/schema.py:471-493` has no `notes` key) and NOT in the adjudication packet (`cre/f1/adjudicate.py:64-77` prints rationale, claimed, resolved, similarity, author_match, llm_verdict, db_hits — no notes). So it does not enter the dataset. What it does corrupt is the human-readable audit trail of exactly the label whose false positive is a public accusation: an auditor reading the log for an F1 row sees "the claimed first author appears later in the resolved author list", which reads as *coauthor overlap on the same paper* — mild, formatting-ish, low-alarm evidence — when the truth is that the claimed surname is absent from the record entirely, which is the strongest wrong-paper signal available. The note systematically understates the evidence on the most consequential rows, and it does so precisely on the fuzzy-surname pairs where a human most needs an accurate description.
+
+**Live-service check.** Direct HTTPS to NCBI is blocked by org egress policy in this session and I did not route around it: `curl -sS -G https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi ...` returned `curl: (56) CONNECT tunnel failed, response 403 / HTTP=000`, and `curl -sS "$HTTPS_PROXY/__agentproxy/status"` recorded `{"kind":"connect_rejected","detail":"gateway answered 403 to CONNECT (policy denial or upstream failure)","host":"eutils.ncbi.nlm.nih.gov:443"}`. **Blocked host reported, not bypassed.** I grounded the surname shape with the sanctioned PubMed connector instead. According to PubMed: `search_articles(query="Wangler MF[1au]")` returned `{"pmids":["40498764","38746221"],"total_count":14,"query_translation":"wangler mf[Author - First]"}` — i.e. 14 real, indexed records whose FIRST author surname is `Wangler`, a strict superstring of the extremely common claimed surname `Wang`. `get_article_metadata(['31616000'])` returned a record with `"last_name":"Wangler","fore_name":"Michael F"` in the author list, confirming MEDLINE stores this surname exactly as the code's `_au_surname` would reduce it (DOI: https://doi.org/10.1038/s41467-019-12435-8). The same generator exists for Lee/Leeming, Park/Parkin, Hall/Halliday, Chan/Chandra and any truncated-vs-full MEDLINE surname pair, so this is not a contrived shape.
+
+**Checkers.**
+
+- **reality** — DEFER (80%) · citation verified: yes
+  The mechanism is real and I reproduced it, but it fails the 'worth acting on' half of the 95% bar, and I am stating the doubt rather than landing with a caveat. Three things hold it under the bar. First, ZERO downstream reach, which I checked rather than took on trust: `grep -rn '\bnotes\b' --include=*.py cre/ | grep -v /test_ | grep -v 'log.notes ='` returns exactly two lines — schema.py:369, the field declaration, and eval_report.py:211, an unrelated static list of report caveats. Nothing in the package reads log.notes. I also opened adjudicate.py:64-77 myself and confirmed the adjudication packet has no notes key, and schema.py's to_prediction evidence dict has none either. So the false sentence changes no label, no confidence, no rationale, no metric, and never reaches the dataset or the human adjudicator — it lands only in the out_logs JSONL that run.py:175 writes. Second, the class
+- **blast-radius** — LAND (95%) · citation verified: yes
+  REAL, REPRODUCED, AND THE FIX COSTS NOTHING — BUT ONLY IF IT IS SCOPED TO THE STRING. Fix risk, measured: lookup.py is NOT in GOVERNING_MODULES, so no governed digest moves and CONTRADICTIONS 65 is not deepened; test_mint_v1.py pins only synthetic freeze/ modules. `log.notes` has ZERO programmatic readers on EITHER tree — I grepped both cre-f3f7 and the F2 branch of record for `["notes"]` / `.get("notes"` / `.get('notes'` and got nothing; every hit is a write. It is not in to_prediction()'s evidence (schema.py:471-493 has no notes key) and not in the adjudication packet (adjudicate.py:64-78). The string exists in exactly one place: `grep -rn "appears later in the resolved"` returns only lookup.py:581. THE HARD CONSTRAINT: the fix must change ONLY the note wording. `_surname_present` (biblio_match.py:301-326) is byte-identical to the F2 branch of record (same function at biblio_match.py:4
+- **cost** — LAND (95%) · citation verified: yes
+  COST VERDICT: zero-cost to fix, with ONE hard guard the spec must carry in writing. FIX TOUCHES: the `relation` ternary at `cre/f1/lookup.py:581-583` — three lines of string selection — and nothing else. GOVERNED MODULES MOVED: NONE. `lookup.py` and `biblio_match.py` are absent from GOVERNING_MODULES (`cre/f1/production_launcher.py:65-70`, read from code). `parser.py` and `work_identity.py` appear only as HOPS in the mechanism; no fix goes near them, so the governed `parser.py` is not touched and CONTRADICTIONS 65 is not deepened. REPORTED NUMBER MOVED: NONE, and I verified the containment rather than accepting the auditor's bounding. `log.notes` has no numeric consumer anywhere: `to_prediction`'s evidence dict (`cre/f1/schema.py:471-493`) has no `notes` key; `Candidate.evidence_view` (`cre/f1/adjudicate.py:64-77`) never prints notes; `write_worklist`'s ten columns (`cre/f1/adjudicate.py
+
+### D-2 · parse_verdict's degrade-to-uncertain except clause misses TypeError: five JSON-valid model responses crash out of llm_filter instead of falling to `uncertain`, converting a would-be CLEARED into an unattributed quarantine
+
+**Cite:** `cre/f1/llm_filter.py:70-72 (the `v in _VALID` membership test and the except clause) and cre/f1/llm_filter.py:80 (the notes concatenation)` · **REPRODUCED** · **verdict: DEFER** · checker confidence 82–95
+
+**Decision conflict:** `cre/f1/llm_filter.py:71` establishes the module's contract by construction: malformed model output must degrade to `V_UNCERTAIN`, never escape. `cre/f1/run.py:60-65` states the same contract for the caller — "Empty / refusal responses yield "" (parse_verdict -> uncertain), no crash." Five JSON-valid response shapes violate both. It also sits against `cre/f1/run.py:151-158`, whose comment scopes the quarantine to "a reference we failed to process" — a model that answered in an unexpected JSON shape is a reference the pipeline *could* have judged (`uncertain` -> `decide.py:127` -> human_review, or `formatting_discrepancy` -> `decide.py:120` -> cleared), so routing it to the quarantine mislabels a handled case as an unhandled one.
+
+```
+cre/f1/llm_filter.py:65-72
+def parse_verdict(raw: str) -> tuple[str, str]:
+    raw = raw.strip().replace("```json", "").replace("```", "").strip()
+    try:
+        obj = json.loads(raw)
+        v = obj.get("verdict", V_UNCERTAIN)
+        return (v if v in _VALID else V_UNCERTAIN), obj.get("reason", "")
+    except (json.JSONDecodeError, AttributeError):
+        return V_UNCERTAIN, "unparseable LLM output"
+
+cre/f1/llm_filter.py:75-81
+def llm_filter(ref: Reference, complete: Callable[[str], str]) -> str:
+    """Run the filter; record verdict on the log; return the verdict."""
+    verdict, reason = parse_verdict(complete(build_prompt(ref)))
+    ref.log.llm_verdict = verdict
+    if reason:
+        ref.log.notes = (ref.log.notes + " | " if ref.log.notes else "") + reason
+    return verdict
+```
+
+**Mechanism.** Hop 1 — `_VALID` is a `set` (`cre/f1/llm_filter.py:21`), so `v in _VALID` hashes `v`. When the model returns valid JSON whose `verdict` value is a dict or a list, `obj.get("verdict", ...)` yields an unhashable object and `cre/f1/llm_filter.py:70` raises `TypeError: unhashable type: 'dict'`. Hop 2 — the except clause at `cre/f1/llm_filter.py:71` lists only `json.JSONDecodeError` and `AttributeError`, so the TypeError escapes `parse_verdict` entirely, bypassing the `V_UNCERTAIN` fallback that clause exists to provide. Hop 3 — a second, independent TypeError: when `verdict` is a valid token but `reason` is a dict, list or int, `parse_verdict` returns normally, `cre/f1/llm_filter.py:78` writes `ref.log.llm_verdict = verdict`, and then `cre/f1/llm_filter.py:80` does `... + reason` -> `TypeError: can only concatenate str (not "list") to str`. The log now carries a verdict for a reference that was never decided. Hop 4 — either TypeError propagates out of `llm_filter` through `cre/f1/run.py:119` and out of `process_reference`, and is caught by the bare-`Exception` quarantine at `cre/f1/run.py:151-166`, which sets `HUMAN_REVIEW` / `decided_by="quarantine_exception"`. `decide()` is never called for that reference. Hop 5 — the label consequence is real for one of the shapes: `{"verdict":"formatting_discrepancy","reason":[...]}` would have taken `cre/f1/run.py:120-121` -> `decide.py:120-124` -> **CLEARED / MED**, and instead becomes HUMAN_REVIEW. For `verdict: <dict>` and `verdict: <list>` the final label is HUMAN_REVIEW either way, but the reason code changes from `llm_uncertain` to `quarantine_exception`. Hop 6 — the substitution is invisible in any tally: `cre/f1/run.py:142` increments `quarantined` and `cre/f1/run.py:183` returns only `counts`, so the number is computed and discarded (the condition D-12 already names), and no `quarantine_exception` bucket is reported.
+
+**Reproduction.**
+
+```
+Executed `/tmp/p/llm.py`. `parse_verdict` over 20 shapes (abridged to the relevant rows plus the safe controls):
+
+```
+empty                parse_verdict -> 'uncertain'                  reason='unparseable LLM output'
+prose                parse_verdict -> 'uncertain'                  reason='unparseable LLM output'
+list                 parse_verdict -> 'uncertain'                  reason='unparseable LLM output'
+missing_key          parse_verdict -> 'uncertain'                  reason='x'
+trailing_content     parse_verdict -> 'uncertain'                  reason='unparseable LLM output'
+nested_json          parse_verdict -> 'uncertain'                  reason=''
+verdict_is_dict      parse_verdict -> RAISED TypeError: unhashable type: 'dict'
+verdict_is_list      parse_verdict -> RAISED TypeError: unhashable type: 'list'
+verdict_is_null      parse_verdict -> 'uncertain'                  reason=''
+verdict_true         parse_verdict -> 'uncertain'                  reason=''
+reason_is_dict       parse_verdict -> 'fabrication'                reason={'a': 1}
+reason_is_list       parse_verdict -> 'formatting_discrepancy'     reason=['a']
+reason_is_int        parse_verdict -> 'uncertain'                  reason=7
+dup_keys             parse_verdict -> 'fabrication'                reason=''
+very_long            parse_verdict -> 'fabrication'                reason='xxxx...'   (200000 chars, no error)
+fenced               parse_verdict -> 'fabrication'                reason='r'
+whitespace_token     parse_verdict -> 'uncertain'                  reason=''
+case                 parse_verdict -> 'uncertain'                  reason=''
+top_level_str        parse_verdict -> 'uncertain'                  reason='unparseable LLM output'
+nan                  parse_verdict -> 'uncertain'                  reason=''
+```
+
+End to end through `llm_filter` (stub `complete`, no monkeypatching):
+
+```
+--- llm_filter() end to end ---
+verdict_is_dict      -> RAISED TypeError: unhashable type: 'dict'
+verdict_is_list      -> RAISED TypeError: unhashable type: 'list'
+reason_is_dict       -> RAISED TypeError: can only concatenate str (not "dict") to str
+reason_is_list       -> RAISED TypeError: can only concatenate str (not "list") to str
+reason_is_int        -> RAISED TypeError: can only concatenate str (not "int") to str
+very_long            -> verdict='fabrication' notes_len=200000
+```
+
+Five shapes crash; the other fifteen degrade to `uncertain` exactly as intended.
+```
+
+**Why it matters.** The direction of failure is precision-safe — nothing here can produce an F1 or F2, and I am not claiming otherwise. What it costs is honesty of the record and one real label flip. (a) A reference the model correctly triaged as a benign formatting discrepancy is not cleared; it becomes an unjudged HUMAN_REVIEW because the *reason* field had the wrong JSON type, which is a recall loss on the clear side driven by nothing the reference did. (b) The three `verdict`-shape crashes land on the same final label as the intended `uncertain` path but under a different reason code, so the population of "the model answered in a shape we could not read" is filed under "processing raised an unexpected error" — the two are then indistinguishable in the log, which is the same not-attempted-vs-attempted-and-empty confusion this whole audit exists to remove. (c) Because `cre/f1/run.py:142`'s `quarantined` counter is discarded at `cre/f1/run.py:183`, a run in which the model started emitting nested verdicts would silently drain the cleared and uncertain buckets with no number anywhere showing it. This is a distinct code path from L-7 (which is about `make_completer`'s non-retryable auth error being swallowed): here the exception originates inside `parse_verdict`/`llm_filter` from well-formed JSON, and it is the module's own except clause — written to guarantee "malformed model output becomes `uncertain`" — that fails to hold.
+
+**Live-service check.** Not applicable — this finding makes no claim about any external service. It is entirely local control flow over a stubbed `complete` callable, and the reproduction above is the executed evidence. (For completeness, the only external service I attempted this session was NCBI eutils, which the org egress proxy refused with 403 on CONNECT; reported above, not bypassed.)
+
+**Checkers.**
+
+- **reality** — LAND (95%) · citation verified: yes
+  Reproduced from scratch by me, and the path is genuinely live in the production configuration. I wrote /tmp/rc/f3.py from the description without reading the auditor's script and got the identical five crashes. Reachability is the question I own and it holds cleanly: production `complete` is built by run.py:66-85, a plain `client.messages.create` whose return is run through `_extract_text` and handed back as a raw string — there is no tool schema, no structured-output enforcement, nothing but the prompt text at llm_filter.py:50-51 asking for the shape. `parse_verdict` is therefore the sole sanitizer standing between untrusted model output and the pipeline, and its except tuple omits the one exception type its own membership test can raise. Nothing upstream gates the path dead: run.py:119 is on the flagged-survivor hot path and is reached whenever compare_and_flag flags, same_work_reason
+- **blast-radius** — DEFER (82%) · citation verified: yes
+  THE CRASH IS 100% REAL AND I REPRODUCED ALL FIVE SHAPES — BUT IT FAILS THE 95% BAR ON TWO LEGS, AND THE OBVIOUS FIX TRADES A LOUD DEFECT FOR A QUIET ONE, WHICH IS MY REJECT CRITERION. Leg 1, reachability is unmeasured. The prompt at llm_filter.py:23-51 ends with an explicit schema whose values are both strings: `Respond with ONLY a JSON object, no prose: {"verdict": "<one of the four>", "reason": "<one sentence>"}`. Whether a pinned Claude Opus ever returns a dict- or list-valued `verdict` or `reason` against that instruction is a claim about model behaviour I cannot test from this container and the auditor did not measure. Per Rule 0 EXTENDED an untested external claim is a HYPOTHESIS, and the auditor honestly labels the local control flow REPRODUCED without asserting any frequency. I put reachability at roughly 75-85%, which caps the finding below 95. Leg 2, and this is the blast-radiu
+- **cost** — LAND (95%) · citation verified: yes
+  COST VERDICT: the cheapest fix in the stratum, with one coordination requirement against an already-landed round-1 item. FIX TOUCHES: `cre/f1/llm_filter.py` only — broaden the except tuple at `:71` to catch `TypeError`, and coerce a non-string `reason` before the concatenation at `:80`. GOVERNED MODULES MOVED: NONE. `llm_filter.py` is absent from GOVERNING_MODULES (`cre/f1/production_launcher.py:65-70`, read from code); no launcher digest moves; CONTRADICTIONS 65 is not deepened. Not pinned by FROZEN_SOURCE_BLOB_OID or PINNED_SCHEMA_SHA256. PUBLISHED FIGURE MOVED: NONE — every affected row currently lands in the bare-`Exception` quarantine as HUMAN_REVIEW, so no existing precision numerator or denominator depends on the current behaviour; nothing is retroactively restated. NO SEED, NO CORPUS RUN, NO INVENTED CONSTANT, NO LABEL-MEANING CHANGE — the fix restores the vocabulary already decl
+---
+
+# Audit loop — F1, rounds 3–8 (2026-08-18) · **ROUND-CAP, not converged**
+
+**Stopped by decision, not by exhaustion.** 8 rounds. Rounds 1–2 are already appended above.
+Rounds 3–8 raised 13 findings; after dedup across rounds, **3 distinct defects landed**, plus 4 deferred
+and 1 ASK-ZD. Bar for LAND: all three checkers, each ≥95% confidence, each having re-opened the cited
+line and re-run the probe.
+
+**Rounds 3, 4, 5 and 8 re-filed the same two defects under different anchors.** They are merged below.
+The count in the state register (9) counts re-files; **3 is the number of distinct things to fix.**
+
+## ⚠ READ FIRST — L-1 blocks gold minting entirely
+
+`adjudicate.py` is the only module in the package that mints a `GoldRecord`. **A human cannot use it to
+say a flagged reference is fine.** Every other landed finding is downstream of that.
+
+---
+
+## L-1 · A human cannot clear a flagged reference — `accurate` is the one label the gold-minting harness cannot assign
+
+**Cite:** `adjudicate.py:138-145` (interactive) · `adjudicate.py:180-182` (headless) · `adjudicate.py:83`
+(label resolution) · `adjudicate.py:84` (the only `GoldRecord(` site) · `schema.py:25-27` (the taxonomy)
+**Verdict:** LAND · 96/96/96 (r4) and 95/96/96 (r8) · REPRODUCED both paths
+
+**The taxonomy is mixed-case by construction.** `schema.py:25` is `ACCURATE = "accurate"` — lower case.
+`schema.py:26` is `F1`…`F8` — upper case. `schema.py:27` puts all nine in one `set`, so every membership
+test is exact and case-sensitive.
+
+- **Interactive path.** `adjudicate.py:139` does `lbl = v.split(maxsplit=1)[1].upper()` before the
+  membership test at `:140`. `.upper()` is a no-op for `F1`…`F8` and breaks exactly one member of the
+  set. `relabel accurate` is refused as "not in taxonomy". **The human can relabel a candidate to any of
+  the eight defect classes and to nothing else.**
+- **Headless path.** `adjudicate.py:177` reads the verdict as `.strip().lower()`; `:180` reads
+  `final_label` with **no normalisation at all**. A mis-cased or mistyped label is silently discarded
+  while `verdict=confirm` is still honoured — so the detector's own F1 accusation is minted as gold,
+  annotated `human_1 … confidence 1.0`, with the human's correction attached as a note nothing reads.
+
+**Why it matters:** this is the silent-clear half and the false-accusation half in one function. A human
+saying "this reference is fine" produces a gold **F1** record.
+
+**Fix direction:** normalise the label on both paths the way the verdict is already normalised, and
+**refuse an unrecognised `final_label` loudly** rather than falling through to the detector's label. Do
+not change the literals in `schema.py` — that is a governed module and the mixed case is the taxonomy of
+record.
+
+---
+
+## L-2 · `to_gold` reads four keys neither serialiser writes — every gold record loses its provenance, invisibly
+
+**Cite:** `adjudicate.py:86-98` (`to_gold`) · `schema.py:496-505` (`to_log_record`) · `schema.py:457-495`
+(`to_prediction`) · the fields exist and are populated at `schema.py:378-383` and `parser.py:612-613`
+**Verdict:** LAND · 96/96/95 · REPRODUCED
+
+`Reference` declares `citance`, `cited_reference_marker`, `source_pmid`, `source_title` as REQUIRED
+(`schema.py:378-383`) and `parser.py:612-613` populates them. **Both durable serialisers drop all four.**
+`to_log_record` emits seven keys; none is one of these. `to_gold` then reads them off the serialised row
+and gets nothing.
+
+**Why it matters:** every gold record the package can mint has an empty citance, an empty marker and a
+wholly empty `source_paper` — and **empty is a legitimate value for all three**, so total provenance loss
+is indistinguishable from a reference that genuinely had none. This is the named defect class applied to
+the ground-truth store.
+
+**Fix direction:** carry the four fields through whichever serialiser `to_gold` actually consumes, and
+make an absent — as opposed to empty — value distinguishable in the gold record.
+
+---
+
+## L-3 · The launch receipt claims a different-family judge on runs that wired a same-family one
+
+**Cite:** `production_launcher.py:492-501` (the `compliance_note` ternary) · `:444-453` (path list) ·
+`:471-482` (residual-risk guard it contradicts) · `:609` and `:637` (route into the run manifest)
+**Verdict:** LAND · 96/96/96 (r5) and 72/96/96 (r8 re-file) · REPRODUCED
+
+`verify_judge_governance`'s own docstring (`:420-424`) commits to **three** accepted answers:
+different-family judge, dated amendment, DECISION-recorded scope ruling. The path list at `:447-453`
+builds all three correctly. **The compliance sentence has only two arms.** The ternary at `:498` is
+guarded on `ruling is not None`, i.e. on the scope-ruling path only; the amendment path leaves
+`ruling = None`, the condition is False, and control falls to the `else` at `:499` — which asserts
+*"The preregistered different-family judge arrangement was used"* **regardless of what judge is wired**.
+
+**Why it matters:** the launcher refuses false provenance everywhere else and mints it here, into the
+published run manifest.
+
+**Fix direction:** give the sentence a third arm keyed on which path actually held, built from `paths`
+rather than from `ruling`. `production_launcher.py` is not in `GOVERNING_MODULES` — confirm that before
+editing.
+
+---
+
+## Deferred — real, reproduced, not worth spending this loop's budget on
+
+| cite | claim | why deferred |
+|---|---|---|
+| `production_launcher.py:126-129` | `verify_tree` silently `continue`s past a governing module missing from `pkg_dir`, so a run that verified **zero of thirteen** returns success and publishes `"tree_clean": True` with an empty digest map | 95/62/95 — the mirror config error (mis-pointed `repo_dir`) has a hard refusal at `:111-121`; blast-radius put the reachability of the unguarded case below the bar. **Re-raise if `pkg_dir` is ever caller-supplied.** |
+| `production_launcher.py:272-280` | the temperature note publishes *"deprecated from Claude Opus 4.7 onward"* — the exact claim DEC-070's table 100 lines above records as never measured and **WITHDRAWN** | 97/82/96 — a false string in a manifest, no number moves |
+| `ncbi_meta.py:53-61`, `:131-138`, `:172-178`; `ratelimit.py:80-84` | `IDCONV` now 302-redirects to a different NCBI host, so `idconv_request_count` under-reports by half and the shared per-IP limiter throttles one of every two | 55/70/70 — measured live and real, but the count is advisory and the fix is a URL change ZD should make deliberately |
+
+## ASK-ZD
+
+**`recording_adapter.py:119-124` — six of the eleven `RUN_SEAMS` are NCBI HTTP fetchers, not provider
+callables.** The adapter receipt stamps the launched model and temperature 0 onto them, so the
+launcher's *"EVERY call used the authorized model at temperature 0"* (`production_launcher.py:32-34`,
+published at `:640`) is asserted over events that carried neither, and `adapter_receipt.calls` is **not a
+count of model calls**. Confidence 80/70/96. **Decide whether the receipt should count only provider
+seams, or whether the sentence should be narrowed.** Either is a change to a published attestation.
+
+## Guardrails
+
+- `schema.py` is **GOVERNED** and its digest has already moved once in this pass — **CONTRADICTIONS 65 is
+  OPEN on this class. Report the digest consequence; do not decide it.**
+- `band_prompts.py` byte-identical, blob OID `fa01126e2b9482d450065fd70cd0eb1fea816f5c`.
+- Precision-first, both halves. No invented constants. Specs only — no corpus run.
+
+## Definition of done
+
+- A human can mint a gold `accurate` record on **both** paths, and an unrecognised `final_label` is
+  refused rather than dropped.
+- A gold record with no provenance is distinguishable from one whose provenance was lost.
+- The compliance sentence names the path that actually held, on all three paths.
+- Suite: old → new counts, environment stated.
+
+## Verification command
+
+```
+cd citation_repair_F1_handoff && PYTHONPATH=. python -m pytest cre/f1 -q
+```

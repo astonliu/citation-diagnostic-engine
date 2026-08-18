@@ -54,6 +54,9 @@ def test_write_binds_bytes_schema_commit_and_accounting(tmp_path):
     assert manifest["label_counts"] == {"F2": 1, "cleared": 1}
     assert manifest["citing_pmcids"] == ["PMC1", "PMC2"]
     assert manifest["source"] == "band1_log_records"
+    assert set(manifest["check_attestations"]) == {"F1", "F2", "F8"}
+    assert all(item["performed"] is False
+               for item in manifest["check_attestations"].values())
 
     # The hash is over the artifact AS WRITTEN, so it can be re-verified.
     import hashlib
@@ -62,6 +65,28 @@ def test_write_binds_bytes_schema_commit_and_accounting(tmp_path):
 
     side = json.load(open(out + pd.MANIFEST_SUFFIX, encoding="utf-8"))
     assert side["artifact_sha256"] == manifest["artifact_sha256"]
+
+
+def test_write_carries_valid_check_attestations(tmp_path):
+    out = str(tmp_path / "disp.jsonl")
+    checks = {
+        name: {"performed": True, "source": "frozen_check_fixture",
+               "snapshot_date": "2026-08-18", "attempted": 2,
+               "answered": 2, "transport_failed": 0, "fired": 1,
+               "reason": "fixture"}
+        for name in ("F1", "F2", "F8")}
+    manifest = pd.write_disposition(
+        [log_row("PMC1:B1", "cleared")], out, f2_commit=COMMIT,
+        check_attestations=checks)
+    assert manifest["check_attestations"] == checks
+
+
+def test_performed_check_requires_source_and_snapshot(tmp_path):
+    with pytest.raises(pd.DispositionBuildError, match="performed F8 requires"):
+        pd.write_disposition(
+            [log_row("PMC1:B1", "cleared")], str(tmp_path / "disp.jsonl"),
+            f2_commit=COMMIT,
+            check_attestations={"F8": {"performed": True}})
 
 
 def test_corpus_manifest_is_bound_when_supplied(tmp_path):

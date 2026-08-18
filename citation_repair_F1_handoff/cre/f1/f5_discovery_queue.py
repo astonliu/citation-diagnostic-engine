@@ -30,7 +30,21 @@ from __future__ import annotations
 #: and its own disposition are all withheld.
 BLIND_FIELDS = ("proposed_route", "temporal_state", "confidence",
                 "discovery_disposition", "discovery_confidence",
-                "same_claim_or_outcome", "comparable_population")
+                "same_claim_or_outcome", "comparable_population",
+                "scope_mismatch_axis", "reason")
+
+# Exact detector outputs that must not be smuggled through a permitted field.
+# The first implementation inspected only keys, so ``reason`` could carry the
+# detector's verdict under an annotator-friendly name and still pass.  Values are
+# checked exactly (not by substring) to avoid rejecting ordinary source prose.
+BLIND_VALUE_TOKENS = frozenset({
+    "F5", "QUALIFYING_CONTRADICTION", "NO_QUALIFYING_CONTRADICTION",
+    "UNJUDGEABLE", "surface", "do_not_surface", "unassessable",
+    "qualifying_contradiction", "directional_contradiction",
+    "not_directional_contradiction", "not_comparable", "not_independent",
+    "below_confidence_floor", "comparability_uncertain",
+    "independence_unknown", "span_unverifiable",
+})
 
 QUEUE_VERSION = "f5_discovery_queue_v1"
 
@@ -75,9 +89,6 @@ def build_queue(records) -> "list[dict]":
                 "candidate_date": cand.get("candidate_date"),
                 "cited_finding_span": cand.get("cited_finding_span"),
                 "candidate_contradiction_span": cand.get("candidate_contradiction_span"),
-                # WHY this pair reached an annotator, in the annotator's terms.
-                "scope_mismatch_axis": cand.get("scope_mismatch_axis"),
-                "reason": cand.get("reason"),
             })
     return queue
 
@@ -116,6 +127,18 @@ def _walk_keys(value):
             yield from _walk_keys(sub)
 
 
+def _walk_values(value):
+    """Every scalar value at every depth, for detector-token leak checks."""
+    if isinstance(value, dict):
+        for sub in value.values():
+            yield from _walk_values(sub)
+    elif isinstance(value, (list, tuple)):
+        for sub in value:
+            yield from _walk_values(sub)
+    else:
+        yield value
+
+
 def assert_blind(queue) -> None:
     """Raise if any queue row leaks a withheld field AT ANY DEPTH.
 
@@ -134,3 +157,12 @@ def assert_blind(queue) -> None:
                 f"f5 discovery queue row {index} leaks blind field(s) {leaked} "
                 "(checked at every depth); the annotator must not see the "
                 "detector's own route, confidence or disposition")
+        leaked_values = sorted({
+            value.strip() for value in _walk_values(row)
+            if isinstance(value, str) and value.strip() in BLIND_VALUE_TOKENS
+        })
+        if leaked_values:
+            raise ValueError(
+                f"f5 discovery queue row {index} leaks detector value(s) "
+                f"{leaked_values} (checked at every depth); renaming a detector "
+                "field does not make the queue blind")

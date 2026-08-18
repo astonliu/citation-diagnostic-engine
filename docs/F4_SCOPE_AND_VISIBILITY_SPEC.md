@@ -220,3 +220,161 @@ audit time; `test_judgment_run.py`, `test_run_provenance.py` — 106 passed.
 ```
 cd citation_repair_F1_handoff && PYTHONPATH=. python -m pytest cre/f1 -q
 ```
+
+---
+
+# Audit loop — F4, rounds 1–4 (2026-08-18) · **NOT CLEAR**
+
+**Status: NOT CONVERGED.** 10 findings adjudicated → **3 LAND · 1 DEFER · 2 ASK-ZD · 1 REJECT**
+(plus 3 superseded). Three checkers per round, each opening every cited line and re-running every
+probe. LAND required unanimity at **≥95% confidence**.
+
+> **F4 reached a clear-streak at round 4 and the verdict was withdrawn before it was published.** One
+> round-3 finding had never been graded — its checker triad died on a spend limit — and F4 completed
+> the count around it. Graded on backfill: **LAND at 96/96/96.** The streak resets. This is the same
+> hole that invalidated F3's CLEAR; the driver rule now blocks CLEAR while any finding is
+> unadjudicated.
+
+**No further rounds will be run** (ZD, 2026-08-18).
+
+---
+
+## Landed findings
+
+### L-1 · F4's citing-side span gate is anchored to the model's own output, not to the paper
+**`cre/f1/f4_strength.py:638`** · REPRODUCED · unanimous LAND at **96 / 96 / 96** · **most severe F4 item**
+
+```python
+    if not citing_span or citing_span not in claim:
+```
+
+`claim` is the **atomic claim emitted by the LLM extractor** (`band_prompts.CLAIM_EXTRACT_PROMPT` via
+`judgment_band.extract_atomic_claims:268-278`). So the string the accusation is anchored to and the
+string it is checked against **are the same machine-produced artifact.** The cited side is anchored to
+fetched text (`cited_span not in cited_abstract`, `:640`); **only the citing side validates the model
+against itself.**
+
+**This is structural, not a slip.** `refine_support_strength` takes only `(claims, support,
+evidence)`, and `evidence` is built solely by `judgment_band.assemble_evidence:306-312` —
+`cited_pmid`, `cited_abstract`, `cited_is_review`, `review_reflist`, `review_fulltext_available`,
+plus `cited_fulltext` at `:318`. **`citing_sentence` never reaches `f4_strength.py`.** F4 has no
+argument through which to consult the citing paper's words.
+
+**Reproduced on both evidence scopes.** Hedged citing sentence, extractor drops the hedge:
+
+```
+citing_sentence : Drug X was associated with a reduction in disease Y in adults [1].
+atomic_claims   : ['Drug X causes a reduction in disease Y in adults']
+derived         : F4  weaker_strength  reportable=True
+published span  : 'causes a reduction in disease Y'
+span in CITING SENTENCE? False      span in ATOMIC CLAIM? True
+'causes' in citing sentence?  False
+```
+
+Identical result on the **DEC-081 full-text path**, with the row stamped `evidence_scope:
+fulltext_sections` while the citing anchor came from neither the full text nor the citing paper.
+
+**The trigger is measured, not hypothetical.** CONTRADICTIONS 36b/36c record first-party N=5 runs:
+*"most instability is claim TEXT, not granularity"*, and only **18/21** sentences reproduce their
+claim set at `temperature=0`. Claim text is exactly the axis this rides on. **The bias has a
+direction:** dropping a hedge yields a claim stronger than the source — the only direction that fires
+F4. Adding one merely holds.
+
+**The in-package contrast settles "omission, not design":** `f7_entity.py:174/811/845/1132` — F7, the
+sibling accuser of the citing side — **hashes the citing sentence into its record and refuses a record
+whose hash does not replay.**
+
+**Nothing locks the current behaviour as intended.** `grep citing_sentence` across all three F4 test
+files returns zero hits; the suite is 148 passed with the defect present, because the API has nowhere
+to put a citing sentence.
+
+**Required, and the remedy is ZD's:** binding F4 to the citing sentence is a contract change to
+`refine_support_strength` and to the record shape. **The spec proposes no rule or constant.**
+
+**Two overstatements in the auditor's argument, corrected by the checkers and not load-bearing:**
+the blind queue genuinely cannot catch this (`judgment_band.py:655-666` whitelists seven keys, no
+`strength_records`; `LABEL_SPACE_F3 = ['F6','F3','ACCURATE']` has no F4), **but** the durable
+prediction rows carry both `citing_sentence` (`judgment_run.py:358`) and `strength_records` (`:653`),
+so a DEC-072 manual sample *could* catch it — nothing in code does. And the "recall half" argument is
+unsound: the generator is filled with `<<CLAIM>>` only (`:761-764`).
+
+### L-2 · The run-level reportability gate skips its F4 clause exactly when F4 is masked
+**`cre/f1/preband_contract.py:711-731`** · REPRODUCED
+
+The gate omits its F4 clause whenever the F4 is masked by F6/F7 precedence — so the one case where a
+confirmed F4 disappears from `emitted_labels` is the case the gate declines to check.
+
+### L-3 · `seam_status["F4"]["assessed_claims"]` counts claims F4 *refused* to assess
+**`cre/f1/judgment_run.py:1754-1757`** · REPRODUCED
+
+On the DEC-081 full-text path the counter includes held claims, so the denominator of any F4 rate
+overstates what was actually assessed.
+
+---
+
+## Blocked on ZD
+
+### Z-1 · The accusation path applies none of the ambiguity gates the clear path applies
+**`cre/f1/f4_strength.py:569-582` (clear) against `:617-646` (accusation)** · REPRODUCED
+
+`_none_consistent` refuses to clear on `pop != "equivalent"` or any `unknown` on any ladder. The
+accusation branch reads `pop` **only** on the `population_generality` branch and examines **only** the
+load-bearing dimension. Measured, holding everything else fixed:
+
+```
+population_relation=equivalent    -> F4 weaker_strength reportable=True
+population_relation=unknown       -> F4 weaker_strength reportable=True
+population_relation=incomparable  -> F4 weaker_strength reportable=True
+```
+
+The module's own posture at `:96-99` claims *"Any unknown / conflict ... holds as UNJUDGEABLE — never
+a fabricated F4."* **This is on your desk and not an implementer's because three of the project's own
+seven F4 regression PMIDs are papers with no comparable population at all** — symmetrising the gates
+may move them.
+
+### Z-2 · A cited-side level of `"none"` on the load-bearing ladder
+**`cre/f1/f4_strength.py:617-625`** · REPRODUCED · the model's token for *"the cited paper does not
+address this dimension"* is ranked as the weakest rung rather than treated as absence.
+
+---
+
+## Deferred
+
+### D-1 · Phase-2 quarantine rebuilds the record and loses the F4 strict-parse failure
+**`cre/f1/judgment_run.py:1501-1507`** · REPRODUCED · `_new_record` rebuilds, so an F4 strict-parser
+failure on the DEC-081 path does not survive into the artifact. **Re-raise with the L-1 contract
+change**, which touches the same record shape.
+
+## Rejected — do not re-raise
+
+| cite | claim | why |
+|---|---|---|
+| `f4_strength.py:627-632` | an F4 raised on `population_generality` is certified by a verifier never asked about population | True, but subsumed by Z-1, which covers the same gate asymmetry at the branch above it. |
+
+---
+
+## Guardrails
+
+- **`f4_strength.py` is NOT governed; `judgment_run.py`, `judgment_engine.py`, `parser.py`,
+  `schema.py`, `coverage_aggregate.py` ARE.** L-2, L-3 and D-1 move `judgment_run.py` /
+  `preband_contract.py` — **report the digest consequence, do not decide it.** CONTRADICTIONS 65 is
+  open on that class.
+- **`band_prompts.py` byte-identical**, blob OID `fa01126e2b9482d450065fd70cd0eb1fea816f5c`. L-1's
+  remedy must not reach for a prompt change — that is a re-freeze and a decision.
+- **DEC-081 is the governing scope decision**: PMC full text only, 539/1280 = 42.1%.
+- Precision-first, both halves. No invented constants. Specs only — no corpus run.
+
+## Definition of done
+
+- L-1: F4 sees the citing sentence, or the record states plainly that its citing anchor is
+  model-generated. **A verbatim gate against the model's own output is not a verbatim gate.**
+- L-2 and L-3 fixed; the F4 denominator counts only claims actually assessed.
+- Z-1 and Z-2 routed to ZD before any gate is symmetrised.
+- Suite green, old → new counts, environment stated (`anthropic` and `jsonschema` change the number).
+- `band_prompts.py` blob OID unchanged. State it.
+
+## Verification command
+
+```
+cd citation_repair_F1_handoff && PYTHONPATH=. python -m pytest cre/f1 -q
+```

@@ -8,9 +8,11 @@ each reference to its citance (the sentence in the body carrying the in-text
 Dependencies: lxml. Falls back to stdlib ElementTree if lxml is absent.
 """
 from __future__ import annotations
+import hashlib
 from typing import Iterator
 import os
 import re
+import sys
 
 try:
     from lxml import etree
@@ -21,6 +23,7 @@ except ImportError:                               # pragma: no cover
 
 from . import marker_scope
 from .schema import Reference, ClaimedRef
+from .titlefurniture import excise_leading_furniture
 
 
 def _localname(tag) -> str:
@@ -80,21 +83,27 @@ def _surnames_under(el) -> list[str]:
     that use <string-name><surname> would otherwise lose their author entirely
     (author_match -> None -> a genuine wrong-paper mis-bands, e.g. 31665581).
 
-    De-duped by the <surname> element's identity so a contributor wrapped as
-    <string-name><name><surname> (rare/malformed nesting) is counted once; order
-    follows the surname's document position. For a pure <name><surname> ref this
-    yields exactly the previous result (same surnames, same order)."""
+    De-duped by a stable document path under lxml.  lxml element proxies can be
+    garbage-collected and their Python ids reused during one traversal, so
+    ``id(surname)`` is not a stable de-duplication key there.  The stdlib
+    ElementTree fallback owns stable element objects and may safely use id()."""
+    tree = el.getroottree() if hasattr(el, "getroottree") else None
+    getpath = getattr(tree, "getpath", None)
+
+    def _key(node):
+        return getpath(node) if getpath is not None else id(node)
+
     out: list[str] = []
-    seen: set[int] = set()
+    seen: set = set()
     for node in el.iter():
         if _localname(node.tag) not in ("name", "string-name"):
             continue
         sn = node.find("surname")           # direct-child surname only
-        if sn is None or id(sn) in seen:
+        if sn is None or _key(sn) in seen:
             continue
         txt = _text(sn)
         if txt:
-            seen.add(id(sn))
+            seen.add(_key(sn))
             out.append(txt)
     return out
 
@@ -136,6 +145,26 @@ def _authors_from(node) -> list[str]:
     return authors or _surnames_under(node)
 
 
+def _first_author_is_collab(node) -> bool:
+    """Whether the first author contributor is a JATS ``<collab>``."""
+    groups = list(node.iter("person-group"))
+    containers = groups or [node]
+    for container in containers:
+        if groups:
+            ptype = (container.get("person-group-type") or "").strip().lower()
+            if ptype in _NON_AUTHOR_PERSON_GROUPS:
+                continue
+        for contributor in container.iter():
+            tag = _localname(contributor.tag)
+            if tag == "collab" and _text(contributor):
+                return True
+            if tag in ("name", "string-name"):
+                surname = contributor.find("surname")
+                if surname is not None and _text(surname):
+                    return False
+    return False
+
+
 def _pub_id(node, id_type: str) -> str:
     for pid in node.iter("pub-id"):
         if pid.get("pub-id-type") == id_type:
@@ -151,6 +180,16 @@ def _direct_text(node, *tags: str) -> str:
             value = _text(el)
             if value:
                 return value
+    return ""
+
+
+def _reference_title(node) -> str:
+    """Best direct JATS title, preserving the existing title-tag priority."""
+    for tag in ("article-title", "part-title", "chapter-title"):
+        candidates = [_text(el) for el in node.findall(tag)]
+        candidates = [value for value in candidates if value]
+        if candidates:
+            return max(candidates, key=len)
     return ""
 
 
@@ -216,11 +255,51 @@ def _serialize_with_markers(block):
     return "".join(parts), markers
 
 
-def _sentence_spans(text: str):
+def _sentence_spans(text: str, diagnostics: list[dict] | None = None):
+    """Return the legacy sentence spans and attest whether they tile ``text``.
+
+    The regex is intentionally unchanged: correcting segmentation changes the
+    citing sentence that governed existing F6 labels.  The additive diagnostic
+    turns any silent deletion into a durable, countable event without moving a
+    boundary or verdict.
+    """
     spans = []
     for m in _SENT_RE.finditer(text):
         if m.group().strip():
             spans.append((m.start(), m.end(), m.group()))
+    try:
+        cursor = 0
+        for start, end, _segment in spans:
+            assert start == cursor
+            assert end >= start
+            cursor = end
+        assert cursor == len(text)
+    except AssertionError:
+        uncovered: list[list[int]] = []
+        cursor = 0
+        for start, end, _segment in spans:
+            if start > cursor:
+                uncovered.append([cursor, start])
+            cursor = max(cursor, end)
+        if cursor < len(text):
+            uncovered.append([cursor, len(text)])
+        diagnostic = {
+            "kind": "sentence_spans_do_not_tile_input",
+            "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "text_length": len(text),
+            "span_count": len(spans),
+            "covered_chars": sum(end - start for start, end, _ in spans),
+            "uncovered_chars": sum(end - start for start, end in uncovered),
+            "uncovered_ranges": uncovered,
+        }
+        if diagnostics is not None:
+            diagnostics.append(diagnostic)
+        print(
+            "[sentence-partition-gap] "
+            f"sha256={diagnostic['text_sha256']} "
+            f"uncovered_chars={diagnostic['uncovered_chars']}",
+            file=sys.stderr,
+        )
     return spans
 
 
@@ -455,7 +534,19 @@ def link_citances(root, refs_by_id: dict, ordered_ref_ids=()) -> None:
     clustering = style == marker_scope.CITATION_STYLE_NUMERIC
     group_seq = 0
     for text, markers in serialized:
-        spans = _sentence_spans(text)
+        partition_failures: list[dict] = []
+        spans = _sentence_spans(text, partition_failures)
+        if partition_failures:
+            # Attach the same immutable facts to every reference mentioned in
+            # the affected block.  The list is copied per reference below so
+            # no two durable records share mutable state.
+            affected = {
+                rid for _pos, rids, _mtext in markers for rid in rids
+                if rid in refs_by_id
+            }
+            for rid in affected:
+                refs_by_id[rid].citance_sentence_partition_failures.extend(
+                    dict(item) for item in partition_failures)
         # Sentence occurrence -> its markers, in document order. Bucketed before
         # assigning so a sentence's rendered ranges can be read as a whole;
         # spans are visited in ascending order, so first-citance-wins resolves
@@ -479,6 +570,19 @@ def link_citances(root, refs_by_id: dict, ordered_ref_ids=()) -> None:
                         if clustering and 0 <= span_i < len(spans) else [])
             if len(clusters) < 2:
                 clusters = []
+            # A reference rendered in more than one cluster is not partitionable:
+            # narrowing it to the first cluster silently drops the later claims.
+            # Fail closed for the whole sentence, preserving the legacy claim
+            # list and moving no reference into a guessed scope.
+            if clusters:
+                rid_clusters: dict[str, set[int]] = {}
+                for cluster in clusters:
+                    for entry_index in cluster["entries"]:
+                        for rid in entries[entry_index][1]:
+                            rid_clusters.setdefault(rid, set()).add(
+                                cluster["index"])
+                if any(len(indexes) > 1 for indexes in rid_clusters.values()):
+                    clusters = []
             clusters_by_span[span_i] = clusters
             cluster_of_entry = {e: c["index"] for c in clusters
                                 for e in c["entries"]}
@@ -592,8 +696,10 @@ def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:
         cit = _citation_node(ref)
         if cit is None:
             continue
+        raw_title = _reference_title(cit)
+        clean_title, excised = excise_leading_furniture(raw_title)
         claimed = ClaimedRef(
-            title=_text(_first(cit, "article-title","part-title", "chapter-title")),
+            title=clean_title,
             authors=_authors_from(cit),
             year=_year_from(cit),
             journal=_text(_first(cit, "source")),
@@ -602,6 +708,8 @@ def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:
             raw=_text(cit),
             volume=_direct_text(cit, "volume"),
             pages=_pages_from(cit),
+            written_title_excised=excised,
+            first_author_is_collab=_first_author_is_collab(cit),
         )
         ref_id = ref.get("id") or f"ref{i}"
         reference = Reference(
@@ -651,7 +759,7 @@ def iter_pmc_dir(dirpath: str, *,
                 try:
                     yield from parse_pmc_xml(path, source_pmcid=pmcid)
                 except Exception as e:                       # noqa: BLE001
-                    print(f"[parse-skip] {pmcid}{suffix}: {e}")
+                    print(f"[parse-skip] {pmcid}{suffix}: {e}", file=sys.stderr)
                 break
         if not missing:
             return
@@ -666,4 +774,4 @@ def iter_pmc_dir(dirpath: str, *,
                 try:
                     yield from parse_pmc_xml(os.path.join(dp, fn), source_pmcid=pmcid)
                 except Exception as e:                       # noqa: BLE001
-                    print(f"[parse-skip] {fn}: {e}")
+                    print(f"[parse-skip] {fn}: {e}", file=sys.stderr)

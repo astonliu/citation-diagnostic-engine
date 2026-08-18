@@ -444,7 +444,8 @@ def test_matrix_bracketed_translated_title_is_deliberately_not_quoted():
 
     search_pubmed("[Effect of statins on lipid levels].",
                   s=FakeSession(handler))
-    assert seen["term"] == "[Effect of statins on lipid levels].[Title]"
+    assert seen["term"] == "[Effect of statins on lipid levels]."
+    assert seen["field"] == "title"
     assert '"' not in seen["term"]
 
 

@@ -353,8 +353,9 @@ def test_completer_raises_on_non_retryable(monkeypatch):
     _install_fake_anthropic(monkeypatch,
                             lambda n: (_ for _ in ()).throw(_FakeAPIError(401)))
     complete = run.make_completer("model-x", api_key="k")
-    with pytest.raises(_FakeAPIError):
+    with pytest.raises(run.NonRetryableProviderError) as caught:
         complete("prompt")
+    assert isinstance(caught.value.__cause__, _FakeAPIError)
 
 
 # --------------------------------------------------------------------------

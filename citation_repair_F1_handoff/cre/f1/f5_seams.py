@@ -26,6 +26,7 @@ stays False.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from typing import Optional
@@ -34,6 +35,9 @@ from . import f5_contradiction_prompt as fcp
 from .f5_supersession import (
     Attestation, CandidateWork, ComparabilitySource, EvidenceTier, NoticeStatus,
     RetrievalResult,
+    # The ONE date parser, borrowed rather than reimplemented: a second
+    # implementation is a second thing that can disagree about what a date is.
+    _parse_date,
 )
 
 # --------------------------------------------------------------------------
@@ -148,23 +152,44 @@ def classify_evidence_tier(meta: dict) -> EvidenceTier:
 # --------------------------------------------------------------------------
 # 3a. check_formal_notice -- the F5/F8 boundary.
 # --------------------------------------------------------------------------
-_RETRACTION_TYPES = ("retracted publication", "retraction of publication")
+# THE PT INVERSION. These two mean OPPOSITE things:
+#   "Retracted Publication"     -- THIS article was retracted
+#   "Retraction of Publication" / "Retraction Notice"
+#                               -- this article IS the notice that retracts
+#                                  some OTHER article
+# ``_RETRACTION_TYPES`` used to carry both, so citing a retraction notice --
+# legitimate, and routine in meta-research -- read as citing a retracted paper.
+# Matching is EXACT rather than substring for the same reason: "retracted
+# publication" is not a substring of "retraction of publication", but a looser
+# pattern like "retract" matches both and inverts the detector while still
+# looking like it works. ``ncbi_meta.RETRACTED_PUBTYPE`` is the F1/F8 layer's
+# statement of the same rule; this is deliberately the same shape.
+_RETRACTION_TYPES = ("retracted publication",)
+_RETRACTION_NOTICE_TYPES = ("retraction of publication", "retraction notice")
 _CORRECTION_TYPES = ("published erratum", "erratum")
 _EOC_TYPES = ("expression of concern",)
 
 
-def _notice_from_pubtypes(pubtypes) -> str:
+def _notice_from_pubtypes(pubtypes) -> tuple:
+    """Return ``(notice_kind, source_role)``.
+
+    The role is what the old single return value threw away: a work carrying a
+    retraction-NOTICE type is not a retracted work, so its kind is "none" -- and
+    saying only "none" would make it indistinguishable from a paper with no
+    notice types at all, which is how the inversion hid.
+    """
     lowered = [str(p).strip().lower() for p in (pubtypes or [])]
-    for p in lowered:
-        if any(t in p for t in _RETRACTION_TYPES):
-            return "retraction"
-    for p in lowered:
-        if any(t in p for t in _EOC_TYPES):
-            return "eoc"
-    for p in lowered:
-        if any(t in p for t in _CORRECTION_TYPES):
-            return "correction"
-    return "none"
+    if any(p in _RETRACTION_TYPES for p in lowered):
+        return "retraction", "retracted_article"
+    # Checked BEFORE the softer categories and reported explicitly: this work is
+    # the notice, not its subject, and F5 has no quarrel with it.
+    if any(p in _RETRACTION_NOTICE_TYPES for p in lowered):
+        return "none", "retraction_notice"
+    if any(any(t in p for t in _EOC_TYPES) for p in lowered):
+        return "eoc", "eoc_notice"
+    if any(any(t in p for t in _CORRECTION_TYPES) for p in lowered):
+        return "correction", "correction_notice"
+    return "none", "no_notice_type"
 
 
 def make_check_formal_notice(fetch_meta):
@@ -174,19 +199,73 @@ def make_check_formal_notice(fetch_meta):
     ``as_of_date`` is LOAD-BEARING, not decorative: Bakker et al. document papers
     being retracted while reviews are in press, so notice status is a function of
     the date you check. A notice dated AFTER as_of_date is not applied -- at that
-    moment it did not yet exist."""
+    moment it did not yet exist.
+
+    DATES ARE PARSED, NEVER COMPARED AS STRINGS. The comparison used to be
+    ``str(date) > str(as_of_date)``, which is lexicographic: "2024/01/15" sorts
+    ABOVE "2024-06-01" because "/" (0x2F) is above "-" (0x2D), so a real January
+    retraction read as CLEAR in June. The failure was also ASYMMETRIC -- a
+    non-ISO date that happened to sort earlier fell through into
+    ``NoticeStatus``, whose validator raises, so "15 Jan 2024" crashed the run
+    while "2024/01/15" silently cleared it. This file already states the
+    principle for the other direction ("a silently reinterpreted [date] is a
+    correctness bug, not a formatting nicety"); it is now applied here.
+
+    Every way the comparison can fail to happen is NAMED on the returned status
+    (``lookup_status`` / ``date_status`` / ``date_raw`` / ``source_role``) rather
+    than folded into a clear, and every one of them fails CLOSED: an
+    uncomparable notice stays in force.
+    """
     def check_formal_notice(work_id: str, *, as_of_date: str) -> NoticeStatus:
-        meta = fetch_meta(work_id) or {}
-        kind = _notice_from_pubtypes(meta.get("publication_types"))
-        date = meta.get("notice_date") or None
+        raw_meta = fetch_meta(work_id)
+        if not raw_meta:
+            # A LOOKUP THAT DID NOT ANSWER IS NOT A CLEAN RECORD. ``or {}``
+            # collapsed None (the reader failed) and {} (it answered, nothing to
+            # report) into one value, and both returned resolved_clear -- an
+            # outage wearing the same string as a verified absence, which is the
+            # confusion this module guards against for retrieval and did not
+            # guard against here. Unresolved, so it holds rather than clears.
+            return NoticeStatus(
+                notice_kind="none", notice_resolution="unresolved",
+                lookup_status="no_record", source_role="unknown")
+        kind, source_role = _notice_from_pubtypes(raw_meta.get("publication_types"))
         if kind == "none":
-            return NoticeStatus(notice_kind="none", notice_resolution="resolved_clear")
-        if date and as_of_date and str(date) > str(as_of_date):
-            # Not yet in force at the moment being assessed.
-            return NoticeStatus(notice_kind="none", notice_resolution="resolved_clear")
+            return NoticeStatus(
+                notice_kind="none", notice_resolution="resolved_clear",
+                lookup_status="ok", source_role=source_role)
+
         resolution = "unresolved" if kind == "eoc" else "flagged"
-        return NoticeStatus(notice_kind=kind, notice_resolution=resolution,
-                            date=str(date) if date else None)
+        raw_date = raw_meta.get("notice_date") or None
+        in_force = NoticeStatus(
+            notice_kind=kind, notice_resolution=resolution,
+            lookup_status="ok", source_role=source_role,
+            date_raw=str(raw_date) if raw_date is not None else None,
+            date_status="absent")
+        if raw_date is None:
+            # AN UNDATED NOTICE CANNOT BE TIMED. It stays in force -- the
+            # fail-closed direction -- but the gate did NOT run, and date_status
+            # says so instead of leaving "in force at every as_of_date" looking
+            # like a comparison that was made. Worth knowing how common this is:
+            # nothing in production populates notice_date today.
+            return in_force
+        try:
+            notice_day = _parse_date(str(raw_date), "notice_date")
+        except ValueError:
+            # Malformed, symmetrically: it never clears and it never crashes.
+            return dataclasses.replace(in_force, date_status="unparseable")
+        try:
+            as_of_day = _parse_date(str(as_of_date), "as_of_date")
+        except ValueError:
+            return dataclasses.replace(in_force, date_status="as_of_unavailable")
+        if notice_day > as_of_day:
+            # Not yet in force at the moment being assessed.
+            return NoticeStatus(
+                notice_kind="none", notice_resolution="resolved_clear",
+                lookup_status="ok", source_role=source_role,
+                date=str(raw_date), date_raw=str(raw_date),
+                date_status="compared")
+        return dataclasses.replace(
+            in_force, date=str(raw_date), date_status="compared")
     return check_formal_notice
 
 
@@ -241,12 +320,13 @@ def make_retrieve_superseding_candidates(search_candidates, *, cap: int = CANDID
     its entire yield. ``__post_init__`` already enforces empty <=> adequacy=empty,
     so a failure with no candidates is reported as empty+failure and the detector
     holds rather than concluding."""
+    executed_protocols = protocol_log if protocol_log is not None else []
+
     def retrieve_superseding_candidates(cited_meta: dict, claim: str, *,
                                         after_date: str, as_of_date: str) -> RetrievalResult:
         mesh = list((cited_meta or {}).get("mesh_terms") or [])
-        if protocol_log is not None:
-            protocol_log.append(retrieval_protocol(
-                after_date=after_date, as_of_date=as_of_date, mesh_terms=mesh))
+        executed_protocols.append(retrieval_protocol(
+            after_date=after_date, as_of_date=as_of_date, mesh_terms=mesh))
         try:
             hits = search_candidates(cited_meta, claim, after_date=after_date,
                                      as_of_date=as_of_date, cap=cap)
@@ -282,6 +362,7 @@ def make_retrieve_superseding_candidates(search_candidates, *, cap: int = CANDID
             rationale=(f"{len(candidates)} candidate(s) under {RETRIEVAL_PROTOCOL_VERSION}"
                        + (f"; CAPPED at {cap}, more may exist" if adequacy == "inadequate"
                           else "")))
+    retrieve_superseding_candidates.executed_protocols = executed_protocols
     return retrieve_superseding_candidates
 
 
@@ -322,6 +403,7 @@ def make_judge_contradiction(complete, *, span_miss_log=None):
     DEC-047 rule, and it is appended to ``span_miss_log`` so misses are counted
     rather than inferred."""
     def judge_contradiction(cited_source, candidate_source, claim: str) -> str:
+        judge_contradiction.calls += 1
         prompt = fcp.render_prompt(cited_source, candidate_source, claim)
         raw = complete(prompt)
         obj = json.loads(raw)
@@ -340,6 +422,7 @@ def make_judge_contradiction(complete, *, span_miss_log=None):
                 span_miss_log.append({"key": key, "entry": entry})
             obj[key] = text
         return json.dumps(obj)
+    judge_contradiction.calls = 0
     return judge_contradiction
 
 
@@ -351,6 +434,13 @@ def build_f5_seams(*, fetch_meta, fetch_abstract, search_candidates, complete,
                    thin_source_log=None, span_miss_log=None,
                    protocol_log=None) -> dict:
     """All six seams, ready for ``decide_f5(..., f5_seams=...)``."""
+    def observed_attestation(cited_meta: dict, claim: str, candidate_id: str,
+                             *, as_of_date: str):
+        observed_attestation.calls += 1
+        return find_supersession_attestation(
+            cited_meta, claim, candidate_id, as_of_date=as_of_date)
+    observed_attestation.calls = 0
+
     return {
         "check_formal_notice": make_check_formal_notice(fetch_meta),
         "classify_evidence_tier": classify_evidence_tier,
@@ -358,7 +448,7 @@ def build_f5_seams(*, fetch_meta, fetch_abstract, search_candidates, complete,
             fetch_abstract, fetch_fulltext, thin_source_log=thin_source_log),
         "retrieve_superseding_candidates": make_retrieve_superseding_candidates(
             search_candidates, cap=cap, protocol_log=protocol_log),
-        "find_supersession_attestation": find_supersession_attestation,
+        "find_supersession_attestation": observed_attestation,
         "judge_contradiction": make_judge_contradiction(
             complete, span_miss_log=span_miss_log),
     }

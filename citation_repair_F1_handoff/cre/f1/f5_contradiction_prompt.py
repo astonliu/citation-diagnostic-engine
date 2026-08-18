@@ -44,15 +44,19 @@ module ships no fabricated pair as an example.
 from __future__ import annotations
 
 from . import sentence_spans as ss
-from .f5_supersession import _SCOPE_MISMATCH_AXES as _f5_axes
+from .f5_supersession import (
+    F5_CONTRADICTION_PROMPT_VERSION,
+    F5_RESPONSE_PARSER_VERSION,
+    _SCOPE_MISMATCH_AXES as _f5_axes,
+)
 
 #: Bumped off ``f5_contradiction_v1``: the contract gained ``scope_mismatch_axis``,
 #: and a key-set change is exactly what the version exists to signal.
-CONTRADICTION_PROMPT_VERSION = "f5_contradiction_v2"
+CONTRADICTION_PROMPT_VERSION = F5_CONTRADICTION_PROMPT_VERSION
 
 #: DEC-022: the parser version moves independently of the prompt version. Both are
 #: stamped on every record.
-RESPONSE_PARSER_VERSION = "strict_f5_contradiction_spanids_v1"
+RESPONSE_PARSER_VERSION = F5_RESPONSE_PARSER_VERSION
 
 #: The ``ComparabilitySource`` fields that carry evidence text, in the order
 #: ``f5_supersession._source_text`` concatenates them -- so what the judge is shown
@@ -133,6 +137,13 @@ def resolve_span(entry, units_by_label) -> "tuple[str, str]":
 
     ids = entry.get("sentence_ids")
     if ids:
+        # One selected unit is verbatim by construction. Joining two units with
+        # an invented space is not: the source may contain a newline or other
+        # separator, and F5's downstream substring check correctly rejects the
+        # synthetic join. The prompt therefore requests exactly one id, and the
+        # resolver refuses multi-id replies instead of manufacturing evidence.
+        if not isinstance(ids, list) or len(ids) != 1:
+            return "", SPAN_SOURCE_UNRESOLVED
         by_id = {unit["id"]: unit["text"] for unit in units}
         texts = [by_id[sid] for sid in ids if sid in by_id]
         if len(texts) != len(list(ids)) or not texts:
@@ -209,10 +220,10 @@ decision to seem decisive; an abstention is recorded and reviewed by a human, a
 wrong confident answer is not caught.
 
 EVIDENCE SPANS -- POINT, DO NOT RETYPE. Each source below is shown as labelled blocks
-with numbered sentences. Cite evidence by naming the label and the sentence ids, like
-{"label": "results", "sentence_ids": ["s2"]}. Do not retype the sentence. If the
-passage you want spans two consecutive sentences, name both ids. Only if no single
-sentence carries it may you quote the passage as {"label": ..., "text": ...}.
+with numbered sentences. Cite evidence by naming the label and exactly one sentence
+id, like {"label": "results", "sentence_ids": ["s2"]}. Do not retype the sentence.
+If no single sentence carries the evidence, use the abstention values above; do not
+join multiple ids or manufacture a passage.
 
 CITED (earlier) WORK SOURCE:
 <<CITED_SOURCE>>

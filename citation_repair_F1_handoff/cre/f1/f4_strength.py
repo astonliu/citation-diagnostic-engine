@@ -1,5 +1,5 @@
 """F4 (overstatement / strength) discriminator -- a strength-refinement pass
-over coverage-``SUPPORTED`` claims, gated by an independent positive-only verifier.
+over coverage-``SUPPORTED`` claims, gated by a context-fresh positive-only verifier.
 
 The typed judgment engine already DERIVES F4 from ``SupportState.WEAKER_STRENGTH``
 (F6 -> F4 order locked in ``judgment_engine``), but nothing emits that state:
@@ -148,7 +148,7 @@ class F4Policy:
     verifier_prompt_version: str = "f4_verifier_v1"
     mode: str = "formal"                 # "formal" | "development"
     generator_model_id: str = ""         # recorded per-record + in the manifest
-    verifier_model_id: str = ""          # the DISTINCT verifier model in formal mode
+    verifier_model_id: str = ""          # recorded verifier role; may equal generator (DEC-072)
 
 
 _F4_MODES = frozenset({"formal", "development"})
@@ -193,9 +193,9 @@ def validate_f4_config(
         # runs both roles now. See the MODES section above for what that costs.
         if not policy.generator_model_id.strip():
             raise ValueError("formal mode requires a nonblank generator_model_id")
-        if verifier_call_llm is not None and not policy.verifier_model_id.strip():
+        if not policy.verifier_model_id.strip():
             raise ValueError(
-                "a wired verifier_call_llm requires a nonblank verifier_model_id; "
+                "formal mode requires a nonblank verifier_model_id; "
                 "an unrecorded verifier is a call nothing can reconstruct")
 
 
@@ -589,7 +589,7 @@ def _aggregate(parsed: dict, claim: str, cited_abstract: str) -> tuple:
     {"F4", "NOT_F4", "UNJUDGEABLE"}`` and ``new_state`` is the refined
     ``SupportState``. A returned ``WEAKER_STRENGTH`` here is a CANDIDATE: both
     spans have passed the verbatim-substring and >=2-alphanumeric-token gates,
-    and the independent verifier still has to confirm before F4 fires.
+    and the positive-only verifier role still has to confirm before F4 fires.
     """
     subject = parsed["subject_addressed"]
     pop = parsed["population_relation"]
@@ -700,7 +700,7 @@ def refine_support_strength(
       emit ``SUPPORTED`` without a usable abstract).
     * Otherwise one strict-JSON GENERATOR call is made and the deterministic
       aggregation (including the verbatim-span and >=2-token gates) decides. A
-      candidate ``WEAKER_STRENGTH`` then requires the independent positive-only
+      candidate ``WEAKER_STRENGTH`` then requires the positive-only verifier
       VERIFIER call to answer all four checks true; any false holds as
       ``UNJUDGEABLE`` (``verifier_disagreement``). ``SUPPORTED`` needs
       affirmative consistency; every other outcome holds as ``UNJUDGEABLE``.
@@ -718,8 +718,9 @@ def refine_support_strength(
     validate_f4_config(policy, call_llm, verifier_call_llm, require_generator=True)
     claim_values, support_rows = _validate_inputs(claims, support, evidence)
     cited_abstract = evidence.get("cited_abstract")
-    # Development mode may reuse the generator callable; formal mode has already
-    # proven verifier_call_llm to be a distinct callable.
+    coverage_scope = str(evidence.get("coverage_evidence_scope") or "abstract")
+    # DEC-072 permits one callable to fill both roles. Identity is recorded; no
+    # independence claim is inferred from a wrapper or caller-supplied model id.
     verifier = verifier_call_llm if verifier_call_llm is not None else call_llm
     reportable = policy.mode == "formal"
 
@@ -729,7 +730,12 @@ def refine_support_strength(
         if row.state is not SupportState.SUPPORTED:
             # UNESTABLISHED / UNJUDGEABLE pass through unchanged.
             refined.append(row)
-            records.append({"claim_index": index, "assessed": False})
+            records.append({
+                "claim_index": index, "assessed": False,
+                "f4_evidence_scope": "abstract",
+                "coverage_evidence_scope": coverage_scope,
+                "evidence_scopes_match": coverage_scope == "abstract",
+            })
             continue
 
         if not _abstract_present(cited_abstract):
@@ -751,6 +757,9 @@ def refine_support_strength(
                 "verifier_prompt_version": policy.verifier_prompt_version,
                 "mode": policy.mode,
                 "reportable": reportable,
+                "f4_evidence_scope": "abstract",
+                "coverage_evidence_scope": coverage_scope,
+                "evidence_scopes_match": coverage_scope == "abstract",
             }
             record["record_sha256"] = record_sha256(record)
             records.append(record)
@@ -824,6 +833,14 @@ def refine_support_strength(
             "load_bearing_dimension": parsed["load_bearing_dimension"],
             "f6_owned_escalation": parsed["f6_owned_escalation"],
             "citing_strength_span": parsed["citing_strength_span"],
+            # The citing-side span is anchored only to the model-generated
+            # atomic claim, not independently to the source paper.
+            "citing_anchor_source": "model_generated_atomic_claim",
+            "citing_anchor_note": (
+                "No source-side span attestation is available in this build; "
+                "the exact-match gate proves only that the generator quoted its "
+                "own atomic claim."
+            ),
             "cited_strength_span": parsed["cited_strength_span"],
             "derived": derived,
             "reason": reason,
@@ -836,6 +853,9 @@ def refine_support_strength(
             "verifier_prompt_version": policy.verifier_prompt_version,
             "mode": policy.mode,
             "reportable": reportable,
+            "f4_evidence_scope": "abstract",
+            "coverage_evidence_scope": coverage_scope,
+            "evidence_scopes_match": coverage_scope == "abstract",
         }
         if verifier_response is not None:
             record["verifier_response"] = verifier_response

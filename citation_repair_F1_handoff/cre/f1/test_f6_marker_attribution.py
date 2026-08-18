@@ -515,21 +515,26 @@ def test_manifest_counts_the_pairs_that_were_never_asked(tmp_path, monkeypatch):
 def test_never_asked_and_answered_and_failed_are_separate_numbers(
         tmp_path, monkeypatch):
     """DEC-079's class. B54/B55 are asked their two micelle claims and engage
-    NEITHER; B52/B53 are asked their two and support both. Four negatives, eight
-    never-asked, and the manifest must not merge them."""
+    NEITHER; B52/B53 are asked their two and support both. At abstract scope
+    off-topic is established=None, so it is an assessed unknown, not a negative;
+    eight never-asked pairs remain separately countable."""
     manifest, _items, _groups = _packet_band(tmp_path, monkeypatch, {
         "552": _covers(*PACKET_CLAIMS), "553": _covers(*PACKET_CLAIMS),
         "554": _covers(), "555": _covers()})
     scope = manifest["marker_scope"]
     assert scope["pairs_skipped_not_asked"] == 8
-    assert scope["claims_assessed_negative"] == 4
+    assert scope["claims_assessed_negative"] == 0
     assert scope["pairs_skipped_by_document"] == {"PMC13294812": 8}
 
 
-def test_the_negative_bucket_names_match_the_coverage_vocabulary():
-    """``marker_scope`` restates them to avoid a circular import, so they are
-    pinned here rather than left to drift out of the manifest contract."""
-    assert ms._NEGATIVE_BUCKETS == (cc.BUCKET_CONTRADICTED, cc.BUCKET_OFF_TOPIC)
+def test_negative_count_uses_established_tristate_not_bucket_name():
+    counts = ms.new_counts()
+    ms.tally_verdicts(counts, [
+        {"established": False},
+        {"established": None},
+        {"established": True},
+    ])
+    assert counts["claims_assessed_negative"] == 1
 
 
 def test_manifest_reports_its_own_cluster_sizing(tmp_path, monkeypatch):

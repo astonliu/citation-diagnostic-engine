@@ -20,10 +20,12 @@ L = [
  {"citation_id":"c1","label":"F1","claimed":{"title":"Invented quantum neuro synthesis","authors":["Smith"],"year":2024,"claimed_pmid":"111"},
   "retrieved":{"resolved":True,"title":"A real unrelated paper","authors":["Lee"],"pmid":"111"},
   "log":{"title_similarity":12.0,"author_match":False,"year_match":None,"llm_verdict":"fabrication","db_hits":{"pubmed":0,"crossref":0,"openalex":0}},
+  "citance":"Claim one [1].","cited_reference_marker":"[1]","source_pmcid":"PMC999",
   "source_pmid":"999","source_title":"Citing review"},
  {"citation_id":"c2","label":"F2","claimed":{"title":"Real study of widgets","authors":["Jones"],"year":2021,"claimed_pmid":"222"},
   "retrieved":{"resolved":True,"title":"Totally different paper","authors":["Kim"],"pmid":"222"},
   "log":{"title_similarity":20.0,"author_match":False,"llm_verdict":"reference_error","db_hits":{"pubmed":97}},
+  "citance":"Claim two [2].","cited_reference_marker":"[2]","source_pmcid":"PMC999",
   "source_pmid":"999","source_title":"Citing review"},
  {"citation_id":"c3","label":"accurate","claimed":{},"retrieved":{},"log":{}},
 ]

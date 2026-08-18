@@ -361,7 +361,7 @@ def test_f5_wired_through_runner_emits_temporal_finding(tmp_path, monkeypatch):
     (tmp_path / "PMC1.xml").write_text("<x/>", encoding="utf-8")
     monkeypatch.setattr(jr, "parse_pmc_xml", lambda path, source_pmcid=None: [make_ref("c")])
     out_dir = tmp_path / "out"
-    jr.run_natural_judgment(
+    manifest = jr.run_natural_judgment(
         str(tmp_path), str(out_dir),
         extractor=extractor_of("Drug X reduces outcome Y"),
         coverage_judge=judge_established(True),
@@ -379,6 +379,39 @@ def test_f5_wired_through_runner_emits_temporal_finding(tmp_path, monkeypatch):
     assert "F5" in row["findings"]
     assert row["f5_records"][0]["temporal_state"] == "QUALIFYING_CONTRADICTION"
     assert row["f5_records"][0]["f5_path"] == "B"
+    assert row["f5_records"][0]["response_parser_version"] == \
+        manifest["f5"]["response_parser_version"]
+    assert manifest["f5"]["attestation_lookup_performed"] is True
+    assert manifest["f5"]["attestation_calls"] == 1
+    assert manifest["f5"]["contradiction_judge_calls"] == 1
+    assert "F5_CONTRADICTION_PROMPT" in manifest["prompt_sha256"]
+    assert "retrieval_protocol" not in manifest["f5"]
+    assert "exposed no executed-protocol" in manifest["f5"]["retrieval_protocol_note"]
+    assert manifest["reportability"]["reportable"] is False
+    assert any("F5_reportable" in failure
+               for failure in manifest["reportability"]["failures"])
+
+
+def test_f5_seams_and_evidence_builder_are_an_xor_guard(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="supplied together"):
+        run(tmp_path, [make_ref("c")],
+            extractor=extractor_of("Drug X reduces outcome Y"),
+            coverage_judge=judge_established(True), disposition=CLEARED,
+            monkeypatch=monkeypatch, f5_seams={})
+
+
+def test_f5_manifest_distinguishes_absence_from_retrieval_outage():
+    runtime = {"retrieval_calls": 1, "attestation_calls": 0,
+               "judge_calls": 0, "retrieval_protocols": []}
+    absence = jr._f5_manifest_block(None, [{
+        "retrieval_status": "ok", "retrieval_adequacy": "empty",
+        "candidate_assessments": []}], runtime)
+    outage = jr._f5_manifest_block(None, [{
+        "retrieval_status": "failure", "retrieval_adequacy": "empty",
+        "candidate_assessments": []}], runtime)
+    assert absence["retrieval_status_counts"] == {"ok": 1}
+    assert outage["retrieval_status_counts"] == {"failure": 1}
+    assert absence["negative_reason_counts"] != outage["negative_reason_counts"]
 
 
 def test_f5_unwired_holds_temporal_unjudgeable(tmp_path, monkeypatch):
@@ -709,14 +742,14 @@ def test_wired_f6_still_dominant(tmp_path, monkeypatch):
 # F4 modes through the orchestrator: development default, formal reportable,
 # config defects abort BEFORE any output (never per-pair quarantine).
 # --------------------------------------------------------------------------
-def test_wired_default_is_development_mode_not_reportable(tmp_path, monkeypatch):
+def test_wired_default_is_formal_mode_per_dec072(tmp_path, monkeypatch):
     rows, m = run_wired(tmp_path, monkeypatch, coverage=judge_established(True),
                         call=disc_llm(f4=f4_fires()))
-    assert m["f4"]["mode"] == "development"
-    assert m["f4"]["reportable"] is False
+    assert m["f4"]["mode"] == "formal"
+    assert m["f4"]["reportable"] is True
     sr = rows[0]["strength_records"][0]
-    assert sr["mode"] == "development"
-    assert sr["reportable"] is False
+    assert sr["mode"] == "formal"
+    assert sr["reportable"] is True
 
 
 def test_wired_formal_mode_is_reportable_with_model_ids(tmp_path, monkeypatch):
@@ -797,7 +830,8 @@ def test_formal_without_verifier_now_runs(tmp_path, monkeypatch):
         coverage_judge=judge_established(True), fetch_abstract=abstract_ok,
         preband_disposition={"c": "cleared"},
         discriminator_call_llm=disc_llm(f4=f4_json()),
-        f4_policy=F4Policy(mode="formal", generator_model_id="claude-opus-5"),
+        f4_policy=F4Policy(mode="formal", generator_model_id="claude-opus-5",
+                           verifier_model_id="claude-opus-5"),
         model="claude-opus-5")
     assert out_dir.exists()
     assert manifest["f4"]["mode"] == "formal"

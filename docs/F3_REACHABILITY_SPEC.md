@@ -207,3 +207,181 @@ positive evidence the project has for this label; if wiring the seams changes th
 ```
 cd citation_repair_F1_handoff && PYTHONPATH=. python -m pytest cre/f1 -q
 ```
+
+---
+
+# Audit loop — F3, rounds 1–3 (2026-08-17) · **NOT CLEAR — CLEAR WITHDRAWN 2026-08-18**
+
+> **⚠ F3 WAS DECLARED CLEAR ON 2026-08-17 AND THAT VERDICT IS WITHDRAWN.**
+>
+> Three round-2 findings had never been graded — their checker triad died on a session limit — and F3
+> completed its clear-streak around them. They were graded on 2026-08-18: **1 LAND, 1 DEFER, 1 REJECT.**
+> **A LAND resets the streak. F3 did not converge.**
+>
+> The driver rule has been corrected so this cannot recur: a stratum can no longer reach CLEAR while
+> any finding is unadjudicated (`INCOMPLETE-UNADJUDICATED-FINDINGS`). F3 is the only stratum this
+> affected — F7 and F8 had every round fully graded.
+
+**Status: NOT CONVERGED.** 9 findings adjudicated across rounds 1–3 →
+**1 LAND · 5 DEFER · 1 ASK-ZD · 2 REJECT**. Three checkers per round, each opening every cited line
+and re-running every probe. Bar for LAND: unanimous, all three ≥95% confidence.
+
+**No further rounds will be run** (ZD, 2026-08-18). This spec is the record as it stands.
+
+## ⚠ READ FIRST — two things qualify this CLEAR
+
+**1. F3 cannot fire in the production configuration.** That is why nothing landed. Every item below is
+**latent** — it becomes live the moment the F3 gate opens. Fix them as part of opening it, not before.
+**Do not report an F3 rate.**
+
+**2. The three round-2 findings are now graded** (2026-08-18 backfill). One landed — see L-1 below.
+The other two are recorded under Deferred and Rejected.
+
+---
+
+## Landed findings
+
+### L-1 · The F3 candidate collector turns an NCBI outage into "not a review", silently
+**`cre/f1/f3_candidate_collect.py:318-330` and `:342-349`, with `cre/f1/ncbi_meta.py:103-121`, `:123-128`, `:212-232`** · REPRODUCED · unanimous LAND at **96 / 96 / 97**
+
+**This is the one item in F3 that is not behind the unopened gate.** `f3_candidate_collect.py` is a
+standalone program with its own CLI (`:395-451`, `main` at `:424`), it does not touch `judgment_run`
+or `judgment_engine`, and **it fires on its own default configuration** (`p.set_defaults(require_review_oa=True)` at `:420`).
+
+**Mechanism.** `ncbi_meta.is_review` is tri-state — `None` means "could not ask". The collector tests
+it with bare truthiness (`if review:` at `:324`, `if rec["cited_is_review"] and rec["cited_pmcid"]` at
+`:344`), so **`None` and `False` take the same branch** and both increment the single
+`counts["filtered_out"]` at `:349`. The same collapse happens at `:329` on `cited_pmcid`, where
+`ncbi_meta.py:229-232` returns `""` on `ResolverError` — against its own contract at `:224-225`, which
+names this caller and tells it to use the batch helper precisely because the single helper
+*"CANNOT distinguish an outage from an absence."*
+
+**Reproduction** (Reality checker's own run of the real `collect()`):
+
+```
+A EFetch ANSWERED review    : cited_is_review=1 review_has_pmcid=1 emitted=1 filtered_out=0  rows=1
+B EFetch ANSWERED not-review: cited_is_review=0 review_has_pmcid=0 emitted=0 filtered_out=1  rows=0
+C EFetch FAILED -> None     : cited_is_review=0 review_has_pmcid=0 emitted=0 filtered_out=1  rows=0
+B counts == C counts ? True
+```
+
+Written manifests for B and C differ **only in the `out_dir` string.**
+
+**Why it matters.** This collector is **the project's only source of F3 calibration examples**, and
+F3 starts from zero confirmed instances. A network outage during collection is indistinguishable from
+a corpus that genuinely contains no reviews — and the bias runs one way, toward *"F3 does not occur"*,
+which is the reading DEC-079 exists to forbid.
+
+**It also publishes a false claim in a shipped artifact.** The module's own invariant at
+**`f3_candidate_collect.py:29-31`** — *"NO SUPPRESSION BY HIDDEN FUNNEL. Every stage that drops a
+candidate is counted in the manifest, so the funnel is auditable"* — is untrue: a stage drops
+candidates and no counter names the drop. **Cite `:29-31`, not `:24-26`** — the auditor's anchor was
+off by five lines and all three checkers caught it.
+
+**Required.** Test the tri-state with `is True` / `is None`, not truthiness, and give "could not ask"
+its own counter in the manifest. **The fix is provably behaviour-neutral** — the Blast-radius checker
+executed all three values and confirmed `if review:` and `if review is True:` are equivalent for every
+reachable value, so the emitted candidate stream is byte-identical. It is purely additive
+instrumentation.
+
+**Cost: none.** Neither `f3_candidate_collect.py` nor `ncbi_meta.py` is in `GOVERNING_MODULES`, so no
+governed digest moves and CONTRADICTIONS 65 is not deepened. The collector has **zero production
+importers** (`f3_phase1_frame.py`'s import at `:68-74` is entirely commented out). No constant is
+proposed.
+
+**Precedent it fails to honour:** `ncbi_meta.py:15-30` records ZD's own ruling of 2026-08-11 —
+*"An outage must never again be readable as an absence of full text."* It was applied to
+`ncbi_pmids_to_pmcids` and never carried to this caller.
+
+**Test gap, confirmed:** `test_f3_candidate_collect.py`'s `patched_ncbi` fixture always returns a
+list; there is no `None` stub anywhere in the file, and no `test_ncbi_meta.py` exists.
+
+---
+
+## Deferred — implement when the F3 gate opens
+
+### D-1 · Evidence spans are published without checking they appear in the source
+**`cre/f1/f3_provenance.py:460-472`** · REPRODUCED
+
+A confirmed F3 publishes both of its evidence spans with no verification that either occurs in the
+text it cites. **Required:** verify before publishing, or mark the span unverified in the record.
+
+### D-2 · The origin chain names a PMID the model never saw
+**`cre/f1/f3_provenance.py:452-471`** · REPRODUCED
+
+V3 selects by title; the origin chain then publishes a PMID the code never verified and the model was
+never shown. **Required:** the chain must name only identifiers the trace actually resolved.
+
+### D-3 · The band feeds a PMID to a PMCID-keyed seam
+**`cre/f1/judgment_band.py:313-315`** · REPRODUCED
+
+Wrong identifier type at a seam boundary — the annotator's F3-V3 rightful-primary candidate path.
+**Required:** convert or refuse; do not pass a PMID where a PMCID is the key.
+
+### D-4 · The collector's funnel manifest is overwritten by each resume
+**`cre/f1/f3_candidate_collect.py:354-392`** · REPRODUCED
+
+Each resume overwrites the manifest and it never counts the candidates a prior pass saw. **Required:**
+accumulate across resumes, or state in the artifact that the counts describe the last pass only.
+
+---
+
+## Blocked on ZD
+
+### Z-1 · The blind annotation queue offers every scoreable record the F3 slice's three-label space
+**`cre/f1/judgment_band.py:103-105`** · REPRODUCED
+
+Every scoreable record is offered the F3 slice's label space, including records the F3 gate never
+considered. **The question is what the annotator is being asked**, which is a taxonomy and instrument
+decision, not an implementation detail. Bears on the replacement annotator codebook, which does not
+exist since `TAXONOMY_DECISION_RULES.md` was voided by DEC-080.
+
+---
+
+### D-5 · Seven F3 trace outcomes collapse into one recorded rationale
+**`cre/f1/f3_provenance.py:535`** · REPRODUCED · DEFER (88 / 95 / 92)
+
+Seven distinct outcomes — including *"the trace never ran"* and *"the trace ran and the primary
+refuted the finding"* — are written as one string, `"restatement not confirmed within hop budget"`,
+which is **affirmatively false** for several of them. Deferred because it has never executed in any
+real run and unlocks no work an adopted artifact does not already order. **Re-raise when the F3 gate
+opens** — the string occurs exactly once in the package, so the fix is contained.
+
+---
+
+## Rejected — do not re-raise
+
+| cite | claim | why |
+|---|---|---|
+| `preband_contract.py:721-727` | F3's only governance gate cannot fail — both conjuncts are implied by an F3 label having been emitted | **Mechanically true and independently confirmed by all three checkers**, but not reachable in the production configuration, and already ordered at the same lines by this spec's own Change section. The Reality checker tried to construct an input that should fail the gate and could not. |
+| `judgment_run.py:660-672` | the F3 V2 discriminator spends one LLM call per claim on every fully-supported reference | Real cost observation, but not a correctness defect, and it sits on a path the production configuration does not reach. |
+
+---
+
+## Guardrails
+
+- **`TAXONOMY_DECISION_RULES.md` is VOID in its entirety (DEC-080).** Its *"zero atomic claims
+  supported → F3"* rule is the **inverse** of DEC-017, which defines F3 as **provenance only, at FULL
+  coverage**. The file is still in the repo. **If any code path implements the void rule, that is a
+  finding, not a design choice.**
+- **`F3F7_PACKET_AND_GATE_SPEC.md` Change 1 is KNOWN-WRONG** where it derives the label set from
+  `emitted_labels` / `seam_status` — three of the five `fired: 0` mechanisms are invisible to that
+  rule. The builder must iterate `rec["findings"]` and `strength_records[*].derived`.
+- **`judgment_run.py`, `judgment_band.py`, `parser.py`, `schema.py` are GOVERNED.** Four digests have
+  already moved. CONTRADICTIONS 65 is open on this class — **report, do not decide.**
+- **`band_prompts.py` byte-identical**, blob OID `fa01126e2b9482d450065fd70cd0eb1fea816f5c`.
+- Precision-first, both halves. No invented constants. Specs only — no corpus run.
+
+## Definition of done
+
+- The three unadjudicated round-2 findings graded by a full checker triad **before any F3 work lands**.
+- Each deferred item carried into the gate-opening spec.
+- **`seam_status` no longer reports a wired F3 that cannot execute** — or the gate is opened.
+- No code path implements the voided zero-support rule; prove it with a grep and a cite.
+- Suite green, old → new counts, environment stated.
+
+## Verification command
+
+```
+cd citation_repair_F1_handoff && PYTHONPATH=. python -m pytest cre/f1 -q
+```

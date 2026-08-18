@@ -279,3 +279,207 @@ movement means a Part B item leaked into Part A.
 ```
 cd citation_repair_F1_handoff && PYTHONPATH=. python -m pytest cre/f1 -q
 ```
+
+
+---
+
+---
+
+# Audit loop — F2, rounds 2–6 (2026-08-18) · **not converged, stopped by decision**
+
+6 rounds. **5 landed**, all unanimous at ≥95%. Every finding below was reproduced on **both trees** —
+`cre-f3f7` and the `feat/f2-matcher-revision` branch of record — and each entry says so.
+
+## ⚠ READ FIRST — none of this changes F2 banding
+
+**Seed 47 is adjudicated. `RESERVE_SEEDS = (31,37,41,43,47)` is EXHAUSTED. 74/80 = 0.9250 has no
+replacement.** Three of the five findings below move verdicts on the frame that produced that figure.
+**Do not fix them and re-report the rate.** Fix them, then run the zero-verdict-movement gate
+(`F2_MERGE_FOURFILE_CARRY_SPEC.md`) and report what moved. If anything moves, stop and report.
+
+---
+
+## L-1 · `mixed_identity_citation` — the rule that concludes "two different works" — returns `same_work=True`
+
+**Cite:** `work_identity.py:496-515` (the rule) · `:712-714` (evidence constructed) · `decide.py:53-58`
+(the published sentence) · `eval_report.py:504-511` (the frame exit)
+**Both trees:** F2-branch `work_identity.py:1310-1314`, `decide.py:65-71` — identical source.
+**Verdict:** LAND · 96/96/96 · REPRODUCED end to end on the live path and the offline path.
+
+`_mixed_identity_citation` fires only on a five-part conjunction: exact DOI, venue, volume and first page
+agree, **and** the cited-work identity conflicts — title similarity strictly **below 0.85**, a year gap
+≥2, and ≥2 claimed surnames absent from the resolved roster. Its docstring at `:498` states the
+conclusion in one sentence: *"a citation assembled from two different works."* That is textbook F2.
+
+**The conclusion is written into a field named `same_work`, set `True`** (`:712`). `flag_verdict`
+(`biblio_match.py:558-561`) reads only the boolean, so it cannot tell this rule from
+`authoritative_title_alias`. The human adjudicator is then handed
+*"Resolved identifier appears to represent the same work or a work variant"* (`decide.py:53-58`), and
+offline the row is dropped from **both** the numerator and the denominator
+(`eval_report.py:504-511`) as `same_work_variant_excluded` — whose own docstring justifies the exclusion
+by *"an (near-)identical title means the identifier resolves to the same work"*. **The rule's own
+precondition caps title similarity below 0.85.**
+
+Measured on one row (exact shared DOI, same journal/volume/first page, 2016 vs 2018, four claimed
+surnames none of which are in the three-name resolved roster):
+
+```
+title_sim = 0.7019
+assess_same_work -> same_work=True reason='mixed_identity_citation'
+VERDICT = review_same_work_variant
+fields: author_match=False first_author_match=False year_match=False doi_match=True
+metric: {'flagged_f2_high': 0, 'denominator_scoreable': 0, 'same_work_variant_excluded': 1}
+```
+
+**Fix direction:** this rule's evidence is not same-work evidence. Give it its own disposition, and at
+minimum stop `decide.py` publishing a sentence the rule contradicts. **Deciding whether the row belongs
+in the F2 frame is a verdict-movement question — route it, do not take it.**
+
+---
+
+## L-2 · `_derivative_block` fires on a genre phrase in the resolved record's **own** subtitle, and pre-empts PubMed's own alternate-title proof
+
+**Cite:** `work_identity.py:371-374` (the block) · `:30-36` (`_DERIVATIVE_RE`) · `:693-695` (the
+unconditional early return) · `:729-732` (the authority it pre-empts) · `biblio_match.py:566`
+(`not identity.blocked_by`), `:600-601` (the HIGH-band fall-through) · `lookup.py:225` (MEDLINE `TT`)
+**Both trees:** F2-branch `work_identity.py:821-824`, `:1244-1257`, `:1331`.
+**Verdict:** LAND (r5, 96/96/96) · ASK-ZD on a narrower re-file (r4) · REPRODUCED against **live PubMed
+records**, not invented strings.
+
+`_DERIVATIVE_RE` needs only a genre noun preceded by start-of-string or `[.:;] ` and followed by
+punctuation or `on|to|of|for`. The ordinary biomedical subtitle `"<Topic>: A Systematic Review of …"`
+satisfies it. The block is raised from **the resolved record's own title**, and the only other condition
+is `ct != rt` — true for essentially every real citation pair. So the code raises a derivative block
+having established only that **the resolved paper is a review**.
+
+The return at `:693-695` is unconditional and sits **above** `authoritative_title_alias`,
+`canonical_title_exact`, `malformed_title_wrapper` and all four translation rules. It also clears
+`biblio_match.py`'s 0.92 near-identical-title quarantine, so the row falls to
+`if disagree: return VERDICT_WRONG_PAPER` — the HIGH band, counted into `flagged_f2_high`.
+
+Matched case/control, four words changed inside the resolved record's own subtitle and nothing else:
+
+```
+E'  resolved: [Perioperative management of meningioma: a systematic review of the available evidence]
+    blocked_by='derivative_publication' -> review_wrong_paper      flagged_f2_high: 1
+F'  resolved: [Perioperative management of meningioma: an appraisal of the available evidence]
+    blocked_by=''  reason='authoritative_title_alias' -> review_same_work_variant
+```
+
+In F′ MEDLINE's `TT` field proves the claimed string is an alternate title of that very record. In E′
+that proof is never consulted. Live-measured population: 51,121 PubMed records with "systematic review
+of" in the title, 65,748 with "meta-analysis of", 54,648 with a further genre form.
+
+**Fix direction:** the block must establish a *relationship* between the pair, not a property of one
+record. At minimum, move the block **below** `authoritative_title_alias` so an authority-attested
+alternate title cannot be pre-empted by a genre keyword.
+
+---
+
+## L-3 · `_roster_containment` deletes every romanized surname shorter than four characters
+
+**Cite:** `work_identity.py:612-619` (`_surname_set`) · `:622-630` (`_roster_containment`) · consumed at
+`:889` (RULE B) and `:838-840` (RULE F low tier)
+**Both trees:** F2-branch `work_identity.py:1079-1086`, `:1089-1097`, `:1489`, `:1437-1440` — byte-identical.
+**Verdict:** LAND · 96/96/96 · REPRODUCED, including on **live PubMed rosters**.
+
+`:617` keeps a token only when `len(t) >= 4`. The docstring one line above says the function *"drops
+given-name initials"* — initials are one character. The four-character floor additionally deletes Li, Wu,
+Xu, Ma, Hu, Lu, Yu, Sun, Guo, Han, Gao, Kim, Lee, Cho, Tan, Zhu, Liu, Ito, Abe, Roy, Das, Rao and the
+rest of that class. (The second conjunct `not re.fullmatch(r"[a-z]{1,3}", t)` can never be False once
+`len(t) >= 4` has passed — **it is itself a check that cannot fail**, and it is the fossil of the intent
+the docstring states.)
+
+Two failures, opposite directions:
+
+```
+identical CJK-romanized roster   -> _roster_containment = 0.00
+identical Latin roster           -> _roster_containment = 1.00
+   (RULE B floor 0.75, RULE F floor 0.60 — both unreachable for the first)
+
+PMID 38340178 first 5 AU ['Yu Z','Wu X','Zhu J','Yan H','Li Y']
+   _surname_set = set()   containment(roster, THE SAME roster) = 0.00
+PMID 37797632 first 5 AU ['Gao X','Xu N','Li Z','Shen L','Ji K']
+   _surname_set = {'shen'} containment = 1.00   <- measured over ONE of five authors
+```
+
+Band flip on two rows identical but for the surnames:
+
+```
+Latin surnames : roster_containment=1.00 -> same_work='conference_abstract_publication' -> review_same_work_variant
+CJK surnames   : roster_containment=0.00 -> same_work=False                             -> review_wrong_paper
+```
+
+The over-permissive half defeats the guard's stated purpose. The comment at `:874-877` says containment
+(≥0.75, "not mere overlap") exists to stop sibling trials that share only serial co-authors —
+DAPA-HF vs DELIVER, the rivaroxaban family. With one long surname surviving, two different trials
+sharing one serial co-author score **1.00**, and `identity_signals` publishes the token
+`"roster_containment"` to the adjudicator as corroboration measured over one name.
+
+**And `0.0` is unreadable** — a roster that could not be compared and a roster with genuinely zero
+overlap return the same float.
+
+**The F2 branch already knows.** `work_identity.py:1100-1111` on that branch describes this in its own
+words, names a concrete case (PMC12733676:B29 — Mao/Li/Xie/Lau), calls the blindness *"systematic for
+CJK-romanized names"*, and states why it was not fixed: **RULE B's thresholds were calibrated against
+`_surname_set`'s output.** That is a real cost, not a dismissal — but it means the defect was left live
+in a same-work proof rule and its size was never measured.
+
+**Fix direction:** two separable steps. (a) Make an unmeasurable roster distinguishable from a
+zero-overlap roster — that alone is diagnostic and moves no verdict. (b) Fix the filter to drop
+initials rather than short surnames. **(b) moves verdicts and recalibrates RULE B — route it.**
+
+---
+
+## L-4 · `n_ambiguous_dropped` is structurally incapable of being non-zero, and three tests assert `== 0`
+
+**Cite:** `f2_run_v3.py:307` · **Verdict:** LAND · 96/96/96 · REPRODUCED
+
+Published in every reband `summary.json`. A run that dropped nothing and a run whose drop path never
+executed are the same output. The three tests that assert `== 0` cannot fail.
+
+## L-5 · `same_work_newly_quarantined` over-reports rows that never moved
+
+**Cite:** `f2_run_v3.py:382-388` · **Verdict:** LAND · 96/97/96 · REPRODUCED
+
+It counts proof-rule quarantines in `[0.92, 0.95)` as rows the 0.92 threshold move created. **The audit
+list that exists to prove no row moved reports rows that did not move.**
+
+---
+
+## ASK-ZD
+
+**`_series_conflict`'s year branch reads a wrapped citation's publication year as a serial-edition
+ordinal** (`work_identity.py:355-358`; F2-branch `:805-808`, byte-identical — this one survives branch
+divergence). It runs **before** `malformed_title_wrapper`, so a same-work row with an exact DOI is forced
+into the HIGH band by the very token the wrapper rule treats as same-work evidence. Confidence that the
+defect is real: ~97. Confidence it should be actioned inside this loop: **below 95** — the year branch is
+load-bearing for the AHA *"Statistics-2017 Update"* / *"-2019 Update"* family, where romans and edition
+ordinals are empty on both sides and the year branch is the only thing catching it. **Narrowing it wrong
+converts a visible false accusation into an invisible false clear.** DEC-047A is not cover: its "Bounds
+honoured" clause authorises exactly two fixes, and this is neither.
+
+## Guardrails
+
+- **No F2 banding change. No Part B item.** Seed 47 is adjudicated and the reserve is exhausted.
+- `band_prompts.py` byte-identical — blob OID `fa01126e2b9482d450065fd70cd0eb1fea816f5c`.
+- `schema.py` is GOVERNED; CONTRADICTIONS 65 is OPEN. Report the digest consequence, do not decide it.
+- **Both trees.** Every fix must be applied on whichever tree ships; each finding above names its
+  F2-branch anchors. Do not assume `cre-f3f7` line numbers hold there.
+- Precision-first, both halves. No invented constants. Specs only — no corpus run.
+
+## Definition of done
+
+- `mixed_identity_citation` no longer publishes a same-work sentence, and its frame treatment is a
+  decision on the record rather than a side effect of a boolean.
+- An authority-attested alternate title cannot be pre-empted by a genre keyword.
+- An unmeasurable roster is distinguishable from a zero-overlap roster in the published record.
+- `n_ambiguous_dropped` can be non-zero, or it goes.
+- **The zero-verdict-movement gate run after all of the above, result stated as a row count.**
+- Suite: old → new counts, environment stated.
+
+## Verification command
+
+```
+cd citation_repair_F1_handoff && PYTHONPATH=. python -m pytest cre/f1 -q
+```

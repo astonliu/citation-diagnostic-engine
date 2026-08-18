@@ -377,7 +377,13 @@ def _canonical_disp(tmp_path, ids, *, corpus_sha=""):
     side = {"schema": pc.DISPOSITION_SCHEMA,
             "artifact_sha256": hashlib.sha256(body.encode()).hexdigest(),
             "f2_commit": "d90196a7be3fe64e1eb9225a17b2ce4a26e0ecd1",
-            "row_count": len(ids)}
+            "row_count": len(ids),
+            "check_attestations": {
+                name: {"performed": True, "source": "unit_fixture",
+                       "snapshot_date": "2026-08-18", "attempted": len(ids),
+                       "answered": len(ids), "transport_failed": 0,
+                       "fired": 0, "reason": "fixture"}
+                for name in ("F1", "F2", "F8")}}
     if corpus_sha:
         side["corpus_manifest_sha256"] = corpus_sha
     (tmp_path / ("disp.jsonl" + pc.MANIFEST_SUFFIX)).write_text(
@@ -907,14 +913,18 @@ def test_the_self_verification_risk_is_in_the_manifest(tmp_path, monkeypatch):
         f4_verifier_call_llm=call)
     sv = manifest["f4"]["self_verification"]
     assert sv["self_verified"] is True
-    assert sv["independent_verifier"] is False
+    assert sv["independent_verifier"] is None
+    assert sv["independence_verified"] is False
     assert sv["governing_decision"] == "DEC-072"
     assert "human-adjudicated sample" in sv["note"]
 
 
 def test_development_mode_is_still_not_reportable(tmp_path, monkeypatch):
+    from .f4_strength import F4Policy
     call = disc_llm(f4=f4_json(), v2=ORIGINATES)
-    manifest, _ = _f4_run(tmp_path, monkeypatch, discriminator_call_llm=call)
+    manifest, _ = _f4_run(
+        tmp_path, monkeypatch, discriminator_call_llm=call,
+        f4_policy=F4Policy(mode="development", generator_model_id="claude-opus-5"))
     assert manifest["f4"]["mode"] == "development"
     assert manifest["f4"]["reportable"] is False
 
@@ -924,7 +934,8 @@ def test_zero_generator_calls_is_still_not_reportable(tmp_path, monkeypatch):
     from .f4_strength import F4Policy
     manifest, _ = _f4_run(
         tmp_path, monkeypatch, discriminator_call_llm=None,
-        f4_policy=F4Policy(mode="formal", generator_model_id="claude-opus-5"))
+        f4_policy=F4Policy(mode="formal", generator_model_id="claude-opus-5",
+                           verifier_model_id="claude-opus-5"))
     assert manifest["f4"]["generator_calls"] == 0
     assert manifest["f4"]["reportable"] is False
 

@@ -10,7 +10,8 @@ F1 IS REACHABLE ONLY FROM EVIDENCE THAT WAS ACTUALLY GATHERED. Each clause of
 that conjunction has a matching "and we really checked" precondition, because
 every one of them used to be satisfiable by a failure:
 
-  * "dead PMID" requires the EFetch to have ANSWERED (``pmid_transport_status``).
+  * "dead PMID" requires the identifier lookup to have ANSWERED
+    (``pmid_transport_status``).
     An unanswered fetch is held, never read as an absence.
   * "not found in any database" requires EVERY confirmation search to have
     answered (``confirm.fully_answered``). A partial sweep cannot support a
@@ -77,10 +78,18 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
     # an automatic F1/F2 accusation.
     if log.same_work_reason:
         ref.label, ref.confidence = HUMAN_REVIEW, "MED"
-        ref.rationale = (f"Resolved identifier appears to represent the same work "
-                         f"or a work variant ({log.same_work_reason}); quarantined "
-                         f"for human adjudication.")
-        log.decided_by = "same_work_variant_quarantine"
+        if log.identity_disposition == "mixed_identity_conflict":
+            ref.rationale = (
+                "The citation combines an exact identifier/location anchor with "
+                "conflicting title, year, and author-roster identity evidence "
+                "(mixed_identity_citation); quarantined for an explicit F2 frame "
+                "decision, not described as a same-work variant.")
+            log.decided_by = "mixed_identity_conflict_quarantine"
+        else:
+            ref.rationale = (f"Resolved identifier appears to represent the same work "
+                             f"or a work variant ({log.same_work_reason}); quarantined "
+                             f"for human adjudication.")
+            log.decided_by = "same_work_variant_quarantine"
         return ref
 
     # THE CLAIMED-PMID FETCH NEVER ANSWERED.

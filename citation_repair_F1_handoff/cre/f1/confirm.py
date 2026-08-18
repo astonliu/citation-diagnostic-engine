@@ -87,7 +87,7 @@ def search_pubmed(title: str, api_key: str = "", s=requests) -> float | None:
         return None
     try:
         esearch = _json_or_none(request_with_retry(s, PUBMED_ESEARCH, {
-            "db": "pubmed", "term": f"{title}[Title]", "retmode": "json",
+            "db": "pubmed", "term": title, "field": "title", "retmode": "json",
             "retmax": 3, **({"api_key": api_key} if api_key else {})},
             limiter=NCBI, timeout=20))
         if esearch is None:
@@ -111,8 +111,11 @@ def search_pubmed(title: str, api_key: str = "", s=requests) -> float | None:
         res = summary.get("result")
         if not isinstance(res, dict):
             return None
-        return max((_score(title, (res[i] or {}).get("title", ""))
-                    for i in ids if isinstance(res.get(i), dict)), default=0.0)
+        usable = [res[i].get("title") for i in ids
+                  if isinstance(res.get(i), dict)
+                  and isinstance(res[i].get("title"), str)
+                  and res[i].get("title").strip()]
+        return max((_score(title, value) for value in usable), default=None)
     except (requests.RequestException, ValueError, KeyError,
             AttributeError, TypeError):
         return None
@@ -139,8 +142,13 @@ def search_crossref(title: str, mailto: str = "", s=requests) -> float | None:
         if not isinstance(items, list):
             return None
         # Crossref title is a LIST of strings (often one element, sometimes more).
-        return max((_score(title, " ".join(it.get("title") or []))
-                    for it in items if isinstance(it, dict)), default=0.0)
+        usable = [" ".join(v for v in it.get("title") if isinstance(v, str))
+                  for it in items
+                  if isinstance(it, dict) and isinstance(it.get("title"), list)
+                  and any(isinstance(v, str) and v.strip()
+                          for v in it.get("title"))]
+        return (0.0 if not items else
+                max((_score(title, value) for value in usable), default=None))
     except (requests.RequestException, ValueError, KeyError,
             AttributeError, TypeError):
         return None
@@ -162,8 +170,12 @@ def search_openalex(title: str, mailto: str = "", s=requests) -> float | None:
         if not isinstance(items, list):
             return None
         # OpenAlex title may be null; fall back to display_name, then "".
-        return max((_score(title, it.get("title") or it.get("display_name") or "")
-                    for it in items if isinstance(it, dict)), default=0.0)
+        usable = [it.get("title") or it.get("display_name") for it in items
+                  if isinstance(it, dict)
+                  and isinstance(it.get("title") or it.get("display_name"), str)
+                  and (it.get("title") or it.get("display_name")).strip()]
+        return (0.0 if not items else
+                max((_score(title, value) for value in usable), default=None))
     except (requests.RequestException, ValueError, KeyError,
             AttributeError, TypeError):
         return None

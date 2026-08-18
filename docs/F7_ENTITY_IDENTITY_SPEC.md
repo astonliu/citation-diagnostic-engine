@@ -1,5 +1,17 @@
 # F7 — entity identity, the authority lock, and the dropped label — implementation spec
 
+> **⚠ READ FIRST — the 2026-08-17 audit establishes one fact that changes how to read everything below.**
+>
+> **F7 cannot fire in the production configuration.** `run_natural_judgment` declares
+> `f7_seams=None, f7_evidence_builder=None` (`judgment_run.py:1071`); the assessor is built only inside
+> `if f7_seams is not None and f7_evidence_builder is not None` (`:703-707`), and **no non-test caller
+> supplies either**. `production_launcher.launch` (`:617`) passes neither.
+>
+> Every defect below is therefore **latent**. Fix them **as part of wiring F7**, not before — fixing
+> them now changes nothing observable and moves a governed digest for no benefit. **Do not report an
+> F7 rate:** `seam_status` says `wired: true` for a seam that cannot execute.
+
+
 **Date:** 2026-08-16 · **Branch:** `feat/f3-f7-semantic-validator-v1`
 **Authority:** ZD, 2026-08-16, on the F1–F8 audit (`F1_F8_AUDIT_2026-08-16.md`, CONTRADICTIONS 63).
 **Standing method:** the defect and the constraint are stated; the edit is yours. If a constraint here
@@ -198,6 +210,109 @@ all-`SAME_ENTITY` run gets it too.
 - Any corpus run.
 - Extending `_ENTITY_TYPES` beyond `{drug, gene, variant, disease}`.
 - Editing `band_prompts.py`.
+
+## Verification command
+
+```
+cd citation_repair_F1_handoff && PYTHONPATH=. python -m pytest cre/f1 -q
+```
+
+
+---
+
+# Audit loop — F7, rounds 1–2 (2026-08-17) · **CLEAR**
+
+**Converged:** 2 consecutive rounds, checkers accepted nothing. 6 findings → **0 LAND · 3 DEFER · 3 REJECT**.
+Three checkers per round, each opening every cited line and re-running every probe. Bar for LAND:
+unanimous, all three ≥95% confidence.
+
+## ⚠ READ FIRST — this governs every item below
+
+**F7 cannot fire in the production configuration, and that is why nothing landed.**
+
+`run_natural_judgment` declares `f7_seams=None, f7_evidence_builder=None` (`judgment_run.py:1071`).
+The assessor is built only inside `if f7_seams is not None and f7_evidence_builder is not None`
+(`judgment_run.py:703-707`). **No non-test caller supplies either.** `production_launcher.launch`
+(`:617`) is the only non-test caller of `run_natural_judgment`, and it passes neither.
+
+Consequence for whoever implements this: **every deferred item below is a latent defect that becomes
+live the moment F7 is wired.** Fix them *as part of* wiring F7, not before and not separately. Fixing
+them now changes nothing observable and spends a governed-module digest for no benefit.
+
+**Do not report an F7 rate.** `seam_status` reports `wired: true` while the seam is structurally
+unable to execute.
+
+---
+
+## Deferred — implement these *when F7 is wired*, not before
+
+### D-1 · The manifest's F7 denominator silently excludes every pair F7 crashed on
+**`cre/f1/judgment_run.py:1320-1323`** · REPRODUCED
+
+`f7.records_emitted` and `f7.outcome_counts` are computed over a denominator that omits the pairs on
+which F7's own strict contracts raised. **The exclusion is biased toward failures**, so
+`outcome_counts / records_emitted` — the only outcome distribution F7 publishes — reads *upward*.
+
+**Required:** the denominator must count attempted pairs, with crashes as their own bucket. A rate
+whose denominator drops its own failures is not a rate.
+
+*Reality checker: "the strongest of the four and the only one that is genuinely new surface — I
+checked it against every artifact that could own it and it is in none of them."* Not in `KNOWN.md`,
+not in this spec's Defects 4 or 5.
+
+### D-2 · Published model identity is never checked against the run's model
+**`cre/f1/judgment_run.py:956-968`** · REPRODUCED
+
+The `f7` block takes generator and verifier model ids from `f7_policy` alone. Both can be the empty
+string or any caller-supplied string while `f7.reportable: true` and the contract's `F7_reportable`
+clause both pass. A reader sees a model string beside an F7 count with no guarantee they correspond.
+
+**Required:** the published identity must be the model the run actually used, or the block must not
+claim one. F7 is the only wired discriminator with no up-front policy check.
+
+### D-3 · Evidence spans bind on content, not section
+**`cre/f1/f7_entity.py:988-990`** · REPRODUCED
+
+The binding key is `content_sha256`, which identifies **content**, not a **section**. Two body
+sections with identical text and different labels collapse to one dict entry, so whether an entity
+claim is credited to Results or to a figure caption **depends on tuple order**. The checker
+reproduced the verdict flipping on ordering alone.
+
+**Why this one matters most on wiring:** `_ENTITY_SECTION_LABELS = {results, methods}` and
+`_RELATION_SECTION_LABELS = {results, table, figure}` (`f7_entity.py:91-96`) exist precisely because
+a figure caption cannot establish what a paper's results concern. This key defeats that rule.
+
+**Required:** key on section identity, not content hash.
+
+---
+
+## Rejected — do not re-raise
+
+| cite | claim | why rejected |
+|---|---|---|
+| `f7_entity.py:1062-1064` | only identity guard is a raw `.strip()` id compare; `canonical_label` never compared | **Already this spec's Defect 3.** The auditor said so in its own `decision_conflict` field and asked to be scored as verification, not discovery. |
+| `judgment_run.py:721-752` | legacy early return also disables the preband clause | Composition of two already-published defects at their own line numbers, plus a half that duplicates a finding already in this loop. |
+| `f7_entity.py:1258-1260` | `verifier_call_llm is call_llm` is an object-identity test that passes for every one-model wiring the project ships, including the same bound method written twice | Unreachable, **and an artifact already says so**. Worth reading before dismissing — the observation is sound; the verdict is about reachability, not correctness. |
+
+---
+
+## Guardrails
+
+- **`band_prompts.py` byte-identical.** Blob OID `fa01126e2b9482d450065fd70cd0eb1fea816f5c`. New
+  behaviour goes in a new module.
+- **`judgment_run.py` is a GOVERNED module** — a fix here moves its digest. CONTRADICTIONS 65 is
+  already OPEN because the F1 pass moved `schema.py`'s. **Report the digest consequence; do not
+  decide it.**
+- Precision-first, both halves: ambiguity never becomes an accusation, and never a silent clear.
+- No invented constants. Specs only — no corpus run.
+
+## Definition of done
+
+- F7 wired, or each deferred item explicitly carried into the wiring spec.
+- D-1's denominator counts attempted pairs, crashes bucketed separately.
+- D-3 keys on section identity; prove it with a fixture where two sections share text.
+- **`seam_status` no longer reports `wired: true` for a seam that cannot execute** — or F7 is wired.
+- Suite green, old → new counts, environment stated (`anthropic` and `jsonschema` change the number).
 
 ## Verification command
 

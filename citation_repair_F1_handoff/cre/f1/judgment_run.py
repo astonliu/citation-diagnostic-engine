@@ -4,7 +4,7 @@ This module runs *naturally occurring* PMC-OA citing papers end-to-end through t
 F3-F7 band and emits ONE durable, reviewable record per citation-claim pair. It
 adds NO new discriminator and invents NO advisor-locked semantics. The single
 LIVE semantic discriminator is coverage -> F6; F4 (strength, generator +
-independent verifier) and F3 (provenance) run only when the discriminator LLM is
+positive-only verifier role) and F3 (provenance) run only when the discriminator LLM is
 wired; F5 (temporal supersession) runs only when its offline seams +
 evidence-builder are wired (fail-closed to UNJUDGEABLE otherwise); F7 (entity)
 runs only when its offline seams + evidence-builder are supplied, otherwise the
@@ -104,13 +104,17 @@ from .f3_provenance import (
     F3_V4_LOOPCLOSE_PROMPT,
     make_provenance_assessor,
 )
-from .f5_supersession import F5Policy, decide_f5
+from .f5_supersession import F5Policy, F5_REPORTABLE, decide_f5
 from .f7_entity import (
+    PRODUCTION_F7_BUILDER_NOTE,
+    PRODUCTION_F7_EVIDENCE_BUILDER,
     F7Policy,
     F7_ATTRIBUTION_PROMPT,
     F7_EVIDENCE_PROMPT,
     F7_TUPLES_PROMPT,
     F7_VERIFIER_PROMPT,
+    f7_reachability,
+    hold_reason_histogram,
     make_entity_assessor,
 )
 # The opt-in full-text coverage path (DEC-030/032). Both live OUTSIDE the frozen
@@ -154,6 +158,7 @@ DISP_HELD_STRENGTH_UNJUDGEABLE = "held_strength_unjudgeable"
 # reference genuinely did not establish those claims, the group did, and the
 # attribution is on the group record.
 DISP_HELD_COCITATION_COVERED = "held_cocitation_covered"
+DISP_HELD_UNSUPPORTED_COCITATION_MEMBER = "held_unsupported_cocitation_member"
 
 # Pipeline/taxonomy labels that mean "the cited work was verified as the right,
 # existing paper" -> the F3-F7 band may proceed. Everything else is out of band.
@@ -164,6 +169,7 @@ _SCOREABLE = frozenset(
     {DISP_PREDICTED, DISP_HELD_FULL_COVERAGE, DISP_HELD_INSUFFICIENT,
      DISP_HELD_PENDING_F5_F7, DISP_HELD_PROVENANCE_UNJUDGEABLE,
      DISP_HELD_STRENGTH_UNJUDGEABLE,
+     DISP_HELD_UNSUPPORTED_COCITATION_MEMBER,
      # Scoreable: the pair was fully judged and there IS something for a human to
      # adjudicate -- whether collective support by the co-cited group is the right
      # reading of this citation. Dropping it from the queue would be the silent
@@ -370,6 +376,9 @@ def _new_record(item: dict) -> dict:
         "coverage_verdicts": [],
         "evidence": {},
         "evidence_usable": None,
+        **({"sentence_partition_failures":
+            list(item.get("sentence_partition_failures") or [])}
+           if item.get("sentence_partition_failures") else {}),
         "strength_records": [],
         "provenance": None,
         "claim_extract_prompt_version": CLAIM_EXTRACT_PROMPT_VERSION,
@@ -402,6 +411,9 @@ def _excluded_record(ref, disposition: str, preband_label=None) -> dict:
         "coverage_verdicts": [],
         "evidence": {},
         "evidence_usable": None,
+        **({"sentence_partition_failures": list(
+            getattr(ref, "citance_sentence_partition_failures", None) or [])}
+           if getattr(ref, "citance_sentence_partition_failures", None) else {}),
         "claim_extract_prompt_version": CLAIM_EXTRACT_PROMPT_VERSION,
         "coverage_prompt_version": COVERAGE_PROMPT_VERSION,
         "ts": int(time.time()),
@@ -532,8 +544,7 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
     if scope_counts is not None:
         # Answered-and-failed, counted beside never-asked so the two can never
         # be read as one number.
-        marker_scope.tally_verdicts(
-            scope_counts, [jb.coverage_bucket(v) for v in verdicts])
+        marker_scope.tally_verdicts(scope_counts, verdicts)
     rec["atomic_claims"] = claims
     rec["coverage_verdicts"] = verdicts
     rec["ts"] = int(time.time())
@@ -645,8 +656,11 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
     if discriminator_call_llm is not None:
         # F4 (strength) refinement: SUPPORTED -> WEAKER_STRENGTH / UNJUDGEABLE.
         policy = f4_policy if f4_policy is not None else F4Policy(mode="development")
+        f4_evidence = dict(item["evidence"])
+        f4_evidence["coverage_evidence_scope"] = rec.get(
+            "evidence_scope", EVIDENCE_SCOPE_ABSTRACT)
         support, strength_records = refine_support_strength(
-            claims, coverage_support, item["evidence"],
+            claims, coverage_support, f4_evidence,
             call_llm=discriminator_call_llm,
             verifier_call_llm=f4_verifier_call_llm,
             policy=policy)
@@ -708,18 +722,56 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
         entities = tuple(entity_assessor(claims))
         rec["f7_records"] = list(entity_assessor.records)
 
+    own_buckets = jb.item_buckets(item)
+    effective_cogroup_covered = tuple(
+        bool(flag) and index < len(own_buckets)
+        and own_buckets[index] != cocitation.BUCKET_CONTRADICTED
+        for index, flag in enumerate(cogroup_covered or ()))
     decision = decide_judgment(
         preband_cleared=True, claims=claims, claim_support=support,
         entity_assessments=entities, provenance=provenance,
-        temporal=temporal, cogroup_covered=cogroup_covered)
+        temporal=temporal, cogroup_covered=effective_cogroup_covered)
     rec["findings"] = list(decision.findings)
     rec["hold_reasons"] = list(decision.hold_reasons)
 
-    r = jb.route(verdicts)
+    solo_route = jb.route(verdicts)
+    member_route = (rec.get("cocitation") or {}).get("member_route")
+    r = member_route or solo_route
+    rec["solo_route"] = solo_route
     rec["route"] = r
 
     if discriminator_call_llm is None:
-        # Legacy path: coverage->F6 is the only live discriminator.
+        # Legacy path: coverage->F6 is the only DISCRIMINATOR-GATED live fault.
+        #
+        # F7 IS NOT DISCRIMINATOR-GATED. Its seams are independent of
+        # ``discriminator_call_llm`` (see the F7 block above, which runs on both
+        # paths), and it rides highest in the engine ordering -- so a confirmed
+        # wrong-entity finding owns the label here exactly as it does on the
+        # wired path below. Without this check the early return swallowed a
+        # finding ``decide_judgment`` had ALREADY MADE: rec["findings"] carried
+        # "F7", rec["label"] stayed None, and the disposition string that went
+        # out said the pair was "held_full_coverage_pending_F3_F5_F7" -- naming
+        # F7 as pending while a confirmed F7 sat two keys away in the same
+        # record. seam_status then reported the seam wired and fired=0, which is
+        # the instrumentation built to prevent this reporting the exact lie it
+        # exists to prevent.
+        #
+        # F5 rides LOWEST and is dropped by this same early return. That half is
+        # deliberately left to the F5 spec rather than reconciled silently here:
+        # its fix goes immediately below this block, after the F6 route, because
+        # precedence puts it there.
+        if "F7" in decision.findings:
+            rec["disposition"] = DISP_PREDICTED
+            rec["label"] = "F7"
+            return rec
+        if r == cocitation.ROUTE_UNSUPPORTED_MEMBER:
+            rec["disposition"] = DISP_HELD_UNSUPPORTED_COCITATION_MEMBER
+            return rec
+        if (solo_route == jb.ROUTE_F6_FLAGGED
+                and r == cocitation.ROUTE_GROUP_COVERED
+                and cogroup_covered):
+            rec["disposition"] = DISP_HELD_COCITATION_COVERED
+            return rec
         if r == jb.ROUTE_F6_FLAGGED:
             if "F6" not in decision.findings:
                 # The co-citation overlay explains this route: every claim this
@@ -751,11 +803,13 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
         rec["disposition"] = DISP_PREDICTED
         rec["label"] = "F7"
     elif "F6" in findings:
-        if r != jb.ROUTE_F6_FLAGGED:
+        if solo_route != jb.ROUTE_F6_FLAGGED:
             raise DiscriminatorContractError("F6 finding without an F6 coverage route")
         rec["disposition"] = DISP_PREDICTED
         rec["label"] = "F6"
-    elif r == jb.ROUTE_F6_FLAGGED and cogroup_covered and not findings:
+    elif (solo_route == jb.ROUTE_F6_FLAGGED
+          and r == cocitation.ROUTE_GROUP_COVERED
+          and cogroup_covered and not findings):
         # Same case as the legacy branch above, on the wired path: the F6 route is
         # fully explained by co-cited coverage. ``not findings`` is the guard that
         # makes this safe -- F4 (overstatement) and F7 (wrong entity) are
@@ -772,6 +826,8 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
     elif "F5" in findings:
         rec["disposition"] = DISP_PREDICTED
         rec["label"] = "F5"
+    elif r == cocitation.ROUTE_UNSUPPORTED_MEMBER:
+        rec["disposition"] = DISP_HELD_UNSUPPORTED_COCITATION_MEMBER
     elif any(s.state is SupportState.UNJUDGEABLE for s in support):
         # A coverage unknown vs a strength (F4) unknown, distinguished for the record.
         if any(s.state is SupportState.UNJUDGEABLE for s in coverage_support):
@@ -847,10 +903,15 @@ def _cocitation_overlay(items: "list[dict]") -> dict:
             member_summary = dict(summary)
             member_summary["member_route"] = routes[cid]
             by_citation_id[cid] = (flags if usable else (), member_summary)
+    sentence_groups = {
+        cocitation.group_id_of(members[0])
+        for members in groups.values() if members
+    }
     return {
         "by_citation_id": by_citation_id,
         "group_records": group_records,
         "groups": len(groups),
+        "sentence_groups": len(sentence_groups),
         "members_in_cocitation_groups": members_in_groups,
         "group_size_distribution": size_distribution,
     }
@@ -921,7 +982,8 @@ def _f3_manifest_block(f3_policy, discriminator_wired: bool) -> dict:
     }
 
 
-def _f7_manifest_block(f7_policy, f7_records) -> dict:
+def _f7_manifest_block(f7_policy, f7_records, *, wired: bool = False,
+                       evidence_context_supplied: bool = False) -> dict:
     """The ``"f7"`` block: policy, prompt digests, model ids, tallies.
 
     F7 rides HIGHEST in the engine ordering, so it can determine the published
@@ -935,8 +997,15 @@ def _f7_manifest_block(f7_policy, f7_records) -> dict:
     value is ``None`` and ``relation_prompt_digest_present`` is False. It is never
     filled with the version string -- a version is not a digest, and storing one
     under a ``_sha256`` name is a false provenance record.
+
+    ``wired`` is PASSED IN, not assumed. It used to be the literal ``True``, so a
+    run supplying ``f7_seams`` without ``f7_evidence_builder`` published
+    ``f7.wired = true`` next to ``seam_status.F7.wired = false`` in one manifest,
+    and ``_f7_manifest_block(None, [])`` claimed a wired F7 with no seams at all.
+    Both fields now come from the same expression and cannot disagree.
     """
     policy = f7_policy if f7_policy is not None else F7Policy()
+    reachability = f7_reachability(policy)
     records = list(f7_records or [])
     # The per-tuple traces live at record["tuple_records"]; the relation digest
     # is stamped there, not on the outer §9 packet.
@@ -954,11 +1023,25 @@ def _f7_manifest_block(f7_policy, f7_records) -> dict:
         k = str(r.get("derived"))
         outcomes[k] = outcomes.get(k, 0) + 1
     return {
-        "wired": True,
+        "wired": wired,
         # Reportable requires records AND that every relation comparison which
         # actually ran reported its prompt digest. A run whose relation prompt
         # cannot be identified cannot back a published F7 number.
         "reportable": bool(records) and digest_present,
+        # reportable=False is NOT a fault report. An honest run in which every
+        # claim matched the paper's own entity gets it too: a matched claim
+        # short-circuits before the relation stage, so no schema-D digest exists
+        # to pin. Stated because the field name invites the opposite reading.
+        # (The verdict enums themselves are deliberately not named in this
+        # module -- see the guard in test_judgment_run: this layer routes leaf
+        # verdicts and never inline-asserts one.)
+        "reportable_note": (
+            "reportable=False does not mean anything went wrong. A run whose "
+            "claims all matched the cited paper's own entity never reaches the "
+            "relation stage, so it has no schema-D digest and is not reportable "
+            "-- the same value an unwired or a defective run gets. Read it with "
+            "records_emitted, outcome_counts and hold_reasons, never alone."
+        ),
         "attribution_prompt_version": policy.attribution_prompt_version,
         "tuples_prompt_version": policy.tuples_prompt_version,
         "evidence_prompt_version": policy.evidence_prompt_version,
@@ -968,6 +1051,21 @@ def _f7_manifest_block(f7_policy, f7_records) -> dict:
         "verifier_model_id": policy.verifier_model_id,
         "cross_ontology_lock": policy.cross_ontology_lock,
         "authorities_sha256": _sha256_text(policy.authorities_json),
+        # THE DIGEST IS NOT THE ANSWER. authorities_sha256 of an empty table is
+        # 44136fa3... -- sha256("{}") -- and nothing in any artifact compares it
+        # to that constant, so recognising a structurally unreachable run meant
+        # already knowing the constant on sight. These fields say it in words:
+        # which types are locked, whether F7 could fire at all, and why not.
+        "authorities_locked_types": reachability["locked_types"],
+        "same_type_reachable": reachability["same_type_reachable"],
+        "unreachable_reason": reachability["unreachable_reason"],
+        # Cross-type F7 is unreachable BY DESIGN and always will be -- the cross
+        # comparator's relation enum has no provably_distinct, because "a drug is
+        # not a gene" is not the finding F7 makes. Published so the zero in
+        # outcome_counts is read as a guardrail holding, not as a gap.
+        "cross_type_reachable": reachability["cross_type_reachable"],
+        "cross_type_note": reachability["cross_type_note"],
+        "cross_ontology_lock_present": reachability["cross_ontology_lock_present"],
         "prompt_sha256": {
             "attribution": _sha256_text(F7_ATTRIBUTION_PROMPT),
             "tuples": _sha256_text(F7_TUPLES_PROMPT),
@@ -979,12 +1077,28 @@ def _f7_manifest_block(f7_policy, f7_records) -> dict:
         "relation_comparisons_attempted": len(attempted),
         "records_emitted": len(records),
         "outcome_counts": dict(sorted(outcomes.items())),
+        # WHY F7 HELD, not just how often. outcome_counts keys on the three
+        # EntityState values, so every one of the module's enumerated hold
+        # reasons collapsed into a single "UNJUDGEABLE" tally -- a number with no
+        # cause attached, while the causes sat on disk in rec["f7_records"] and
+        # in no artifact anyone reads. Both granularities, per the histogram's
+        # own contract: claim-level is the roll-up acted on, tuple-level is every
+        # reason produced including those a roll-up discarded.
+        "hold_reasons": hold_reason_histogram(records),
+        # F7 HAS NO PRODUCTION EVIDENCE BUILDER. EvidenceContext is constructed
+        # only in this package's tests. Until that changes, every F7 number this
+        # block can report came from a fixture, and no F7 rate may be quoted from
+        # a real corpus -- so the manifest says it rather than leaving a reader to
+        # infer it from a builder they cannot see.
+        "production_evidence_builder": PRODUCTION_F7_EVIDENCE_BUILDER,
+        "evidence_context_supplied": evidence_context_supplied,
         "note": (
             "Schema D (relation) is built inside the INJECTED relation_comparator, "
             "so its prompt text is not visible here. Its digest is reported by the "
             "comparator; when absent it stays None and this run is not F7-reportable. "
             "The version string is recorded separately and never stands in for a digest."
         ),
+        "production_note": PRODUCTION_F7_BUILDER_NOTE,
     }
 
 
@@ -1023,7 +1137,40 @@ def _queue_audit(pred_path: str, queue_path: str) -> dict:
     }
 
 
-def _f5_manifest_block(f5_policy, f5_records) -> dict:
+def _instrument_f5_seams(seams: dict) -> tuple[dict, dict]:
+    """Wrap the injected F5 calls so the manifest reports observations.
+
+    A swappable seam cannot be described honestly by a module constant. The
+    wrapper counts the call that actually ran; retrieval protocol details are
+    copied only when that seam exposes an executed-protocol log.
+    """
+    observed = {"retrieval_calls": 0, "attestation_calls": 0,
+                "judge_calls": 0, "retrieval_protocols": []}
+    wrapped = dict(seams)
+
+    def observe(name, counter):
+        fn = seams[name]
+
+        def call(*args, **kwargs):
+            observed[counter] += 1
+            before = len(getattr(fn, "executed_protocols", ()))
+            result = fn(*args, **kwargs)
+            if name == "retrieve_superseding_candidates":
+                protocols = list(getattr(fn, "executed_protocols", ()))
+                observed["retrieval_protocols"].extend(protocols[before:])
+            return result
+        return call
+
+    wrapped["retrieve_superseding_candidates"] = observe(
+        "retrieve_superseding_candidates", "retrieval_calls")
+    wrapped["find_supersession_attestation"] = observe(
+        "find_supersession_attestation", "attestation_calls")
+    wrapped["judge_contradiction"] = observe(
+        "judge_contradiction", "judge_calls")
+    return wrapped, observed
+
+
+def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
     """The ``"f5"`` manifest block: policy, retrieval protocol, tallies.
 
     F5 previously emitted NO module hash, NO prompt hash and NO policy block, so
@@ -1035,28 +1182,73 @@ def _f5_manifest_block(f5_policy, f5_records) -> dict:
     was searched from one. Absence is reported as "none found under this protocol"
     and never as "no superseding paper exists" -- SciFact-Open measured that 34.3%
     (251/732) of pooled candidates assumed to hold no evidence actually held it."""
-    from .f5_seams import (ATTESTATION_LOOKUP_PERFORMED, ATTESTATION_STUB_REASON,
-                           CANDIDATE_CAP, RERANKER, retrieval_protocol)
+    from .f5_seams import CANDIDATE_CAP, RERANKER
     from .f5_supersession import F5Policy
-    from .f5_discovery_queue import QUEUE_VERSION, disposition_counts
+    from .f5_contradiction_prompt import RESPONSE_PARSER_VERSION
+    from .f5_discovery_queue import (
+        QUEUE_VERSION, disposition_counts, negative_reason)
+
+    def tally(field):
+        out = {}
+        for record in f5_records or []:
+            value = record.get(field)
+            if value is not None:
+                key = str(value)
+                out[key] = out.get(key, 0) + 1
+        return dict(sorted(out.items()))
+
+    negative_counts = {}
+    for record in f5_records or []:
+        status = record.get("retrieval_status")
+        adequacy = record.get("retrieval_adequacy")
+        if status is None or adequacy is None:
+            continue
+        reason = negative_reason(str(status), str(adequacy))
+        negative_counts[reason] = negative_counts.get(reason, 0) + 1
 
     policy = f5_policy if f5_policy is not None else F5Policy()
-    return {
+    protocols = list((f5_runtime or {}).get("retrieval_protocols") or [])
+    attestation_calls = int((f5_runtime or {}).get("attestation_calls") or 0)
+    block = {
         "mode": policy.mode,
         "deploy_path_a": policy.deploy_path_a,
-        "reportable": False,        # unreachable by construction; stated, not implied
+        "reportable": F5_REPORTABLE,
         "contradiction_prompt_version": policy.contradiction_prompt_version,
+        "response_parser_version": RESPONSE_PARSER_VERSION,
         "comparability_policy_version": policy.comparability_policy_version,
-        "retrieval_protocol": retrieval_protocol(),
+        "retrieval_calls": int((f5_runtime or {}).get("retrieval_calls") or 0),
+        "retrieval_status_counts": tally("retrieval_status"),
+        "retrieval_adequacy_counts": tally("retrieval_adequacy"),
+        "negative_reason_counts": dict(sorted(negative_counts.items())),
         "candidate_cap": CANDIDATE_CAP,
         "reranker": RERANKER,
         "queue_version": QUEUE_VERSION,
         "disposition_counts": disposition_counts(f5_records),
         "records_emitted": len(f5_records or []),
-        # So path_a_eligible=False can never be read as "no attestation exists".
-        "attestation_lookup_performed": ATTESTATION_LOOKUP_PERFORMED,
-        "attestation_lookup_note": ATTESTATION_STUB_REASON,
+        "attestation_lookup_performed": bool(attestation_calls),
+        "attestation_calls": attestation_calls,
+        "attestation_lookup_note": (
+            f"The injected attestation seam was called {attestation_calls} time(s)."
+            if attestation_calls else
+            "No attestation lookup call was observed; seam provenance is not asserted."),
+        "contradiction_judge_calls": int(
+            (f5_runtime or {}).get("judge_calls") or 0),
+        "production_evidence_builder": False,
+        "real_data_runs_completed": 0,
+        "audit_convergence": "not_converged_one_round_only",
+        "note": (
+            "F5 has not run on real data in this package. The shipped seam bundle "
+            "has no production caller; zero findings are not a measured absence."
+        ),
     }
+    if protocols:
+        block["retrieval_protocol"] = protocols[0] if len(protocols) == 1 else protocols
+        block["retrieval_protocols_executed"] = len(protocols)
+    else:
+        block["retrieval_protocol_note"] = (
+            "The injected retrieval seam exposed no executed-protocol record; "
+            "no module default is substituted for what actually ran.")
+    return block
 
 
 def run_natural_judgment(
@@ -1153,13 +1345,22 @@ def run_natural_judgment(
     rows appended twice; both defects are pinned by strict xfails in
     ``test_adversarial_judgment_run``).
     """
+    if (f5_seams is None) != (f5_evidence_builder is None):
+        raise ValueError(
+            "f5_seams and f5_evidence_builder must be supplied together; a "
+            "half-wired F5 path cannot publish coherent provenance")
+    f5_runtime = {"retrieval_calls": 0, "attestation_calls": 0,
+                  "judge_calls": 0, "retrieval_protocols": []}
+    if f5_seams is not None:
+        f5_seams, f5_runtime = _instrument_f5_seams(f5_seams)
+
     # --- F4 configuration, validated up front (item 3): outside the per-pair
     # try/except, before any output file exists.
     if f4_policy is not None:
         eff_f4_policy = f4_policy
-    elif f4_verifier_call_llm is not None:
+    elif discriminator_call_llm is not None:
         eff_f4_policy = F4Policy(mode="formal", generator_model_id=model,
-                                 verifier_model_id=f4_verifier_model_id)
+                                 verifier_model_id=(f4_verifier_model_id or model))
     else:
         eff_f4_policy = F4Policy(mode="development", generator_model_id=model)
     validate_f4_config(eff_f4_policy, discriminator_call_llm, f4_verifier_call_llm,
@@ -1169,6 +1370,27 @@ def run_natural_judgment(
     if f5_seams is not None:
         from .f5_supersession import validate_f5_policy
         validate_f5_policy(f5_policy if f5_policy is not None else F5Policy())
+    # F7 config validated up front for the same reason, and against a sharper
+    # failure: F7's DEFAULT policy is one under which F7 cannot fire at all.
+    # ``authorities_json`` defaults to ``"{}"`` -- valid JSON, a legal empty
+    # table, parsed without complaint -- and an empty table sends every claim to
+    # ``authority_not_locked``. A run could therefore wire both F7 seams, pay for
+    # the model calls, and publish ``wired: true, fired: 0`` beside an
+    # ``authorities_sha256`` of 44136fa3... (which is just sha256("{}"), and
+    # nothing compares it to anything), while never having been able to produce
+    # an F7 for any input. That is indistinguishable from an honest zero, so it
+    # refuses here -- before any output file exists, never as a per-pair
+    # quarantine -- exactly like the full-text XOR gate below.
+    #
+    # THE SINGLE DEFINITION of "F7 is wired", used by both the f7 manifest block
+    # and seam_status.F7 so the two cannot disagree. It is the same condition
+    # judge_pair_finish actually branches on.
+    f7_wired = f7_seams is not None and f7_evidence_builder is not None
+    f7_reachability_report = None
+    if f7_seams is not None:
+        from .f7_entity import validate_f7_policy
+        f7_reachability_report = validate_f7_policy(
+            f7_policy if f7_policy is not None else F7Policy())
     # The full-text path needs BOTH seams, validated UP FRONT like every other
     # config defect -- before any output file exists, so it can never be mistaken
     # for a per-pair quarantine. Supplying only one would either judge full text
@@ -1258,7 +1480,23 @@ def run_natural_judgment(
 
     counts: dict[str, int] = {}          # one entry per emitted record; sums to refs_seen
     preband_by_label: dict[str, int] = {}  # auxiliary funnel; NOT summed into totals
-    f4_counts = {"eligible_claims": 0, "generator_calls": 0, "verifier_calls": 0}
+    # EVERY Band-1 label, whatever gate excluded the row FIRST. preband_by_label
+    # above counts only rows the PRE-BAND gate excluded, and jb.exclusion_reason
+    # (no citance / no cited PMID) runs before it -- so a reference Band 1
+    # labelled F8 that also lacks a citing sentence is booked as
+    # excluded_no_citance and its label is counted nowhere. That is not a rare
+    # corner: schema.py records that F1/F2/F8 are existence/metadata-level faults
+    # carrying no atomic claims, so the references those labels legitimately fire
+    # on are PRECISELY the ones missing a citance. The only per-label F8 counter
+    # in the run was therefore biased against F8 by construction. Kept separate
+    # rather than folded into preband_by_label, whose "excluded BY the pre-band
+    # gate" meaning is load-bearing elsewhere.
+    preband_label_census: dict[str, int] = {}
+    f4_counts = {"eligible_claims": 0, "unassessed_no_usable_abstract": 0,
+                 "generator_calls": 0, "verifier_calls": 0}
+    f4_outcomes: dict[str, int] = {}
+    f4_hold_reasons: dict[str, int] = {}
+    f4_scope_pairs: dict[str, int] = {}
     # Full-text retrieval funnel. Separate from `counts` for the same reason
     # f4_counts is: `counts` sums to the record total and admits no statistics.
     fulltext_counts = {"no_usable_fulltext": 0}
@@ -1269,7 +1507,8 @@ def run_natural_judgment(
     # Co-citation accounting. Its OWN tally, never `counts`: `counts` is one entry
     # per emitted record and is summed into `total_records`, so a statistic there
     # would corrupt the record count rather than add information.
-    cocitation_counts = {"groups": 0, "cocitation_groups": 0,
+    cocitation_counts = {"groups": 0, "sentence_groups": 0,
+                         "cocitation_groups": 0,
                          "members_in_cocitation_groups": 0,
                          "group_claims_covered": 0,
                          "group_claims_uncovered": 0,
@@ -1300,6 +1539,7 @@ def run_natural_judgment(
     scoreable_records = 0
     executed_ids: set = set()
     emitted_labels: dict = {}
+    finding_labels: dict = {}
     pubtype_cache: dict = {}
 
     pred_fh = open(pred_path, "a", encoding="utf-8")
@@ -1316,11 +1556,19 @@ def run_natural_judgment(
     # published label, so its provenance block must be built from what actually
     # ran, not from the policy alone.
     f7_records_all: list = []
+    sentence_partition_diagnostics: dict[str, dict] = {}
+    sentence_partition_affected_records = 0
 
     def emit(rec: dict) -> None:
-        nonlocal prev_link, chain_count
+        nonlocal prev_link, chain_count, sentence_partition_affected_records
         f5_records_all.extend(rec.get("f5_records") or [])
         f7_records_all.extend(rec.get("f7_records") or [])
+        failures = rec.get("sentence_partition_failures") or []
+        if failures:
+            sentence_partition_affected_records += 1
+        for failure in failures:
+            key = str(failure.get("text_sha256") or _canonical_sha256(failure))
+            sentence_partition_diagnostics[key] = dict(failure)
         # Write order pins the crash invariant: predictions >= sidecar >= manifest.
         pred_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         pred_fh.flush()
@@ -1334,15 +1582,27 @@ def run_natural_judgment(
         bump(rec["disposition"])
         if rec.get("label"):
             emitted_labels[rec["label"]] = emitted_labels.get(rec["label"], 0) + 1
+        for finding in rec.get("findings") or []:
+            finding_labels[finding] = finding_labels.get(finding, 0) + 1
         # Mechanical F4 counters, derived from the audit records themselves.
         for sr in rec.get("strength_records") or []:
+            derived = sr.get("derived")
+            if derived:
+                f4_outcomes[derived] = f4_outcomes.get(derived, 0) + 1
+            reason = sr.get("reason")
+            if derived == "UNJUDGEABLE" and reason:
+                f4_hold_reasons[reason] = f4_hold_reasons.get(reason, 0) + 1
+            scope_key = (
+                f"coverage={sr.get('coverage_evidence_scope', 'unknown')}|"
+                f"f4={sr.get('f4_evidence_scope', 'unknown')}")
+            f4_scope_pairs[scope_key] = f4_scope_pairs.get(scope_key, 0) + 1
             if sr.get("assessed"):
                 f4_counts["eligible_claims"] += 1
                 f4_counts["generator_calls"] += 1
                 if "verifier_response" in sr:
                     f4_counts["verifier_calls"] += 1
             elif sr.get("reason") == "no_usable_abstract":
-                f4_counts["eligible_claims"] += 1
+                f4_counts["unassessed_no_usable_abstract"] += 1
         if rec["disposition"] in _SCOREABLE:
             nonlocal scoreable_records
             scoreable_records += 1
@@ -1404,11 +1664,19 @@ def run_natural_judgment(
             for ref in refs:
                 refs_seen += 1
                 executed_ids.add(ref.citation_id)
+                # THE BAND-1 LABEL IS READ FIRST, and counted regardless of which
+                # gate goes on to exclude the row. It used to be read only after
+                # the exclusion check below had already `continue`d, which lost
+                # every label on a reference with no citance or no cited PMID --
+                # the exact population F1/F2/F8 fire on.
+                cleared, disp_label, preband_label = _preband(ref.citation_id, disp)
+                if isinstance(preband_label, str) and preband_label.strip():
+                    ck = preband_label.strip()
+                    preband_label_census[ck] = preband_label_census.get(ck, 0) + 1
                 reason = jb.exclusion_reason(ref)
                 if reason is not None:                    # no citance / no cited pmid
                     pending.append((_excluded_record(ref, reason), None))
                     continue
-                cleared, disp_label, preband_label = _preband(ref.citation_id, disp)
                 if not cleared:
                     rec = _excluded_record(ref, disp_label, preband_label)
                     pending.append((rec, None))
@@ -1465,6 +1733,7 @@ def run_natural_judgment(
                 cocitation_counts["group_claims_uncovered"] += record["claims_uncovered"]
                 cocitation_counts["group_claims_unknown"] += record["claims_unknown"]
             cocitation_counts["groups"] += overlay["groups"]
+            cocitation_counts["sentence_groups"] += overlay["sentence_groups"]
             cocitation_counts["cocitation_groups"] += len(doc_group_records)
             cocitation_counts["members_in_cocitation_groups"] += overlay[
                 "members_in_cocitation_groups"]
@@ -1550,7 +1819,7 @@ def run_natural_judgment(
     # 41 a third time). Added CONDITIONALLY because the default abstract path's
     # manifest bytes are an opt-in guarantee: an unconditional key, even a
     # zero-valued one, changes every default run.
-    if f5_seams is not None:
+    if f5_seams is not None and f5_runtime["judge_calls"] > 0:
         from .f5_contradiction_prompt import F5_CONTRADICTION_PROMPT
         prompt_hashes["F5_CONTRADICTION_PROMPT"] = _sha256_text(F5_CONTRADICTION_PROMPT)
 
@@ -1596,7 +1865,8 @@ def run_natural_judgment(
             "f7_evidence_builder are supplied, otherwise its seam stays empty and F7 is "
             "never asserted either way. Nothing is declared ACCURATE while any gate is "
             "unwired or held. "
-            "F4 results are reportable ONLY in formal mode (distinct verifier). "
+            "F4 results are reportable only in formal mode; DEC-072 permits the "
+            "same model to fill both roles, and that circularity is recorded. "
             "No machine label here is ground truth; precision is measured later by "
             "human review."
         ),
@@ -1676,7 +1946,14 @@ def run_natural_judgment(
             **({"temperature": temperature} if temperature is not None else {}),
         },
         "f3": _f3_manifest_block(f3_policy, discriminator_call_llm is not None),
-        **({"f7": _f7_manifest_block(f7_policy, f7_records_all)}
+        # ONE expression feeds both this block's "wired" and seam_status.F7's,
+        # so the two can no longer contradict each other inside one manifest.
+        # The block is still emitted on f7_seams alone -- "seams supplied, no
+        # evidence builder" is a real configuration and deserves a record saying
+        # so, which is precisely what wired=False beside a present block says.
+        **({"f7": _f7_manifest_block(
+            f7_policy, f7_records_all, wired=f7_wired,
+            evidence_context_supplied=f7_evidence_builder is not None)}
            if f7_seams is not None else {}),
         "f4": {
             "mode": eff_f4_policy.mode,
@@ -1686,16 +1963,35 @@ def run_natural_judgment(
             "strength_prompt_version": eff_f4_policy.strength_prompt_version,
             "verifier_prompt_version": eff_f4_policy.verifier_prompt_version,
             "eligible_claims": f4_counts["eligible_claims"],
+            "unassessed_no_usable_abstract":
+                f4_counts["unassessed_no_usable_abstract"],
             "generator_calls": f4_counts["generator_calls"],
             "verifier_calls": f4_counts["verifier_calls"],
+            "outcome_counts": dict(sorted(f4_outcomes.items())),
+            "hold_reason_counts": dict(sorted(f4_hold_reasons.items())),
+            "evidence_scope_pair_counts": dict(sorted(f4_scope_pairs.items())),
+            "findings_count": finding_labels.get("F4", 0),
+            "emitted_label_count": emitted_labels.get("F4", 0),
+            "human_adjudication": {
+                "f4_label_supported_by_current_queue": False,
+                "precision_figure_obtainable": False,
+                "note": (
+                    "The current annotation queue has no F4 response label. "
+                    "No F4 precision figure may be quoted until a dedicated "
+                    "human-adjudication landing site exists."
+                ),
+            },
             # THE RESIDUAL RISK DEC-072 ACCEPTS, made visible in the artifact
             # rather than only in the vault. Formal mode no longer requires an
             # independent verifier, so under one model the verifier confirms
             # premises the same model produced. Nothing in code replaces the
             # retired guard; the answer is a human-adjudicated sample.
             "self_verification": {
-                "self_verified": f4_self_verified,
-                "independent_verifier": not f4_self_verified,
+                "self_verified": True if f4_self_verified else None,
+                "independent_verifier": None,
+                "independence_verified": False,
+                "generator_model_id_claimed": eff_f4_policy.generator_model_id,
+                "verifier_model_id_claimed": eff_f4_policy.verifier_model_id,
                 "governing_decision": "DEC-072",
                 "note": (
                     "F4 ran with the generator as its own verifier (DEC-072 "
@@ -1705,11 +2001,12 @@ def run_natural_judgment(
                     "in code checks. An F4 precision figure requires a "
                     "human-adjudicated sample of F4 rows."
                     if f4_self_verified else
-                    "F4 ran with a verifier distinct from the generator."
+                    "The caller supplied distinct callable/model identifiers, "
+                    "but independence is not verified and is not asserted."
                 ),
             },
         },
-        **({"f5": _f5_manifest_block(f5_policy, f5_records_all)}
+        **({"f5": _f5_manifest_block(f5_policy, f5_records_all, f5_runtime)}
            if f5_seams is not None else {}),
         "chain_genesis": genesis,
         "chain_tip": prev_link,
@@ -1741,6 +2038,7 @@ def run_natural_judgment(
         # scoreable predictions exactly, by id, not just by count.
         "queue_audit": queue_audit,
         "emitted_labels": dict(sorted(emitted_labels.items())),
+        "finding_labels": dict(sorted(finding_labels.items())),
         # WIRED IS NOT FIRED. Omitting discriminator_call_llm silently disables
         # F3 AND F4; unwired F5/F7 seams do the same. Without this block a run
         # that never checked reads exactly like one that checked and found
@@ -1748,19 +2046,62 @@ def run_natural_judgment(
         # NOT a refusal: an unwired seam is a legitimate development
         # configuration. It just may not be silent.
         "seam_status": {
+            "F1": {
+                **dict(((disp_obj.check_attestations if disp_obj is not None else {})
+                        .get("F1") or {})),
+                "wired": bool(((disp_obj.check_attestations if disp_obj is not None else {})
+                               .get("F1") or {}).get("performed")),
+                "gate": "canonical pre-band F1 attestation",
+            },
+            "F2": {
+                **dict(((disp_obj.check_attestations if disp_obj is not None else {})
+                        .get("F2") or {})),
+                "wired": bool(((disp_obj.check_attestations if disp_obj is not None else {})
+                               .get("F2") or {}).get("performed")),
+                "gate": "canonical pre-band F2 attestation",
+            },
             "F3": {"wired": discriminator_call_llm is not None,
                    "fired": emitted_labels.get("F3", 0),
                    "gate": "discriminator_call_llm"},
             "F4": {"wired": discriminator_call_llm is not None,
                    "fired": emitted_labels.get("F4", 0),
+                   "findings": finding_labels.get("F4", 0),
                    "gate": "discriminator_call_llm",
                    "assessed_claims": f4_counts["eligible_claims"]},
             "F5": {"wired": f5_seams is not None and f5_evidence_builder is not None,
                    "fired": emitted_labels.get("F5", 0),
-                   "gate": "f5_seams AND f5_evidence_builder"},
-            "F7": {"wired": f7_seams is not None and f7_evidence_builder is not None,
+                   "gate": (
+                       "f5_seams AND f5_evidence_builder AND "
+                       "discriminator_call_llm AND nonempty_atomic_claims AND "
+                       "supported_target_claim AND no_higher_priority_F7_F6_F4_F3"
+                   )},
+            "F7": {"wired": f7_wired,
                    "fired": emitted_labels.get("F7", 0),
-                   "gate": "f7_seams AND f7_evidence_builder"},
+                   "gate": "f7_seams AND f7_evidence_builder",
+                   # An F7 seam can be wired and still unable to fire, if the
+                   # authority table locks nothing. run_natural_judgment now
+                   # REFUSES that configuration up front, so within this entry
+                   # point wired=True does imply "could fire". Published anyway,
+                   # because "wired" alone never carried that guarantee and a
+                   # reader should not have to know which entry point ran.
+                   "authorities_locked_types": (
+                       f7_reachability_report["locked_types"]
+                       if f7_reachability_report is not None else []),
+                   "production_evidence_builder":
+                       PRODUCTION_F7_EVIDENCE_BUILDER},
+            "F8": {
+                **dict(((disp_obj.check_attestations if disp_obj is not None else {})
+                        .get("F8") or {})),
+                "wired": bool(((disp_obj.check_attestations if disp_obj is not None else {})
+                               .get("F8") or {}).get("performed")),
+                "gate": "canonical pre-band F8 attestation",
+                "implemented_in_this_package": False,
+                "note": (
+                    "F8 is not implemented in this package. This entry reports "
+                    "only the upstream disposition's attestation; it does not "
+                    "invent a detector or the unratified timing gate."
+                ),
+            },
             "F6": {"wired": True, "fired": emitted_labels.get("F6", 0),
                    "gate": "always live (coverage)"},
             "note": (
@@ -1773,6 +2114,30 @@ def run_natural_judgment(
            if production else {}),
         "counts": counts,
         "excluded_preband_by_label": preband_by_label,
+        # The COMPLETE Band-1 label census, unbiased by gate ordering. Differs
+        # from excluded_preband_by_label by exactly the rows an earlier gate
+        # claimed first -- which for F1/F2/F8 is most of them.
+        "preband_label_census": dict(sorted(preband_label_census.items())),
+        "preband_label_census_note": (
+            "Every Band-1 label seen, whatever excluded the row first. "
+            "excluded_preband_by_label counts only rows the PRE-BAND gate "
+            "excluded, and the no-citance / no-cited-PMID gate runs ahead of it "
+            "-- so a reference labelled F1/F2/F8, which by definition carries no "
+            "atomic claims, is routinely counted there and nowhere else. These "
+            "two numbers are meant to differ; neither is a correction of the "
+            "other."
+        ),
+        "f8": {
+            "implemented_in_this_package": False,
+            "attestation": dict(
+                ((disp_obj.check_attestations if disp_obj is not None else {})
+                 .get("F8") or {})),
+            "note": (
+                "F8 is a pre-band decision. This package consumes and verifies "
+                "its attestation only; it contains no F8 detector and no "
+                "31-day timing rule."
+            ),
+        },
         "docs_processed": docs_processed,
         "refs_seen": refs_seen,
         "total_records": total_records,
@@ -1795,7 +2160,12 @@ def run_natural_judgment(
             # unit a collectively-cited claim is actually made in. They differ,
             # both are defensible, and choosing is a reporting decision for ZD.
             "denominator_per_citation": total_records,
-            "denominator_per_citation_group": cocitation_counts["groups"],
+            # Backward-compatible name for the historical sentence-level unit.
+            # The explicit sentence/scope names below keep a cluster partition
+            # from silently changing what "group" means.
+            "denominator_per_citation_group": cocitation_counts["sentence_groups"],
+            "denominator_per_sentence_group": cocitation_counts["sentence_groups"],
+            "denominator_per_scope_unit": cocitation_counts["groups"],
             "cocitation_groups": cocitation_counts["cocitation_groups"],
             "members_in_cocitation_groups":
                 cocitation_counts["members_in_cocitation_groups"],
@@ -1805,6 +2175,8 @@ def run_natural_judgment(
             "group_claims_uncovered": cocitation_counts["group_claims_uncovered"],
             "group_claims_unknown": cocitation_counts["group_claims_unknown"],
             "held_cocitation_covered": counts.get(DISP_HELD_COCITATION_COVERED, 0),
+            "held_unsupported_cocitation_member": counts.get(
+                DISP_HELD_UNSUPPORTED_COCITATION_MEMBER, 0),
             "note": (
                 "A group is one SENTENCE OCCURRENCE and its members are the "
                 "references that occurrence gave its citance to -- EXCEPT where "
@@ -1825,6 +2197,22 @@ def run_natural_judgment(
         # Published rather than absorbed: narrowing the question changes what
         # every rate above is a rate OF.
         "marker_scope": marker_scope.manifest_block(scope_counts),
+        "sentence_partition_diagnostics": {
+            "regex_semantics_changed": False,
+            "affected_reference_records": sentence_partition_affected_records,
+            "unique_nonpartitioning_blocks": len(sentence_partition_diagnostics),
+            "uncovered_characters": sum(
+                int(row.get("uncovered_chars") or 0)
+                for row in sentence_partition_diagnostics.values()),
+            "events": [sentence_partition_diagnostics[key]
+                       for key in sorted(sentence_partition_diagnostics)],
+            "note": (
+                "The legacy sentence regex is unchanged. These events assert "
+                "and record when its spans fail to tile the input, converting "
+                "silent deletion into a counted diagnostic without moving a "
+                "sentence boundary or verdict."
+            ),
+        },
         "predictions_path": pred_path,
         "annotation_queue_path": queue_path,
         "cocitation_groups_path": groups_path,

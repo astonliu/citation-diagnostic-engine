@@ -222,3 +222,220 @@ byte-identical.
 ```
 cd citation_repair_F1_handoff && PYTHONPATH=. python -m pytest cre/f1 -q
 ```
+
+
+---
+
+---
+
+# Audit loop — F6, rounds 1–4 (2026-08-18) · **not converged, stopped by decision**
+
+4 rounds. **4 landed** (2 in round 1, 2 in rounds 2–4), 2 deferred, **1 ASK-ZD that is the
+most consequential finding in the stratum**. Bar for LAND: all three checkers ≥95%.
+
+## ⚠ READ FIRST
+
+**The ASK-ZD below is not a nuisance item.** It says the string every F6 verdict is a verdict *about* is
+cut by a regex that does not tile its input, and it was measured to lose text in **16.5% of paragraphs**
+of the very article the module cites for its 80.6% figure. **Read it before costing anything else here.**
+
+---
+
+## L-0a · `ROUTE_UNSUPPORTED_MEMBER` reaches no disposition, no label and no counter — and the standing spec's published symptom is FALSE
+
+**Cite:** `judgment_run.py:775-780` · **Verdict:** LAND · 95/95/96 (round 1) · REPRODUCED
+
+The freeloader route — declared *"a fault"* — lands in the same bucket as a reference whose abstract
+could not be retrieved. **What is new is the correction, not the omission.** `F6_SUPPRESSION_FIX_SPEC`
+Defect 3 states the freeloader *"publishes as `held_cocitation_covered`, identical to a genuine
+contributor"* and prints a trace showing it. **Under the production tri-state judge it publishes as
+`held_insufficient_evidence` and never touches that branch at all** — off-topic maps to
+`established is None` (`coverage_aggregate.py:76-77`), so `jb.route` returns `ROUTE_HELD` and the
+`elif r == jb.ROUTE_F6_FLAGGED and cogroup_covered` guard at `judgment_run.py:758` cannot fire.
+
+**Fix the spec's stated symptom before fixing the code** — an implementer working from Defect 3 is
+looking for the wrong disposition.
+
+## L-0b · Every fixture in the F6 acceptance matrix uses a coverage mapping the band path forbids
+
+**Cite:** `test_cocitation_f6.py:75-87` · **Verdict:** LAND · 96/96/97 (round 1) · REPRODUCED
+
+The fixtures are built on the Boolean coverage mapping that DEC-076 and `coverage_aggregate.py:32-36`
+forbid on the band path. **Acceptance row 2 — the guarantee that F6 still fires on a solo citation — is
+false under production wiring.** The matrix passes 122/122 and proves nothing about the shipped path.
+
+---
+
+## L-1 · `detect_citation_style` fails OPEN on the commonest JATS author-year markup
+
+**Cite:** `marker_scope.py:110-135` (detector) · `:112` (`_NUMERIC_MARKER_RE`) · `:40-48` (the
+fail-closed guarantee it breaks) · `:469-480` (`should_record`) · `parser.py:453-455`
+**Verdict:** LAND · 96/96/96 · REPRODUCED unit and end-to-end
+
+The whole refusal rests on one premise, stated at `marker_scope.py:42-44`: *"the marker text is itself a
+name containing letters."* That is true of one author-year convention. JATS routinely encodes
+`Smith et al. (2020)` with the surname in plain prose and **only the year inside `<xref ref-type="bibr">`**.
+`parser.py:193-216` records `mtext = _text(child)` — the xref's own text and nothing else — so the
+detector sees a bare four-digit year. `_NUMERIC_MARKER_RE` is `^\d+(?:\s*[,-]\s*\d+)*$`; `"2020"` matches;
+`all(...)` returns `CITATION_STYLE_NUMERIC` and the letter test at `:133-134` is never reached.
+
+```
+'author-year, name IN xref'    -> author-year
+'author-year, YEAR-ONLY xref'  -> numeric          <- FAIL OPEN
+'author-year, year+letter'     -> author-year      ("2020a")
+```
+
+`parser.py:455` then sets `clustering = True` for the whole document and the positional rule — which the
+module's own header says is **undefined** for author-year — runs. On a document citing
+`(Smith 2020; Jones 2021)` and `(Lee 2022; Park 2023)`:
+
+```
+style: numeric      clusters produced: 4      true structure: 2 collective citations
+manifest: citation_style_documents={'numeric': 1}  multi_cluster_sentences=1  fallback_reasons={}
+```
+
+**Why it matters:** `marker_scope.py:555-558` tells the manifest's reader that author-year documents are
+*"counted under `fallback_reasons`"*. `fallback_reasons["citation_style_not_numeric"]` **cannot be
+non-zero for the year-only subset** — the named defect class, on a published counter. The durable row and
+the manifest both assert the numeric positional rule applied to an author-year paper.
+
+**Scope note, recorded because a checker measured it and it narrows the filed claim:** the counter is
+incapable only for the **year-only subset**; it fires correctly for the name-in-xref rendering
+(`test_f6_marker_attribution.py:280` asserts this). And reachability on `corpus_frozen_v1` is
+**unestablished** — the one live retrieval that succeeded (PMC13295838, named in the module header as
+author-year) renders plain numeric superscripts, which points **against** the corpus being affected;
+PMC13219232 returned HTTP 404, which is a failed test, not a zero. **The code defect is certain; the
+corpus impact is not. Do not re-report the 17/3 style split on the strength of this.**
+
+**Fix direction:** the detector must not conclude "numeric" from marker shape alone. A year-shaped marker
+in a document whose prose carries the surnames is the ambiguous case — **fail closed on it**, as the
+header promises, rather than falling through to the positional rule.
+
+---
+
+## L-2 · The published `multi_cluster_sentences` rate is biased down by construction
+
+**Cite:** `marker_scope.py:549-562` (the note) · `:566-601` (`tally_document`) · `:586-589` and `:600-601`
+(the arithmetic) · `judgment_run.py:1397`
+**Verdict:** LAND · 95/96/— · REPRODUCED
+
+`parser.py:455` sets `clustering = style == CITATION_STYLE_NUMERIC`, so for any style-refused document
+**every** reference has an empty `citance_marker_clusters`. In `tally_document`, `:586-589` computes
+`seen["clusters"] = max(1, clusters or 1)` — **it can never exceed 1** for a refused document — while
+`:596` still increments `multi_reference_sentences` for every multi-reference sentence in it.
+
+**A style-refused document can only ever add to the denominator.** `judgment_run.py:1397` calls
+`tally_document` once per document with no style filter.
+
+The note at `:549-562` asserts the ratio is *"this run's equivalent of the 76/274 (27.7%)"* baseline —
+**but that baseline was numeric-only.** A run whose style detection got *worse* moves this rate in the
+same direction as a run where genuinely fewer sentences split. The two causes are indistinguishable.
+
+**Fix direction:** restrict `tally_document`'s denominator to documents the positional rule actually ran
+on, or publish the two populations separately. Then the note's comparison is either true or removed.
+**Do not re-report 27.7% against the current number.**
+
+---
+
+## ⚠ ASK-ZD · The citing sentence itself is cut by a regex that is not a partition of its input
+
+**Cite:** `parser.py:190` (`_SENT_RE`) · `:219-225` (`_sentence_spans`) · `:227-236` (`_sentence_for`) ·
+`:384-394` (`_span_index`) · consequences at `cocitation.py:87-90`, `:196-203`
+**Confidence:** LAND 96 · LAND 99 · **ASK-ZD 93** — the cost checker wrote: *"the strongest-mechanism
+finding I have reviewed in this stratum … I am ~99% confident the defect is real — I am declining to LAND
+it because landing it inside this loop would spend exactly the things my charter exists to protect."*
+
+`_SENT_RE` is `[^.!?]*[.!?]+(?:\s+|$)|[^.!?]+$`. `[^.!?]*` cannot cross a `.`, and after `[.!?]+` the
+pattern **requires** whitespace or end-of-string. **Any period not followed by whitespace** — a decimal
+(`0.5`), `et al.,`, `e.g.,` — fails the match at every start position at or before it. `_sentence_spans`
+collects whatever `finditer` returns with **no assertion that the spans tile the input and no fallback
+that reclaims the unmatched head**, so the text before the offending period is *deleted*, not merged. A
+marker inside the deleted region is silently re-homed: `_sentence_for` and `_span_index` both fall
+through their containment loop and **return the last span**.
+
+Measured on PMC13295119 — the document `cocitation.py:11` names as the source of the
+`100/124 = 80.6%` F6 measurement, full text fetched live:
+
+```
+paragraphs >= 120 chars: 121
+paragraphs where _sentence_spans loses text: 20/121  (16.5%)
+characters dropped: 3696/84007 (4.4%)
+
+DROPPED RUN (183 chars) handed to NO reference:
+ 'SNA with a Ccore and 12 radially arranged DNA strands show 400-1000-fold higher cellular
+  uptake efficiency by MCF-7 cells than free DNA after 6 h of treatment at a concentration of 0.'
+the span the parser DOES keep:
+ '5 μM, as measured by flow cytometry. …'
+```
+
+End to end through the real parser, the real tri-state judge and the real co-citation aggregation, on a
+**numeric-marker** fixture whose only offence is the decimal:
+
+```
+citance -> '5 μM, as measured by flow cytometry 12,13.'
+coverage_bucket = coverage_off_topic
+PMC…:B1  solo=HELD_LOW_CONFIDENCE  GROUP ROUTE = UNSUPPORTED_MEMBER
+PMC…:B2  solo=HELD_LOW_CONFIDENCE  GROUP ROUTE = UNSUPPORTED_MEMBER
+```
+
+`cocitation.py:87-90` defines that route as **"The freeloader. A fault."** Two real papers are accused
+because the citing sentence contained `0.5`. The worse variant merges references from **two different
+sentences** into one co-citation group, so a sibling's coverage of the wrong sentence's claim can set
+`cogroup_covered` and suppress a genuine F6.
+
+**Disclosure the checker required, and it is material:** `parser.py:181-189` — the ten lines immediately
+above the regex — **already log this defect**, in the package's own words, as *"KNOWN DEFECT, logged not
+fixed (found while measuring marker clusters, 2026-08-16)"*, scoped to `et al.` and to the three
+author-year documents of `corpus_frozen_v1`. **What is new is the scope**: the same regex fails on
+decimals and `e.g.,` in **numeric-marker** documents, which the logged note explicitly excludes, and the
+16.5% measurement above is on a numeric-marker corpus article.
+
+### Why this is ZD's call, on four counts
+
+1. **It moves published figures.** `docs/F6_MARKER_ATTRIBUTION_SPEC.md:135` publishes `76 (27.7%)`;
+   `cocitation.py:12-14` publishes `100/124 = 80.6%` and `44/98 = 44.9%`. All four numerators and
+   denominators are computed over co-citation groups, and the segmenter was **proved by execution** to
+   change group membership. Re-deriving them needs a corpus run, which is locked out.
+2. **It changes what an F6 label means.** F6 is a relation between a reference and a citing sentence.
+   Changing which string *is* the citing sentence changes the referent of every F6 label already
+   reported.
+3. **Its fix moves `parser.py`, which is in `GOVERNING_MODULES`** (`production_launcher.py:65-70`).
+   CONTRADICTIONS 65 is already OPEN because the F1 pass moved `schema.py`'s digest.
+4. `sentence_spans.py:84-89` protects `Fig.`, `Dr.` and single-letter initials and guards neither
+   `et al.` nor decimals — so the fix belongs there, in a second module, not in the regex alone.
+
+**Recommendation:** treat the diagnostic half as separable and cheap — **assert that `_sentence_spans`
+tiles its input and record when it does not.** That moves no verdict, changes no rate, and converts a
+silent deletion into a counted one. The segmentation fix itself waits for a decision.
+
+---
+
+## Deferred
+
+| cite | claim | why deferred |
+|---|---|---|
+| `judgment_run.py:859-894`, `production_launcher.py:64-70` | `cocitation.py` — the module that decides whether F6 is raised — appears in **no** digest block under any wiring, so editing the F6 suppression rule leaves the manifest byte-identical. `coverage_aggregate.py` has the same hole on the abstract path | 82/55/70/(96/96 on backfill) — not unanimous. **Re-raise before any corpus run**: the file itself names this defect class at `judgment_run.py:880-882` and then omits the F6 module |
+| `cocitation.py:296` | the freeloader guard is keyed on the OFF_TOPIC **bucket**, not on the tri-state `established`, so an all-`UNCONFIRMED_SPECIFIC` member routes `GROUP_COVERED` — "contributed, NOT a fault" | REJECT 93 / LAND 96 / DEFER 93. **The asymmetry is real and all three checkers reproduced it** (one bucket flip moves the route). It was not landed because **the proposed fix makes the accusation half worse**: keying on "no bucket equal to `BUCKET_ESTABLISHED`" routes abstract-scope `established=None` — *"unknown, NEVER a coverage gap"* — to a fault, over a strictly larger population. A correct fix needs a scope parameter on `member_route`, which changes its signature at two call sites in **two governed modules** |
+
+## Guardrails
+
+- `judgment_run.py`, `judgment_band.py`, `judgment_engine.py`, `parser.py`, `schema.py` are **GOVERNED**.
+  CONTRADICTIONS 65 is OPEN. **Report the digest consequence; do not decide it.**
+- `band_prompts.py` byte-identical — blob OID `fa01126e2b9482d450065fd70cd0eb1fea816f5c`.
+- Precision-first, both halves — this stratum broke it in **both** directions in one line, twice.
+- No invented constants. Specs only — no corpus run.
+
+## Definition of done
+
+- A year-only author-year document is refused, counted under `citation_style_not_numeric`, and says so in
+  the durable row and the manifest.
+- The `multi_cluster_sentences` rate is either comparable to its stated baseline or the note goes.
+- `_sentence_spans` either tiles its input or **records that it did not** — a dropped run is never silent.
+- No route named "a fault" is reachable from a segmentation artifact.
+- Suite: old → new counts, environment stated.
+
+## Verification command
+
+```
+cd citation_repair_F1_handoff && PYTHONPATH=. python -m pytest cre/f1 -q
+```

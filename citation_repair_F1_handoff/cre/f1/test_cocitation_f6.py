@@ -835,12 +835,14 @@ def test_orchestrator_still_predicts_f6_when_no_sibling_covers(tmp_path,
     jr.run_natural_judgment(
         str(xml_dir), str(out),
         extractor=lambda _s: [CLAIM_A, CLAIM_B],
-        coverage_judge=lambda claims, _ev: [SUPPORTS, OFF_TOPIC][:len(claims)],
+        # A production-path F6 is an explicit contradiction. OFF_TOPIC is
+        # established=None at abstract scope and is correctly a hold, not F6.
+        coverage_judge=lambda claims, _ev: [SUPPORTS, CONTRADICTS][:len(claims)],
         fetch_abstract=lambda pmid: f"Abstract {pmid}.",
         preband_disposition={"PMC1000:B1": "cleared", "PMC1000:B2": "cleared"})
     rows = [json.loads(line) for line in
             (out / "judgment_predictions.jsonl").read_text().splitlines()]
-    # Nobody covered claim B, so the F6 assertion stands on both members.
+    # Both members contradict claim B, so no sibling can suppress either F6.
     assert {r["label"] for r in rows} == {"F6"}
     assert {r["disposition"] for r in rows} == {jr.DISP_PREDICTED}
 

@@ -77,6 +77,7 @@ class Disposition:
     row_count: int = 0
     manifest_sha256: str = ""
     corpus_manifest_sha256: str = ""
+    check_attestations: dict = field(default_factory=dict)
     canonical: bool = False
 
     def provenance(self) -> dict:
@@ -90,6 +91,7 @@ class Disposition:
             "manifest_sha256": self.manifest_sha256,
             "f2_commit": self.f2_commit,
             "corpus_manifest_sha256": self.corpus_manifest_sha256,
+            "check_attestations": self.check_attestations,
             "row_count": self.row_count,
             "cleared_count": sum(1 for v in self.mapping.values()
                                  if _is_clear(v)),
@@ -195,11 +197,23 @@ def load_artifact(path: str) -> Disposition:
             f"disposition {path} is EMPTY; every pair would be excluded and the "
             "run would complete as a clean empty run")
 
+    check_attestations = {}
+    if "check_attestations" in manifest:
+        from .preband_disposition import (
+            DispositionBuildError, _normalise_check_attestations)
+        try:
+            check_attestations = _normalise_check_attestations(
+                manifest.get("check_attestations"))
+        except DispositionBuildError as exc:
+            raise PrebandContractError(
+                f"invalid disposition check_attestations: {exc}") from exc
+
     return Disposition(
         mapping=mapping, source=SOURCE_ARTIFACT, schema=schema, path=path,
         artifact_sha256=actual, f2_commit=f2_commit, row_count=len(mapping),
         manifest_sha256=_sha256_file(manifest_path),
         corpus_manifest_sha256=str(manifest.get("corpus_manifest_sha256", "")),
+        check_attestations=check_attestations,
         canonical=True)
 
 
@@ -625,6 +639,14 @@ def reportability_report(manifest: dict, predictions_path: str) -> dict:
          "disposition was not a canonical preband_disposition_v1 artifact "
          "(dict injection is test/development-only)")
 
+    attestations = pb.get("check_attestations") or {}
+    for check_name in ("F1", "F2", "F8"):
+        attestation = attestations.get(check_name) or {}
+        need(f"{check_name}_attested", attestation.get("performed") is True,
+             f"the canonical pre-band disposition does not attest that "
+             f"{check_name} ran (source={attestation.get('source')!r}, "
+             f"snapshot_date={attestation.get('snapshot_date')!r})")
+
     need("full_coverage", join.get("missing_from_disposition") == 0,
          f"{join.get('missing_from_disposition')} corpus citation_id(s) absent "
          "from the disposition")
@@ -709,13 +731,15 @@ def reportability_report(manifest: dict, predictions_path: str) -> dict:
     # from such a category, the run as a whole is not reportable -- otherwise an
     # unreportable F5 verdict rides out inside a "reportable" run.
     emitted = manifest.get("emitted_labels") or {}
+    findings = manifest.get("finding_labels") or {}
     for cat in ("F3", "F4", "F5", "F7"):
-        if not emitted.get(cat):
+        observed = max(int(emitted.get(cat) or 0), int(findings.get(cat) or 0))
+        if not observed:
             continue
         block = manifest.get(cat.lower())
         if block is None:
             need(f"{cat}_provenance", False,
-                 f"{emitted[cat]} {cat} label(s) emitted but no {cat.lower()} "
+                 f"{observed} {cat} finding(s) observed but no {cat.lower()} "
                  "provenance block exists")
             continue
         if cat == "F3":
@@ -723,11 +747,11 @@ def reportability_report(manifest: dict, predictions_path: str) -> dict:
             # recorded effective policy.
             ok = bool(block.get("wired")) and len(str(block.get("policy_sha256") or "")) == 64
             need("F3_provenance", ok,
-                 f"{emitted[cat]} F3 label(s) emitted but the f3 block is "
+                 f"{observed} F3 finding(s) observed but the f3 block is "
                  "unwired or carries no effective-policy digest")
         else:
             need(f"{cat}_reportable", block.get("reportable") is True,
-                 f"{emitted[cat]} {cat} label(s) emitted but the {cat.lower()} "
+                 f"{observed} {cat} finding(s) observed but the {cat.lower()} "
                  "block is NOT reportable")
 
     return {"reportable": not failures, "failures": failures, "checks": checks}

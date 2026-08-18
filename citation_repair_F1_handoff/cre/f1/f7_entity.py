@@ -66,6 +66,28 @@ from .judgment_engine import EntityAssessment, EntityState
 # Seam type aliases (documentation only).
 CallLLM = Callable[[str], str]
 
+# --------------------------------------------------------------------------
+# WHAT DOES NOT EXIST YET, stated as a constant so the manifest can publish it.
+# Mirrors f5_seams.ATTESTATION_LOOKUP_PERFORMED: the honest way to report an
+# unbuilt capability is a field that says so on every run, not an absence a
+# reader has to notice.
+#
+# There is NO production evidence builder for F7 anywhere in this package.
+# ``EvidenceContext`` -- the sole input to the assessor -- is constructed only in
+# ``test_f7_entity`` and ``test_f7_orchestrator_wiring``. Every seam below is
+# real, tested and wired; none of it has ever been handed a real paper. So F7 is
+# wiring, not a measurement, and any F7 count from this package is a count over
+# fixtures until this flag flips.
+# --------------------------------------------------------------------------
+PRODUCTION_F7_EVIDENCE_BUILDER = False
+PRODUCTION_F7_BUILDER_NOTE = (
+    "F7 has NO production evidence builder in this package: EvidenceContext is "
+    "constructed only in the F7 tests, so no F7 number here was computed over a "
+    "real paper. The seams, prompts, locks and audit records are real and "
+    "exercised; the input path is not built. Do not read any F7 rate from this "
+    "run as a measurement until this field is true."
+)
+
 
 # --------------------------------------------------------------------------
 # Enumerations (spec Sec 8 -- enumerated, not the string "enum").
@@ -115,6 +137,29 @@ R_NO_RELATION_SPAN = "no_valid_relation_span"
 R_ENTITY_SECTION_BAD = "entity_section_not_results_or_methods"
 R_OWN_FINDING_FALSE = "papers_own_finding_false"
 R_SPANS_NOT_DISTINCT = "entity_relation_span_not_distinct"
+# A stale alias table names ONE entity twice under two ids. Distinct ids are
+# then not proof of distinct entities, and precision-first says an ambiguity
+# holds rather than becoming an accusation against the gene it agrees with.
+R_SAME_CANONICAL_LABEL = "same_canonical_label_distinct_ids"
+# The builder SAW body evidence and dropped it because its kind is outside the
+# four F7 admits. Distinguishable from "this paper had no body evidence at all",
+# which is what an unrecorded drop used to look like.
+R_SECTIONS_EXCLUDED_BY_KIND = "evidence_sections_excluded_by_kind"
+
+# Every deterministic hold reason this module can emit, for the manifest
+# histogram. A reason that is not in this tuple is a reason nothing aggregates,
+# which is the gap the histogram exists to close -- so the tuple is the
+# enumeration, and ``test_f7_entity`` pins it against the module's own R_*
+# constants rather than against a copy of this list.
+HOLD_REASONS: tuple = (
+    R_PAPER_NOT_RESOLVED, R_EVIDENCE_INSUFFICIENT, R_TARGET_MISSING,
+    R_NO_ENTITY, R_MULTI_REF, R_ANALOGICAL, R_ATTR_INCONSISTENT,
+    R_CLAUSE_UNMATCHED, R_AUTHORITY_NOT_LOCKED, R_NORM_AMBIGUOUS, R_ZOOM,
+    R_RELATION_UNKNOWN, R_CROSS_UNAVAILABLE, R_RELATION_MISMATCH,
+    R_VERIFIER_DISAGREE, R_NO_RELATION_SPAN, R_ENTITY_SECTION_BAD,
+    R_OWN_FINDING_FALSE, R_SPANS_NOT_DISTINCT, R_SAME_CANONICAL_LABEL,
+    R_SECTIONS_EXCLUDED_BY_KIND,
+)
 
 
 # --------------------------------------------------------------------------
@@ -149,6 +194,37 @@ class SectionText:
 
 
 @dataclass(frozen=True)
+class ExcludedSection:
+    """A body section the builder SAW and did NOT supply as evidence.
+
+    F7 admits four section kinds (``_SECTION_LABELS``), and ``SectionText``
+    refuses everything else at construction. That leaves a builder holding a
+    paper whose entity is named only in the Discussion with two bad options: pass
+    the section anyway and have F7's own section policy recorded as
+    ``quarantine_parse``, or drop it silently -- after which that paper is
+    INDISTINGUISHABLE from a paper with no body evidence at all. Neither is a
+    record. This is the third option: name what was dropped and bind it by
+    digest, so the exclusion is a fact in the audit packet instead of an absence.
+
+    It is never evidence. ``text`` is deliberately absent -- an excluded section
+    is not read, and carrying its body would invite exactly the use this type
+    exists to prevent -- so the digest is taken on trust from the builder and
+    binds the drop to a specific section without reproducing it.
+    """
+    section_label: str
+    content_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.section_label, str) or not self.section_label.strip():
+            raise ValueError("excluded section_label must be a nonblank string")
+        if (not isinstance(self.content_sha256, str)
+                or len(self.content_sha256) != 64
+                or any(c not in "0123456789abcdef" for c in self.content_sha256)):
+            raise ValueError(
+                "excluded content_sha256 must be 64 lowercase hex characters")
+
+
+@dataclass(frozen=True)
 class ClaimClauseRef:
     """Clause-level attribution map (Codex precision): which reference(s) a
     specific clause of the atomic claim cites."""
@@ -176,6 +252,13 @@ class EvidenceContext:
     bundled_reference_ids: tuple[str, ...]
     claim_clause_refs: tuple[ClaimClauseRef, ...]
     body_sections: tuple[SectionText, ...]
+    # Sections the builder saw and did not supply (see ``ExcludedSection``).
+    # Defaults to empty so every existing construction is unchanged, and an
+    # empty tuple is NOT the same statement as a nonempty one: it says the
+    # builder recorded no drop, not that no drop happened. A builder that never
+    # populates this field leaves the old silence in place, which is why the
+    # manifest reports whether any run supplied it at all.
+    excluded_sections: tuple["ExcludedSection", ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.paper_resolved) is not bool:
@@ -196,6 +279,10 @@ class EvidenceContext:
             not isinstance(s, SectionText) for s in self.body_sections
         ):
             raise ValueError("body_sections must be a tuple of SectionText")
+        if not isinstance(self.excluded_sections, tuple) or any(
+            not isinstance(s, ExcludedSection) for s in self.excluded_sections
+        ):
+            raise ValueError("excluded_sections must be a tuple of ExcludedSection")
         # Fail-closed provenance: every section must belong to the resolved work.
         for section in self.body_sections:
             if section.source_work_id != self.resolved_work_id:
@@ -246,6 +333,80 @@ def _canonical_sha256(obj: Any) -> str:
 def policy_sha256(policy: F7Policy) -> str:
     """Pinned canonicalization of the whole policy (spec Sec 5)."""
     return _canonical_sha256(asdict(policy))
+
+
+def f7_reachability(policy: F7Policy) -> dict:
+    """What a policy CAN conclude, computed from the policy alone -- no run needed.
+
+    F7 emits ``DIFFERENT_ENTITY_SUPPORTED`` only for a SAME-TYPE pair whose type
+    has a locked authority. Two defaults therefore make it structurally
+    unreachable while every seam reports itself wired:
+
+    * ``authorities_json`` defaults to ``"{}"``. That is valid JSON and a legal
+      empty table, so it parses without complaint and locks nothing -- after
+      which every claim ends at ``authority_not_locked`` and the run reports
+      ``wired: true, fired: 0``, which reads exactly like an honest zero.
+    * CROSS-type F7 is unreachable BY DESIGN and always will be:
+      ``_CROSS_RELATIONS`` has no ``provably_distinct`` (a drug and a gene are
+      trivially "distinct", so the comparison cannot mean what F7 needs). The
+      ``cross_ontology_lock`` default of ``""`` is a second, redundant reason.
+      This is reported, not fixed -- it is the guardrail working.
+
+    Returned so the manifest can PUBLISH the answer rather than leaving an
+    auditor to recognise ``sha256("{}")`` on sight.
+    """
+    report: dict = {
+        "locked_types": [],
+        "same_type_reachable": False,
+        # Never True. Enumerated so the manifest states it rather than implying
+        # it by omission, and so a future reader sees it was a decision.
+        "cross_type_reachable": False,
+        "cross_type_note": (
+            "cross-type pairs can never produce F7: the cross comparator's "
+            "relation enum has no provably_distinct, by design"
+        ),
+        "cross_ontology_lock_present": bool(policy.cross_ontology_lock.strip()),
+        "unreachable_reason": None,
+    }
+    try:
+        authorities = _parse_authorities(policy.authorities_json)
+    except ValueError as exc:
+        report["unreachable_reason"] = f"authorities_json does not parse: {exc}"
+        return report
+    report["locked_types"] = sorted(authorities)
+    if not authorities:
+        report["unreachable_reason"] = (
+            "authorities_json locks no entity type, so every claim must end at "
+            f"{R_AUTHORITY_NOT_LOCKED} and F7 cannot fire for any input"
+        )
+        return report
+    report["same_type_reachable"] = True
+    return report
+
+
+def validate_f7_policy(policy: F7Policy) -> dict:
+    """Fail-closed CONFIGURATION check. Raises ``ValueError`` on a policy under
+    which F7 cannot fire for ANY input; returns the reachability report otherwise.
+
+    Belongs at run entry, beside the F4/F5/full-text config gates, and NOT in
+    ``EntityAssessorRun``: a raise inside the assessor arrives per pair and is
+    caught as a strict-parser failure, so F7's own configuration would be filed
+    as ``quarantine_parse`` on every row -- a defect wearing another defect's
+    name. A run that cannot fire F7 must refuse before it opens an output file,
+    for the same reason the full-text path refuses a half-wired pair of seams.
+    """
+    if not isinstance(policy, F7Policy):
+        raise ValueError("policy must be an F7Policy")
+    report = f7_reachability(policy)
+    if not report["same_type_reachable"]:
+        raise ValueError(
+            "F7 is wired but STRUCTURALLY UNREACHABLE under this policy: "
+            f"{report['unreachable_reason']}. A run in this configuration would "
+            "report the F7 seam wired and zero F7 findings, which is "
+            "indistinguishable from a run that checked and found none. Lock an "
+            "authority per entity type in authorities_json, or unwire f7_seams."
+        )
+    return report
 
 
 def _parse_authorities(authorities_json: str) -> dict[str, F7Authority]:
@@ -805,7 +966,7 @@ def _evidence_context_sha256(ctx: EvidenceContext) -> str:
     """Canonical hash over the context, binding body sections by their
     content_sha256 (which equals sha256(text)); recomputable in the replay
     validator from the supplied EvidenceContext alone."""
-    return _canonical_sha256({
+    body = {
         "paper_resolved": ctx.paper_resolved,
         "resolved_work_id": ctx.resolved_work_id,
         "citing_sentence": ctx.citing_sentence,
@@ -821,7 +982,19 @@ def _evidence_context_sha256(ctx: EvidenceContext) -> str:
              "content_sha256": s.content_sha256}
             for s in ctx.body_sections
         ],
-    })
+    }
+    # CONDITIONAL, for the same reason ``judgment_run._module_hashes`` makes its
+    # F5/F7 blocks conditional: an unconditional key moves the digest of every
+    # context ever hashed, including those in already-written packets, and the
+    # replay validator would then reject records it produced itself. Present
+    # only when the builder actually recorded an exclusion -- which is the only
+    # case where it carries information.
+    if ctx.excluded_sections:
+        body["excluded_sections"] = [
+            {"section_label": s.section_label, "content_sha256": s.content_sha256}
+            for s in ctx.excluded_sections
+        ]
+    return _canonical_sha256(body)
 
 
 def validate_f7_record(record: dict, evidence_context: EvidenceContext) -> None:
@@ -859,6 +1032,52 @@ def validate_f7_record(record: dict, evidence_context: EvidenceContext) -> None:
         raise ValueError("record_sha256 mismatch (tampered)")
 
 
+def hold_reason_histogram(records) -> dict:
+    """Aggregate the deterministic hold reasons over a run's Sec 9 packets.
+
+    The manifest published outcome COUNTS -- three ``EntityState`` values -- and
+    never the reasons, so "F7 held N times" was a number with no cause attached.
+    The causes were not lost: all of them survive on disk in ``rec["f7_records"]``.
+    They were simply absent from the one artifact anybody reads, which is the
+    whole difference between information existing and being reported.
+
+    TWO histograms, because they answer different questions and adding them
+    together would answer neither:
+
+    * ``claim`` -- the roll-up actually acted on, one reason per held claim
+      (the lowest-``tuple_id`` rule). This is the denominator for "why did F7
+      not fire on this pair".
+    * ``tuple`` -- every reason every assessed tuple produced, including the ones
+      a roll-up discarded. A claim held for ``multi_reference_attribution_ambiguous``
+      may contain three tuples that each died of something else, and only this
+      histogram shows the work that was actually done.
+
+    ``unrecognised`` names any reason absent from ``HOLD_REASONS``. It should
+    stay empty; a nonempty list means a reason was introduced without being
+    enumerated, and the histogram is reporting on a set it no longer covers.
+    """
+    claim_counts: dict = {}
+    tuple_counts: dict = {}
+    for record in records or []:
+        if str(record.get("derived")) == EntityState.UNJUDGEABLE.value:
+            reason = str(record.get("reason"))
+            claim_counts[reason] = claim_counts.get(reason, 0) + 1
+        for tr in record.get("tuple_records") or []:
+            if str(tr.get("derived")) != "UNJUDGEABLE":
+                continue
+            reason = str(tr.get("reason"))
+            tuple_counts[reason] = tuple_counts.get(reason, 0) + 1
+    known = frozenset(HOLD_REASONS)
+    unrecognised = sorted(
+        (frozenset(claim_counts) | frozenset(tuple_counts)) - known)
+    return {
+        "claim": dict(sorted(claim_counts.items())),
+        "tuple": dict(sorted(tuple_counts.items())),
+        "enumerated_reasons": len(HOLD_REASONS),
+        "unrecognised": unrecognised,
+    }
+
+
 # --------------------------------------------------------------------------
 # Assessor.
 # --------------------------------------------------------------------------
@@ -886,7 +1105,18 @@ class EntityAssessorRun:
         ctx = self.evidence_context
         if ctx.paper_resolved is not True:
             return R_PAPER_NOT_RESOLVED
-        if not any(s.section_label in _SECTION_LABELS for s in ctx.body_sections):
+        # This test used to read ``any(s.section_label in _SECTION_LABELS ...)``,
+        # which LOOKS like a section-kind filter and is not one:
+        # ``SectionText.__post_init__`` already refuses every label outside
+        # ``_SECTION_LABELS``, so the membership test could never be False for a
+        # section that exists, and the whole condition reduced to emptiness.
+        # Written as what it does -- and the two ways of arriving here with no
+        # usable section are now told apart, because "this paper had no body
+        # evidence" and "this paper's evidence was in a kind F7 does not admit"
+        # are different facts and only one of them is about the paper.
+        if not ctx.body_sections:
+            if ctx.excluded_sections:
+                return R_SECTIONS_EXCLUDED_BY_KIND
             return R_EVIDENCE_INSUFFICIENT
         clause_ref_ids = {r for c in ctx.claim_clause_refs for r in c.reference_ids}
         if (ctx.target_reference_id not in ctx.bundled_reference_ids
@@ -948,6 +1178,19 @@ class EntityAssessorRun:
         )
         if clause_ref is None:
             return finish("UNJUDGEABLE", R_CLAUSE_UNMATCHED)
+
+        # 3a. CLAIMED-side authority lock, asked BEFORE the first token. This
+        # check used to sit at step 5, after the attribution and evidence calls;
+        # a tuple whose entity type has no locked authority can only ever return
+        # authority_not_locked, so those two calls bought a verdict that was
+        # structurally impossible before either was made. The EVIDENCE side still
+        # has to wait for the evidence call -- that call is what names its type --
+        # and stays at step 5.
+        claimed_type = claimed_tuple["entity_type"]
+        claimed_lock = self.authorities.get(claimed_type)
+        if claimed_lock is None:
+            return finish("UNJUDGEABLE", R_AUTHORITY_NOT_LOCKED)
+
         attribution_prompt = _fill_prompt(F7_ATTRIBUTION_PROMPT, {
             "<<TARGET>>": ctx.target_reference_id,
             "<<CLAUSE_REFS>>": json.dumps(list(clause_ref.reference_ids)),
@@ -1011,12 +1254,12 @@ class EntityAssessorRun:
         if evidence["papers_own_finding"] is not True:
             return finish("UNJUDGEABLE", R_OWN_FINDING_FALSE)
 
-        # 5. Both-type authority lock.
-        claimed_type = claimed_tuple["entity_type"]
+        # 5. EVIDENCE-side authority lock. The claimed side was locked at 3a,
+        # before any model call; this side could not be, because the evidence
+        # call is what names its type.
         evidence_type = evidence["entity_type"]
-        claimed_lock = self.authorities.get(claimed_type)
         evidence_lock = self.authorities.get(evidence_type)
-        if claimed_lock is None or evidence_lock is None:
+        if evidence_lock is None:
             return finish("UNJUDGEABLE", R_AUTHORITY_NOT_LOCKED)
 
         # 6. Normalize both under their locks (confident-id gate).
@@ -1060,8 +1303,27 @@ class EntityAssessorRun:
         if relation == "unknown":
             return finish("UNJUDGEABLE", R_RELATION_UNKNOWN)
         # Only a SAME-TYPE provably_distinct reaches here (cross enum excludes it).
-        if claimed_norm["id"].strip() == evidence_norm["id"].strip():
+        # TWO identity guards, because a normalized id and a canonical label can
+        # each be the thing that is stale, and only the id was ever checked.
+        #
+        # (a) IDs, CASE-FOLDED. "hgnc:6407" and "HGNC:6407" are one id; a
+        # comparator that calls them provably_distinct has contradicted itself,
+        # which is the same contract violation the exact-equality test already
+        # raised on, spelled differently. A raw .strip() compare let it through
+        # and produced a wrong-entity accusation against the gene it agrees with.
+        if (claimed_norm["id"].strip().casefold()
+                == evidence_norm["id"].strip().casefold()):
             raise ValueError("provably_distinct relation on identical normalized ids")
+        # (b) CANONICAL LABELS. Equal labels under genuinely distinct ids is NOT
+        # a comparator contract violation -- it is the signature of a STALE ALIAS
+        # TABLE, where one entity is registered twice. That is AMBIGUITY, not
+        # proof, and precision-first means it holds instead of accusing: without
+        # this the packet proposes correcting KRAS to KRAS. canonical_label was
+        # available on both sides all along and was read only for prompt text.
+        claimed_label = str(claimed_norm["canonical_label"]).strip().casefold()
+        evidence_label = str(evidence_norm["canonical_label"]).strip().casefold()
+        if claimed_label and claimed_label == evidence_label:
+            return finish("UNJUDGEABLE", R_SAME_CANONICAL_LABEL)
 
         # 8. Relation-tuple comparison (schema D via the injected comparator).
         comparison_d = _validate_relation_comparison(
@@ -1151,6 +1413,17 @@ class EntityAssessorRun:
 
         if gate_reason is not None:
             return unjudgeable(gate_reason)
+
+        # 1a. NO AUTHORITY LOCKED AT ALL -> hold before the first token. With an
+        # empty lock table every tuple must end at authority_not_locked, so the
+        # per-claim tuples call and the per-tuple attribution/evidence calls are
+        # spent on a verdict that configuration had already decided. The default
+        # policy IS this case (``authorities_json="{}"`` parses to ``{}``), which
+        # is why it was paid for on every claim of every run that forgot to set
+        # it. ``run_natural_judgment`` refuses such a run outright; this is the
+        # in-module floor for the lower-level entry points that do not.
+        if not self.authorities:
+            return unjudgeable(R_AUTHORITY_NOT_LOCKED)
 
         # 2. Extract claimed tuples (schema B, one call per claim).
         tuples_prompt = _fill_prompt(F7_TUPLES_PROMPT, {"<<CLAIM>>": claim})

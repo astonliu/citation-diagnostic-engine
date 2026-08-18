@@ -186,3 +186,119 @@ the runtime rises materially, something reached the network and that is a findin
 ```
 cd citation_repair_F1_handoff && PYTHONPATH=. python -m pytest cre/f1 -q
 ```
+
+
+---
+
+---
+
+# Audit loop — F5, round 1 only (2026-08-18) · **SKIPPED — 1 round, not converged**
+
+**F5 was skipped by ZD on 2026-08-17** after repeated infrastructure failures in its lane. One round
+completed and was fully graded: **5 findings → 3 LAND · 2 DEFER**. No further rounds were run.
+
+**Coverage claim: none.** Three defects are established; the surface is not worked out. Treat this as a
+partial map, not a clean bill.
+
+## ⚠ READ FIRST — F5 has never run on real data
+
+`f5_seams.py:3-5` says so in its own words, and that docstring is accurate. **Everything below is about
+what the F5 machinery would publish if it ran, and about the artifacts it already publishes today.**
+Two of the three landed findings are false statements in shipped artifacts, not detector errors.
+
+---
+
+## L-1 · The "blind by construction" discovery queue hands the annotator the detector's own verdict
+
+**Cite:** `f5_discovery_queue.py:78-80` (what `build_queue` copies) · `:119-131` (`assert_blind`) ·
+`:10-12` (the module's own promise) · `f5_supersession.py:735-736`, `:800`, `:810-812`, `:869`
+**Verdict:** LAND · 95/96/96 · REPRODUCED
+
+The module promises at `:10-12` that *"an annotator who can see the proposed route is no longer
+annotating independently."* `build_queue` then copies the detector's own reason string into the field
+labelled *"WHY this pair reached an annotator, in the annotator's terms."*
+
+**`assert_blind` cannot catch it because it checks key names, not values.** A leak inside the value of a
+permitted key passes. This is the named defect class applied to the blindness guarantee itself: a queue
+that was never blind and a queue whose blindness check ran and found nothing produce the same output.
+
+**Conflicts with a locked constraint** — `DECISIONS.md:491` lists blindness among the constraints that
+are *"not waived, because they are not checks"*, and DEC-045 (`DECISIONS.md:546-563`) closes with
+*"mixing an extractor-QA task into the annotation pipeline is how a queue stops being blind."*
+
+**Fix direction:** `assert_blind` must inspect values, not key names. Until it does, no F5 annotation
+round may be treated as blind.
+
+---
+
+## L-2 · Following the F5 prompt's own instruction produces a span the selection guarantee rejects
+
+**Cite:** `f5_contradiction_prompt.py:213-215` (the instruction) · `:15-17` (the guarantee it breaks) ·
+`:140` · `f5_supersession.py:794-800` · `sentence_spans.py:158` · `f5_seams.py:317-323` ·
+`evidence_reader.py:110`
+**Verdict:** LAND · 96/96/97 · REPRODUCED
+
+`:15-17` states the guarantee: *"A selected span is verbatim BY CONSTRUCTION, so the module's own check
+cannot fail on it."* **That holds for a one-id span and breaks for the two-id span the prompt itself asks
+the judge to produce.** Joining two sentence ids yields text that is not verbatim against the source, so
+`resolve_span` fails, and a confirmed directional contradiction is silently converted to `unassessable`.
+
+**The miss log built to count exactly this records nothing.**
+
+**Fix direction:** either the join must reproduce the source text between the two sentences, or the
+prompt must stop asking for two ids. **The guarantee at `:15-17` is a factual claim in a shipped module
+and is currently false — correct it either way.** Sibling resolver `coverage_prompts_v3._resolve_spans`
+may share the join; it was not audited (F3 surface) — **check it.**
+
+---
+
+## L-3 · `manifest["f5"]["retrieval_protocol"]` publishes a protocol the run did not execute
+
+**Cite:** `judgment_run.py:1044-1058` (the manifest block) · `f5_seams.py:64-80` · `:349-364` ·
+`:228-249` · `judgment_run.py:689-694`
+**Verdict:** LAND · 95/95/96 · REPRODUCED
+
+`retrieval_protocol()` is a **zero-argument module constant**. The seam that actually ran is whatever the
+caller injected. `build_f5_seams` — the only code that would make the published protocol true — has
+**zero callers**.
+
+`_f5_manifest_block` was written because *"the governing settings of an F5 number were recorded
+nowhere"* (`judgment_run.py:1028-1035`). It now records settings that are not the ones that governed.
+
+**Related:** `GOVERNING_MODULES` (`production_launcher.py:65-72`) omits **all four** F5 modules, so an
+edit to any of them leaves the digest block byte-identical.
+
+**Fix direction:** the manifest must report the protocol of the seam that ran, or publish nothing. A
+constant standing in for a measurement is worse than an absent field.
+
+---
+
+## Deferred
+
+| cite | claim | why deferred |
+|---|---|---|
+| `judgment_run.py:721-744`, `:1335-1336`, `preband_contract.py:705-713`, `judgment_run.py:1758-1760` | **The reportability hatch is open on the legacy path.** F5 can never populate `emitted_labels`, so the guard that exists to stop this skips its own clause and a `QUALIFYING_CONTRADICTION` is published inside a run stamped `reportable: True` | 72–96, not unanimous. **Distinct from the register's open F4 item** — that one is label-priority masking; here no masking label exists at all, F5 is the sole finding and the record's label is `None`. **Re-raise before any run that could emit F5.** |
+| `f5_supersession.py:252-262`, `:182`, `:951-955`, `judgment_run.py:1048`, `f5_contradiction_prompt.py:53-55`, `judgment_run.py:1553-1555` | **F5 prompt provenance is three holes**: no freeze package; `validate_f5_policy` accepts any nonblank string as the prompt version, so a fabricated version publishes beside the true digest; the parser version is defined but written to no record and no manifest, despite a comment at `:53-54` claiming both axes are stamped on every record | 62–80. Freezing the F5 prompt is a **FREEZE DECISION** and was out of the auditor's scope. **The false comment is cheap to fix now; the freeze is ZD's.** |
+
+## Guardrails
+
+- `judgment_run.py` and `schema.py` are **GOVERNED**; CONTRADICTIONS 65 is OPEN. Report the digest
+  consequence, do not decide it.
+- `band_prompts.py` byte-identical — blob OID `fa01126e2b9482d450065fd70cd0eb1fea816f5c`.
+- **Freezing or versioning the F5 prompt is a decision, not an implementation step.** Report the gap.
+- Precision-first, both halves. No invented constants. Specs only — no corpus run.
+
+## Definition of done
+
+- `assert_blind` inspects values; a leak inside a permitted key fails the check.
+- A two-id span either resolves verbatim or the prompt stops asking for one — and the miss log counts it.
+- The F5 manifest reports the seam that ran, or the field goes.
+- **Stated explicitly in whatever ships: F5 completed one audit round out of the loop's two-clear
+  standard.** Do not present this stratum as audited to the same depth as F7 or F8.
+- Suite: old → new counts, environment stated.
+
+## Verification command
+
+```
+cd citation_repair_F1_handoff && PYTHONPATH=. python -m pytest cre/f1 -q
+```

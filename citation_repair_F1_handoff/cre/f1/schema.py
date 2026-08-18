@@ -371,6 +371,11 @@ class StageLog:
     # rows are quarantined for human review and never auto-labelled F1/F2.
     same_work_reason: str = ""
     identity_signals: list[str] = field(default_factory=list)
+    identity_disposition: str = ""
+    roster_containment_measurable: bool = False
+    roster_containment_value: Optional[float] = None
+    roster_claimed_surnames_measured: int = 0
+    roster_resolved_surnames_measured: int = 0
     # Set when the (claimed, resolved) pair is not a scoreable title comparison
     # (see UNSCOREABLE). Names the reason; routes the ref out of the F2 numerator.
     unscoreable_reason: Optional[str] = None
@@ -474,6 +479,10 @@ class Reference:
     citance_marker_clusters: list[dict] = field(default_factory=list)
     citance_marker_cluster_index: int = -1
     citance_marker_cluster_id: str = ""
+    # Additive parser diagnostic only.  The legacy sentence regex remains
+    # byte-for-byte unchanged; when its spans do not partition an input block,
+    # this records the gap without changing the sentence or any verdict.
+    citance_sentence_partition_failures: list[dict] = field(default_factory=list)
 
     retrieved: RetrievedRecord = field(default_factory=RetrievedRecord)
     log: StageLog = field(default_factory=StageLog)
@@ -512,6 +521,14 @@ class Reference:
                 "doi_match": self.log.doi_match,
                 "same_work_reason": self.log.same_work_reason,
                 "identity_signals": self.log.identity_signals,
+                "identity_disposition": self.log.identity_disposition,
+                "roster_containment_measurable":
+                    self.log.roster_containment_measurable,
+                "roster_containment_value": self.log.roster_containment_value,
+                "roster_claimed_surnames_measured":
+                    self.log.roster_claimed_surnames_measured,
+                "roster_resolved_surnames_measured":
+                    self.log.roster_resolved_surnames_measured,
                 "author_tripwire": self.log.author_tripwire,
                 "unscoreable_reason": self.log.unscoreable_reason,
                 "retracted": self.log.retracted,
@@ -520,12 +537,21 @@ class Reference:
                 "db_hits": self.log.db_hits,
                 "decided_by": self.log.decided_by,
                 "pipeline_state": self.label,
+                "sentence_partition_failures":
+                    self.citance_sentence_partition_failures,
             },
         )
 
     def to_log_record(self) -> dict:
         return {
             "citation_id": self.citation_id,
+            "citance": self.citance,
+            "cited_reference_marker": self.cited_reference_marker,
+            "source_pmcid": self.source_pmcid,
+            "source_pmid": self.source_pmid,
+            "source_title": self.source_title,
+            "sentence_partition_failures":
+                self.citance_sentence_partition_failures,
             "label": self.label,
             "confidence": self.confidence,
             "claimed": asdict(self.claimed),

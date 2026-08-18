@@ -1,5 +1,9 @@
 """F2 measurement layer -- buckets, evidence bands, base rate, precision + CI.
 
+The reported seed-47 precision figure (74/80 = 0.9250) belongs to this OFFLINE
+record/reband path. The live ``run.process_reference`` path uses a different
+candidate predicate and reports live counts; the two are not interchangeable.
+
 Read-only. Consumes the per-reference log records that ``run.py`` already writes
 (``Reference.to_log_record()``) and emits the numbers the F2 write-up needs. It
 NEVER re-runs the network, NEVER mutates ``ref.label``, and NEVER assigns an F2
@@ -30,7 +34,9 @@ from .schema import (F1, F2, UNVERIFIABLE, UNSCOREABLE, ClaimedRef,
                      RetrievedRecord, fetch_answered)
 from .biblio_match import (flag_verdict, VERDICT_MATCH,
                            VERDICT_WRONG_PAPER, VERDICT_SAME_WORK_VARIANT,
-                           VERDICT_UNSCOREABLE, VERDICT_UNRESOLVED)
+                           VERDICT_UNSCOREABLE, VERDICT_UNRESOLVED,
+                           VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE)
+from .f2_samework_rule import LANGUAGE_TRIGGERS
 from .unscoreable import classify_unscoreable
 
 
@@ -115,8 +121,12 @@ def summarize(log_records: list[dict],
     f1_attempted = 0              # PMID-bearing: the F1 existence check applies
     f1_answered = 0               # ...and the EFetch answered (dead or alive)
     f1_transport_failed = 0       # ...and it did NOT answer -> held, no evidence
+    f1_transport_unrecorded = 0   # legacy replay: no status was stored
     f1_confirm_complete = 0       # every confirmation search answered
     f1_confirm_incomplete = 0     # at least one did not -> F1 unreachable
+    f1_confirm_skipped_benign = 0
+    f1_confirm_skipped_prevented = 0
+    f1_quarantine_exception = 0
 
     for rec in log_records:
         lg = _lg(rec)
@@ -126,7 +136,10 @@ def summarize(log_records: list[dict],
             f1_count += 1
         if lg.get("pmid_present"):
             f1_attempted += 1
-            if fetch_answered(lg.get("pmid_transport_status") or ""):
+            status = lg.get("pmid_transport_status")
+            if not isinstance(status, str) or not status:
+                f1_transport_unrecorded += 1
+            elif fetch_answered(status):
                 f1_answered += 1
             else:
                 f1_transport_failed += 1
@@ -136,6 +149,17 @@ def summarize(log_records: list[dict],
                 f1_confirm_complete += 1
             else:
                 f1_confirm_incomplete += 1
+        else:
+            decided_by = lg.get("decided_by") or ""
+            if decided_by in {"metadata_match", "noid_metadata_match",
+                              "same_work_variant_quarantine",
+                              "retracted_publication_pubtype"}:
+                f1_confirm_skipped_benign += 1
+            elif decided_by in {"llm_formatting", "llm_uncertain", "no_llm",
+                                "no_confirm"}:
+                f1_confirm_skipped_prevented += 1
+            if decided_by == "quarantine_exception":
+                f1_quarantine_exception += 1
         if label == UNSCOREABLE or lg.get("unscoreable_reason"):
             unscoreable_by_reason[lg.get("unscoreable_reason") or "unspecified"] += 1
             continue                       # excluded from numerator AND denominator
@@ -189,8 +213,12 @@ def summarize(log_records: list[dict],
             "attempted": f1_attempted,
             "answered": f1_answered,
             "transport_failed": f1_transport_failed,
+            "transport_unrecorded": f1_transport_unrecorded,
             "confirm_complete": f1_confirm_complete,
             "confirm_incomplete": f1_confirm_incomplete,
+            "confirm_skipped_benign": f1_confirm_skipped_benign,
+            "confirm_skipped_prevented": f1_confirm_skipped_prevented,
+            "quarantine_exception": f1_quarantine_exception,
             "fired": f1_count,
             "note": (
                 "'attempted' is PMID-bearing references the existence check "
@@ -200,7 +228,9 @@ def summarize(log_records: list[dict],
                 "where all three confirmation searches answered, the only rows "
                 "on which F1 is reachable. fired=0 with transport_failed>0 or "
                 "confirm_incomplete>0 has NOT found zero fabrications -- part "
-                "of the corpus was never checked."
+                "of the corpus was never checked. transport_unrecorded is "
+                "legacy data whose answer state is unknown; confirmation skips "
+                "separate benign early decisions from prevented checks."
             ),
         },
         "unscoreable_by_reason": dict(unscoreable_by_reason),
@@ -273,10 +303,14 @@ def format_report(report: dict) -> str:
         lines.append(
             f"  F1 labelled           : {c['f1_count']}   "
             f"[attempted {f1s['attempted']}, answered {f1s['answered']}, "
-            f"transport-failed {f1s['transport_failed']}, "
+            f"transport-failed/unrecorded {f1s['transport_failed']}/"
+            f"{f1s['transport_unrecorded']}, "
             f"confirm complete/incomplete "
             f"{f1s['confirm_complete']}/{f1s['confirm_incomplete']}]")
-        if f1s["transport_failed"] or f1s["confirm_incomplete"]:
+        if (f1s["transport_failed"] or f1s["transport_unrecorded"]
+                or f1s["confirm_incomplete"]
+                or f1s["confirm_skipped_prevented"]
+                or f1s["quarantine_exception"]):
             lines.append(
                 "    ^ part of this corpus was NOT checked; "
                 "F1=0 here does not mean zero fabrications.")
@@ -302,9 +336,10 @@ def format_report(report: dict) -> str:
 # as None). Keep every future run on this function so the schema cannot drift.
 _F2_RECORD_KEYS = (
     "citation_id", "pmid", "claimed_pmid", "resolved_pmid", "src_pmcid",
-    "written_title", "resolved_title", "written_year",
+    "written_title", "written_title_excised", "resolved_title", "written_year",
     "resolved_year", "match_score", "title_sim", "author_match", "year_match",
-    "first_author_match", "journal_match", "volume_match", "pages_match",
+    "first_author_match", "journal_match", "journal_match_method",
+    "journal_match_authoritative", "volume_match", "pages_match",
     "doi_match", "resolved", "flag", "score_below_accept",
     "written_first_author", "resolved_first_author", "written_journal",
     "resolved_journal", "written_volume", "resolved_volume", "written_pages",
@@ -312,7 +347,11 @@ _F2_RECORD_KEYS = (
     "written_authors", "resolved_authors", "written_raw", "resolved_is_container",
     "resolved_alternate_titles", "resolved_language",
     "resolved_publication_types", "resolved_related_pmids",
-    "verdict", "same_work_reason", "identity_signals",
+    "written_first_author_is_collab", "resolved_has_collective_author",
+    "verdict", "same_work_reason", "identity_signals", "identity_disposition",
+    "roster_containment_measurable", "roster_containment_value",
+    "roster_claimed_surnames_measured", "roster_resolved_surnames_measured",
+    "cross_language_trigger",
     # F2_V3_1 Bug 1: the UNSCOREABLE bucket name, "" for scoreable rows. Present on
     # every record so the schema stays uniform (re-bandable + JSON round-trips).
     "unscoreable_reason",
@@ -330,6 +369,7 @@ def _raw_fields(pmid: str, src_pmcid: str, claimed: ClaimedRef,
         "resolved_pmid": resolved.pmid or "",
         "src_pmcid": src_pmcid,
         "written_title": claimed.title,
+        "written_title_excised": getattr(claimed, "written_title_excised", "") or "",
         "resolved_title": resolved.title,
         "written_year": claimed.year,
         "resolved_year": resolved.year,
@@ -355,6 +395,10 @@ def _raw_fields(pmid: str, src_pmcid: str, claimed: ClaimedRef,
         "resolved_publication_types": list(
             getattr(resolved, "publication_types", [])),
         "resolved_related_pmids": dict(getattr(resolved, "related_pmids", {})),
+        "written_first_author_is_collab": bool(
+            getattr(claimed, "first_author_is_collab", False)),
+        "resolved_has_collective_author": bool(
+            getattr(resolved, "has_collective_author", False)),
     }
 
 
@@ -406,6 +450,8 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
             "year_match": None,
             "first_author_match": None,
             "journal_match": None,
+            "journal_match_method": "",
+            "journal_match_authoritative": False,
             "volume_match": None,
             "pages_match": None,
             "doi_match": None,
@@ -414,6 +460,12 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
             "verdict": VERDICT_UNSCOREABLE,
             "same_work_reason": "",
             "identity_signals": [],
+            "identity_disposition": "",
+            "roster_containment_measurable": False,
+            "roster_containment_value": None,
+            "roster_claimed_surnames_measured": 0,
+            "roster_resolved_surnames_measured": 0,
+            "cross_language_trigger": "",
             "unscoreable_reason": bucket,
         }
 
@@ -437,6 +489,8 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
             "year_match": None,
             "first_author_match": None,
             "journal_match": None,
+            "journal_match_method": "",
+            "journal_match_authoritative": False,
             "volume_match": None,
             "pages_match": None,
             "doi_match": None,
@@ -445,6 +499,12 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
             "verdict": VERDICT_UNRESOLVED,
             "same_work_reason": "",
             "identity_signals": [],
+            "identity_disposition": "",
+            "roster_containment_measurable": False,
+            "roster_containment_value": None,
+            "roster_claimed_surnames_measured": 0,
+            "roster_resolved_surnames_measured": 0,
+            "cross_language_trigger": "",
             "unscoreable_reason": "resolved_unresolved",
         }
 
@@ -457,14 +517,24 @@ def build_f2_record(pmid: str, src_pmcid: str, claimed: ClaimedRef,
         "year_match": m.fields.year_match,
         "first_author_match": m.fields.first_author_match,
         "journal_match": m.fields.journal_match,
+        "journal_match_method": m.fields.journal_match_method,
+        "journal_match_authoritative": m.fields.journal_match_authoritative,
         "volume_match": m.fields.volume_match,
         "pages_match": m.fields.pages_match,
         "doi_match": m.fields.doi_match,
-        "flag": verdict != VERDICT_MATCH,
-        "score_below_accept": m.score < accept,
+        "flag": (None if verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
+                 else verdict != VERDICT_MATCH),
+        "score_below_accept": (None if verdict == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE
+                               else m.score < accept),
         "verdict": verdict,
         "same_work_reason": m.same_work_reason,
         "identity_signals": list(m.identity_signals),
+        "identity_disposition": m.identity_disposition,
+        "roster_containment_measurable": m.roster_containment_measurable,
+        "roster_containment_value": m.roster_containment_value,
+        "roster_claimed_surnames_measured": m.roster_claimed_surnames_measured,
+        "roster_resolved_surnames_measured": m.roster_resolved_surnames_measured,
+        "cross_language_trigger": m.cross_language_trigger,
         "unscoreable_reason": "",
     }
 
@@ -496,11 +566,20 @@ def high_band_rate_of_scoreable(records: list[dict]) -> dict:
                       if r.get("verdict") == VERDICT_UNSCOREABLE)
     unresolved = sum(1 for r in records
                      if r.get("verdict") == VERDICT_UNRESOLVED)
+    cross_language_records = [
+        r for r in records
+        if r.get("verdict") == VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE]
+    cross_language_by_trigger = {t: 0 for t in LANGUAGE_TRIGGERS}
+    for r in cross_language_records:
+        trigger = r.get("cross_language_trigger") or ""
+        cross_language_by_trigger[trigger] = (
+            cross_language_by_trigger.get(trigger, 0) + 1)
     # scoreable frame: has a verdict AND is neither an UNSCOREABLE nor an
     # UNRESOLVED row (both are structurally out of the scoreable-for-F2 frame).
     scoreable = [r for r in records if r.get("verdict")
                  and r.get("verdict") not in (VERDICT_UNSCOREABLE,
-                                              VERDICT_UNRESOLVED)]
+                                              VERDICT_UNRESOLVED,
+                                              VERDICT_OUT_OF_SCOPE_CROSS_LANGUAGE)]
     frame = [r for r in scoreable
              if r.get("verdict") != VERDICT_SAME_WORK_VARIANT]
     high = sum(1 for r in frame if r.get("verdict") == VERDICT_WRONG_PAPER)
@@ -509,8 +588,14 @@ def high_band_rate_of_scoreable(records: list[dict]) -> dict:
         "flagged_f2_high": high,
         "denominator_scoreable": n,
         "same_work_variant_excluded": len(scoreable) - n,
+        "mixed_identity_conflict_quarantined": sum(
+            1 for r in scoreable
+            if r.get("identity_disposition") == "mixed_identity_conflict"),
         "unscoreable_excluded": unscoreable,
         "resolved_unresolved_excluded": unresolved,
+        "cross_language_excluded": len(cross_language_records),
+        "cross_language_excluded_by_trigger": dict(
+            sorted(cross_language_by_trigger.items())),
         "high_band_rate_of_scoreable": (high / n) if n else None,
     }
 
@@ -555,3 +640,28 @@ def assert_f2_fixes_loaded() -> None:
         raise RuntimeError("STALE MODULE: parser does not extract "
                            f"<string-name><surname> -- Defect A fix not loaded; "
                            f"got {authors!r}.")
+
+
+def find_verdict_consistency_conflicts(records: list) -> list:
+    """Surface same written-work/PMID groups whose F2 verdicts disagree."""
+    from .biblio_match import normalize_title
+    groups: dict = {}
+    for record in records:
+        pmid = str(record.get("claimed_pmid") or record.get("pmid") or "").strip()
+        normalized_title = normalize_title(record.get("written_title") or "")
+        if pmid and normalized_title:
+            groups.setdefault((normalized_title, pmid), []).append(record)
+    conflicts = []
+    for (normalized_title, pmid), members in groups.items():
+        verdicts = {member.get("verdict") for member in members}
+        if len(members) > 1 and len(verdicts) > 1:
+            conflicts.append({
+                "claimed_pmid": pmid,
+                "normalized_title": normalized_title,
+                "verdicts": sorted(verdict for verdict in verdicts if verdict),
+                "citation_ids": sorted(member.get("citation_id", "")
+                                       for member in members),
+            })
+    return sorted(conflicts,
+                  key=lambda conflict: (conflict["claimed_pmid"],
+                                        conflict["normalized_title"]))

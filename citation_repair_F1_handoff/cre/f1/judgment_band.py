@@ -196,6 +196,9 @@ def build_item(ref) -> "dict | None":
             getattr(ref, "citance_group_inferred_members", None) or []),
         "citance_marker_inferred": bool(
             getattr(ref, "citance_marker_inferred", False)),
+        **({"sentence_partition_failures": list(
+            getattr(ref, "citance_sentence_partition_failures", None) or [])}
+           if getattr(ref, "citance_sentence_partition_failures", None) else {}),
         "cited_marker": ref.cited_reference_marker,
         "cited_pmid": c.claimed_pmid,
         "cited_claimed": {

@@ -105,8 +105,10 @@ def fetch_pubmed(pmid: str, api_key: str = "", email: str = "",
         return RetrievedRecord(resolved=False, pmid=pmid,
                                transport_status=FETCH_ANSWERED_ABSENT)
     rec = _parse_medline(r.text, pmid)
+    # A non-empty 200 that cannot be parsed is not evidence that the PMID is
+    # absent. Only the empty-body branch above has that meaning.
     rec.transport_status = (FETCH_ANSWERED_RECORD if rec.resolved
-                            else FETCH_ANSWERED_ABSENT)
+                            else FETCH_RESOLVER_ERROR)
     return rec
 
 
@@ -465,6 +467,11 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
             _record_author_tripwire(log, m, enabled=author_tripwire)
             log.same_work_reason = m.same_work_reason
             log.identity_signals = list(m.identity_signals)
+            log.identity_disposition = m.identity_disposition
+            log.roster_containment_measurable = m.roster_containment_measurable
+            log.roster_containment_value = m.roster_containment_value
+            log.roster_claimed_surnames_measured = m.roster_claimed_surnames_measured
+            log.roster_resolved_surnames_measured = m.roster_resolved_surnames_measured
             if _live_quarantines_variant(
                     verdict, m, author_tripwire=author_tripwire):
                 log.mismatch_flagged = True
@@ -560,6 +567,11 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
     _record_author_tripwire(log, m, enabled=author_tripwire)
     log.same_work_reason = m.same_work_reason
     log.identity_signals = list(m.identity_signals)
+    log.identity_disposition = m.identity_disposition
+    log.roster_containment_measurable = m.roster_containment_measurable
+    log.roster_containment_value = m.roster_containment_value
+    log.roster_claimed_surnames_measured = m.roster_claimed_surnames_measured
+    log.roster_resolved_surnames_measured = m.roster_resolved_surnames_measured
 
     # Proof-backed variants remain visible, but bypass the F1/F2 accusation
     # path.  ``process_reference`` sends them directly to ``decide``, which

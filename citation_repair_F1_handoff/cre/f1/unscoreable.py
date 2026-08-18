@@ -33,6 +33,14 @@ from typing import Optional
 
 from .schema import ClaimedRef, RetrievedRecord
 from .biblio_match import normalize_title
+from .journal_identity import resolve_journal_id, JOURNAL_AUTHORITY
+
+
+def _looks_like_a_title_not_a_journal(s: str) -> bool:
+    """Authority-gated signal for title-shaped text in a non-title slot."""
+    if len(s.split()) < 6 or JOURNAL_AUTHORITY.is_empty():
+        return False
+    return resolve_journal_id(s) is None
 
 # Resolved-side titles that are placeholders, not titles (PubMed emits these).
 _PLACEHOLDER_TITLES = {
@@ -187,6 +195,15 @@ def classify_unscoreable(claimed: ClaimedRef,
 
     # --- claimed side --------------------------------------------------------
     if not nct:
+        if _looks_like_a_title_not_a_journal(claimed.journal or ""):
+            return ("field_transposition_journal_holds_title",
+                    "claimed title is empty and written_journal holds title-shaped "
+                    "text that resolves to no known serial; re-parse and re-score.")
+        a0 = claimed.authors[0] if claimed.authors else ""
+        if _looks_like_a_title_not_a_journal(a0):
+            return ("field_transposition_authors_hold_title",
+                    "claimed title is empty and written_authors[0] holds "
+                    "title-shaped text; re-parse and re-score.")
         # No claimed title at all -> nothing to score (caller may also handle
         # this, but naming it keeps the bucket honest).
         return ("no_claimed_title", "claimed reference has no title to compare.")
@@ -214,6 +231,14 @@ def classify_unscoreable(claimed: ClaimedRef,
         return ("journal_author_residue_as_title",
                 "claimed title contains only a journal masthead plus an author "
                 "surname, not an article title.")
+
+    if (nct and " " not in nct and len(nct) >= 8
+            and not any(ch.isdigit() for ch in nct)
+            and _DISTINCTIVE_ALPHA_RE.search(nct)):
+        return ("single_word_title",
+                "claimed title is a single long word (a bare container / field / "
+                "genre name), not a searchable article title; not judgeable "
+                "offline.")
 
     # a bare number (year / volume / issue / locator) parked in the title slot
     if _numeric_or_year_only_title(ct, nct):

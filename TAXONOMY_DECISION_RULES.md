@@ -1,3 +1,27 @@
+> # ⚠️ VOID — DO NOT USE
+>
+> **Voided 2026-08-16 by ZD (DEC-080). Every rule in this document is outdated.**
+>
+> Nothing below is authoritative. Do not apply any decision rule, boundary note, calibration
+> note, worked example, or architecture-table row from this file to annotation, adjudication,
+> prompt work, or code.
+>
+> **Known-wrong example (the one that triggered the void):** "Pair 1" says *zero atomic claims
+> supported → F3*. That is backwards. Per **DEC-017**, F3 is **provenance-only** — right claims,
+> wrong source — and it requires **full** atomic-claim coverage; any unestablished claim routes
+> to **F6**. The engine gates F3 at FULL support, matching DEC-017, not this file.
+>
+> This is an illustration, not an erratum list. **The rest of the file has not been audited and
+> is assumed wrong.**
+>
+> **Where authority actually lives:** `DECISIONS.md` in the vault (`cre-brain`) is binding, then
+> `TAXONOMY_AMENDMENT_2026-08-07_FINAL.md`, then `TAXONOMY.md`. If any of those disagree with
+> this file, they win.
+>
+> Retained only as history — to show what the annotator-facing rules used to say.
+
+---
+
 # Taxonomy Decision Rules — The Three At-Risk Pairs
 
 **Fold into `TAXONOMY.md`.** These are the deterministic collision rules that keep F1–F8 at 8 categories. They exist because an earlier pilot collapsed the taxonomy to 5 over inter-annotator confusion; these rules pre-empt the specific collisions that drove it. Each rule is a decision procedure an annotator applies *before* exercising judgment — the goal is to remove the judgment call entirely where possible.

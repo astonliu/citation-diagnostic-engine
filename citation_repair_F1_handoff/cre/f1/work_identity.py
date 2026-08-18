@@ -16,6 +16,7 @@ from rapidfuzz.distance import JaroWinkler
 
 from .schema import ClaimedRef, RetrievedRecord
 from .textnorm import fold_bibliographic_text, fold_chemical_charges
+from .f2_thresholds import SAME_WORK_TITLE_SIM_MIN
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,11 @@ class WorkIdentityEvidence:
     reason: str = ""
     signals: tuple[str, ...] = ()
     blocked_by: str = ""
+    # A routing description separate from the compatibility boolean. In
+    # particular, mixed_identity_citation detects a citation assembled from
+    # conflicting works; it must never be described to a reviewer as same-work
+    # evidence even while its historical quarantine band is held fixed.
+    disposition: str = ""
 
 
 _CORRECTION_RE = re.compile(r"^\s*(corrigendum|erratum|correction)\b", re.I)
@@ -96,7 +102,7 @@ _REPRINT_PUBTYPES = {"republished article", "reprint", "classical article"}
 
 # Title-similarity floors for the new same-work rules (kept SEPARATE from and
 # never below the 0.92 near-identical-title gate in biblio_match).
-DOI_SAME_WORK_TITLE_MIN = 0.92          # exact DOI+author only overrides the block at near-identical titles
+DOI_SAME_WORK_TITLE_MIN = SAME_WORK_TITLE_SIM_MIN
 # Rule-local floor for a malformed author field whose DOI, publication year,
 # venue, volume, and first page independently identify the work.  It is NOT a
 # relaxation of RULE A: this rule requires all five bibliographic anchors.
@@ -1097,6 +1103,25 @@ def _roster_containment(claimed: ClaimedRef, resolved: RetrievedRecord) -> float
     return len(ca & ra) / len(ca)
 
 
+def roster_containment_diagnostic(claimed: ClaimedRef,
+                                  resolved: RetrievedRecord) -> dict:
+    """Publish whether RULE B's roster value was actually measurable.
+
+    The calibrated surname filter is intentionally unchanged here. This
+    diagnostic makes its empty-set result distinguishable from a measured zero
+    without moving a verdict or silently recalibrating RULE B.
+    """
+    ca, ra = _surname_set(claimed.authors), _surname_set(resolved.authors)
+    measurable = bool(ca and ra)
+    return {
+        "measurable": measurable,
+        "value": (len(ca & ra) / len(ca)) if measurable else None,
+        "claimed_surnames_measured": len(ca),
+        "resolved_surnames_measured": len(ra),
+        "filter": "legacy_len_ge_4",
+    }
+
+
 def _lineage_surname_set(authors: list[str]) -> set[str]:
     """Surname proxies for a lineage roster, WITHOUT ``_surname_set``'s >=4-char
     floor.
@@ -1242,7 +1267,7 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
                                      "title_sim>=%.2f" % DOI_SAME_WORK_TITLE_MIN))
 
     blocked = _derivative_block(claimed, resolved)
-    if blocked:
+    if blocked and blocked != "derivative_publication":
         # A corporate-author conflict is not decisive against an EXACT shared DOI
         # when the two institutional names are not different bodies. RULE A2 is
         # offered the row HERE rather than letting it fall through to the ordinary
@@ -1311,7 +1336,8 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
                                  journal=journal)):
         return WorkIdentityEvidence(True, "mixed_identity_citation",
                                     ("exact_doi", "journal", "volume", "first_page",
-                                     "year_gap>=2", "title_and_roster_conflict"))
+                                     "year_gap>=2", "title_and_roster_conflict"),
+                                    disposition="mixed_identity_conflict")
 
     if (doi and same_year
             and (journal or _abbreviated_journal_anchor(claimed.journal, resolved.journal))
@@ -1330,6 +1356,12 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
         if ct == canonical_title(alternate):
             return WorkIdentityEvidence(True, "authoritative_title_alias",
                                         ("medline_alternate_title",))
+
+    # A genre word in the resolved paper's own subtitle is not evidence of a
+    # relationship between two works. It may block weaker heuristics, but it
+    # cannot pre-empt PubMed's own alternate-title attestation above.
+    if blocked == "derivative_publication":
+        return WorkIdentityEvidence(False, blocked_by=blocked)
 
     # Exact canonical title (including Greek-letter and chemical typography).
     if (ct == rt and ct not in _GENERIC_TITLES

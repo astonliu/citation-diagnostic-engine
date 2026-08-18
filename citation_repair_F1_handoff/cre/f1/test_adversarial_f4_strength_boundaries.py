@@ -124,8 +124,11 @@ def test_non_supported_tristates_pass_through_without_any_model_call():
     )
     assert refined[0] is rows[0]
     assert refined[1] is rows[1]
-    assert records == ({"claim_index": 0, "assessed": False},
-                       {"claim_index": 1, "assessed": False})
+    assert [(r["claim_index"], r["assessed"]) for r in records] == [
+        (0, False), (1, False)]
+    assert all(r["f4_evidence_scope"] == "abstract"
+               and r["coverage_evidence_scope"] == "abstract"
+               and r["evidence_scopes_match"] is True for r in records)
 
 
 @pytest.mark.parametrize("parser,raw", [

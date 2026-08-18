@@ -1,5 +1,18 @@
 # F8 — retraction: attest the check, or stop claiming the label — implementation spec
 
+> **⚠ CORRECTIONS — the 2026-08-17 audit supersedes three claims below. Read these first.**
+>
+> 1. **"exactly six syntactic occurrences of `F8`" is wrong.** The count is **23**. The census misses
+>    `judgment_engine.py:160`, `:173`, `:188-193` and `f5_supersession.py:983`, `:1096` entirely.
+> 2. **Three line citations point at unrelated code**, including `schema.py:229` — that range is
+>    `EvalRecord` construction, not a `pipeline_state_to_taxonomy` pass-through.
+> 3. **The retraction data is already fetched.** `ncbi_meta.py:103-120` and `:123-128` pull the PubMed
+>    retraction publication type for every cited PMID on both Band-2 entry points and discard it one
+>    line later. Do not build a second retrieval path.
+>
+> Everything else below stands. Full detail in the audit section at the end of this file.
+
+
 **Date:** 2026-08-16 · **Branch:** `feat/f3-f7-semantic-validator-v1`
 **Authority:** ZD, 2026-08-16, on the F1–F8 audit (`F1_F8_AUDIT_2026-08-16.md`, CONTRADICTIONS 63).
 **Standing method:** the defect and the constraint are stated; the edit is yours. If a constraint here
@@ -180,6 +193,105 @@ The two retraction-adjacent tests pass today and must stay green.
 - Adding a citing publication date to `Reference` — that is a schema change with corpus-wide
   consequences; cost it and report.
 - Any corpus run.
+
+## Verification command
+
+```
+cd citation_repair_F1_handoff && PYTHONPATH=. python -m pytest cre/f1 -q
+```
+
+
+---
+
+# Audit loop — F8, rounds 1–2 (2026-08-17) · **CLEAR**
+
+**Converged:** 2 consecutive rounds, checkers accepted nothing. 6 findings → **0 LAND · 1 DEFER · 5 REJECT**.
+Three checkers per round, each opening every cited line and re-running every probe. Bar for LAND:
+unanimous, all three ≥95% confidence.
+
+## ⚠ READ FIRST
+
+**F8 is not implemented, and that is the finding — not a bug to fix.** There is no timing gate, no
+constant, and no citing-publication date at the point where F8 would be decided. Everything below is
+about making that *legible*, not about building a detector. **Do not propose a retraction-detection
+design from this spec** — that is a separate build.
+
+**Two facts an implementer needs before costing the work:**
+
+1. **The retraction data is already being fetched.** `ncbi_meta.py:103-120` and `:123-128` pull the
+   PubMed retraction publication type for every cited PMID on both Band-2 entry points, and discard it
+   one line later. This spec's `:114` already records that `lookup.py` builds `RetrievedRecord` with
+   `publication_types`. **Do not build a second retrieval path.**
+2. **`as_of_date` has no derivable source at the point of decision.** `dataset_card_F8.md` makes the
+   citing paper's publication date definitional — *"a citation to a paper that is later retracted is
+   not F8 if the citing work predates the retraction notice."* `build_item`, the only input path,
+   cannot supply it. **Any F8 build starts here, not with retrieval.**
+
+## ⚠ Cost to surface before F8 is built — this touches seed 47
+
+The checkers surfaced **DEC-074**, whose stated reason for retiring seed 47's 74/80 = 0.9250 is: *once
+F8 runs ahead of F2, F2's population changes, so seed 47 measures a configuration the shipped system
+no longer has.* The size of that change is exactly the count of references F8 removes before F2 sees
+them — and **the run manifest cannot report it**: `provenance()` (`preband_contract.py:83-96`) reduces
+a lossless `{citation_id: label}` map to `cleared_count` alone.
+
+**Verify DEC-074 in the vault yourself before acting on this.** If it holds, implementing F8 has a
+known cost to the only adjudicated precision figure the project has, and that is ZD's call, not an
+implementation detail.
+
+---
+
+## Deferred
+
+### D-1 · This spec's own enumeration is wrong, in both directions
+**`docs/F8_ATTESTATION_SPEC.md:18` and the F8 census** · REPRODUCED
+
+- **Undercounts.** The spec says "exactly six syntactic occurrences" of F8. The auditor's own grep
+  found **twenty-three**, including sites in `judgment_engine.py:160`, `:173`, `:188-193` and
+  `f5_supersession.py:983`, `:1096` that the spec misses entirely.
+- **Three citations point at unrelated code.** `:18` sends an implementer to `schema.py:229` for a
+  "pass-through in `pipeline_state_to_taxonomy`"; `schema.py:227-231` is `EvalRecord` construction.
+
+**Why it is deferred, not landed:** it is a defect in the *instrument*, not the code, and the
+instrument opens *"the defect and the constraint are stated; the edit is yours."* **Re-raise when
+anyone actually implements F8** — an implementer working from the current enumeration is sent to the
+wrong lines and told the surface is a quarter of its real size.
+
+**Required when picked up:** re-derive the census from the code, not from this document, and correct
+the three citations.
+
+---
+
+## Rejected — do not re-raise
+
+| cite | claim | why rejected |
+|---|---|---|
+| `ncbi_meta.py:103-120` | retraction pubtype already fetched then discarded; spec mis-costs the work | **Premise wrong.** This spec's `:114` already records that the data is present. The observation is true and is carried above; the *finding* was not. |
+| `judgment_run.py:441` | every prediction row publishes `preband_cleared: true` — a clearance no F8 check produced | Semantic, not behavioural; substance is this spec's Defect 1 relocated. `_preband` fails closed. |
+| `preband_contract.py:83-96` | per-label disposition composition never published | This spec's Defect 3 at a different anchor. |
+| `judgment_run.py:1050` | `retrieval_protocol()` called with no arguments, so the as-of cutoff publishes as an empty string | **Already landed elsewhere** — same-line re-file of `F5_HONESTY_SPEC.md` L-3. |
+| `f5_supersession.py:1164-1177` | `as_of_date` has no derivable source | Unreachable: `_validate_evidence` runs only inside `decide_f5`, gated on `f5_seams`/`f5_evidence_builder`, and `grep -c f5 production_launcher.py` → 0. Carried above as a build prerequisite instead. |
+
+---
+
+## Guardrails
+
+- **`judgment_run.py`, `judgment_engine.py` and `schema.py` are GOVERNED** — a fix moves their digest.
+  CONTRADICTIONS 65 is already OPEN because the F1 pass moved `schema.py`'s. **Report the digest
+  consequence; do not decide it.**
+- **`band_prompts.py` byte-identical** (blob OID `fa01126e2b9482d450065fd70cd0eb1fea816f5c`).
+- **No F2 banding change.** See the DEC-074 note above — F8 ordering is itself an F2-population change
+  and goes to ZD.
+- Precision-first, both halves. No invented constants. Specs only — no corpus run.
+
+## Definition of done
+
+- The F8 census re-derived from code, with the three false citations corrected.
+- `as_of_date`'s source resolved, or explicitly recorded as the blocker for any F8 build.
+- **No artifact asserts an F8 clearance that no check produced** — either the assertion goes, or F8
+  exists.
+- DEC-074's F2-population consequence routed to ZD before any F8 ordering change.
+- Suite green, old → new counts, environment stated (`anthropic` and `jsonschema` change the number).
 
 ## Verification command
 

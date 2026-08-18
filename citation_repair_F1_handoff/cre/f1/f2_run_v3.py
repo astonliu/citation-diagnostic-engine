@@ -315,7 +315,7 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
     Returns the run summary plus join diagnostics (``n_resolved_cache``,
     ``n_joined``, ``n_cache_rows_joined``, ``n_occurrence_fanout``,
     ``n_occurrence_duplicates_deduped``,
-    ``n_pmid_only_join``, ``n_ambiguous_dropped``, ``n_unmatched_dropped``)
+    ``n_pmid_only_join`` and ``n_unmatched_dropped``)
     and the F2_V3_3 audit list
     ``same_work_newly_quarantined`` -- the PMIDs whose band changed from
     review_wrong_paper (at the old 0.95 gate) to review_same_work_variant (at the
@@ -350,7 +350,7 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
     items: list = []
     item_by_occurrence: dict = {}
     n_raw_occurrence_joins = n_occurrence_duplicates_deduped = 0
-    n_pmid_only = n_ambiguous = n_unmatched = n_cache_rows_joined = 0
+    n_pmid_only = n_unmatched = n_cache_rows_joined = 0
     for src_pmcid, pmid, resolved in cache:
         if not pmid:
             n_unmatched += 1
@@ -432,6 +432,7 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
         str(r.get("pmid") or "")
         for r in records
         if r.get("verdict") == VERDICT_SAME_WORK_VARIANT
+        and r.get("same_work_reason") == "near_identical_title"
         and r.get("title_sim") is not None
         and SAME_WORK_TITLE_SIM_MIN <= r["title_sim"] < _PRIOR_SAME_WORK_TITLE_SIM_MIN
     )
@@ -441,6 +442,7 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
           "pmid": str(r.get("pmid") or "")}
          for r in records
          if r.get("verdict") == VERDICT_SAME_WORK_VARIANT
+         and r.get("same_work_reason") == "near_identical_title"
          and r.get("title_sim") is not None
          and SAME_WORK_TITLE_SIM_MIN <= r["title_sim"] < _PRIOR_SAME_WORK_TITLE_SIM_MIN),
         key=lambda row: (row["citation_id"], row["pmid"]),
@@ -477,7 +479,6 @@ def reband_from_cache(xml_dir: str, resolved_cache_path: str, *,
         "n_occurrence_fanout": n_raw_occurrence_joins - n_cache_rows_joined,
         "n_occurrence_duplicates_deduped": n_occurrence_duplicates_deduped,
         "n_pmid_only_join": n_pmid_only,
-        "n_ambiguous_dropped": n_ambiguous,
         "n_unmatched_dropped": n_unmatched,
         "n_src_pmcids": len(src_pmcid_set) if src_pmcid_set is not None else None,
         "rebanded_from_cache": True,

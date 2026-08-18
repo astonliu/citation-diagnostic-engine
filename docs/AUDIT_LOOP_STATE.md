@@ -1,65 +1,91 @@
 # CRE taxonomy audit loop — state register
 
-**Purpose.** Per stratum: round number, clear-streak, status. The loop's stopping condition
-(`CRE_AUDIT_LOOP_SESSION_BRIEF.md` §8) is read off this table, not off any agent's summary.
+**Closed 2026-08-18 by ZD.** No further rounds will be run. This table is final. The last two lanes
+(F2, F6) were stopped mid-round; both had a fully graded round in hand and nothing was discarded.
 
-**Stopping condition.** A stratum is `CLEAR` after **three consecutive rounds** in which the auditor
-surfaces **zero findings the Checkers accept as genuine**. A round of only REJECTs counts as clear. A
-round producing a DEFER counts as clear. **One LAND resets the streak to zero.** A stratum declared
-`SATURATED` by the Checkers (§7.2 diminishing-returns test) ends immediately regardless of streak.
-
-**"Genuine" is the Checkers' verdict, never the auditor's.**
+**Convergence rule as it stood at close:** a stratum reached `CLEAR` on **two consecutive rounds in
+which the three checkers accepted nothing**. A round of only REJECT / DEFER / ASK-ZD counted as clear;
+any single LAND reset the count. A dead agent never counted as a clear round. Saturation was advisory
+and could not end a stratum. **LAND required unanimity from all three checkers, each at ≥95%
+confidence.**
 
 ---
 
-## Status table
+## Final status
 
-| stratum | spec file | rounds run | clear streak | status |
+| stratum | spec | rounds | status | landed |
 |---|---|---|---|---|
-| **F1** | `F1_FABRICATION_GUARD_SPEC.md` | **1** | **0** (reset by 4 LANDs) | **OPEN — round 2 warranted** |
-| F2 | `F2_IDENTITY_EVIDENCE_SPEC.md` | 1 in flight | — | IN PROGRESS |
-| F3 | `F3_REACHABILITY_SPEC.md` | 1 in flight | — | IN PROGRESS |
-| F4 | `F4_SCOPE_AND_VISIBILITY_SPEC.md` | 1 in flight | — | IN PROGRESS |
-| F5 | `F5_HONESTY_SPEC.md` | 1 in flight | — | IN PROGRESS |
-| F6 | `F6_SUPPRESSION_FIX_SPEC.md` | 1 in flight | — | IN PROGRESS |
-| F7 | `F7_ENTITY_IDENTITY_SPEC.md` | 1 in flight | — | IN PROGRESS |
-| F8 | `F8_ATTESTATION_SPEC.md` | 1 in flight | — | IN PROGRESS |
+| **F1** | `F1_FABRICATION_GUARD_SPEC.md` | 8 | **ROUND-CAP — not converged** | 9 (3 distinct) |
+| **F2** | `F2_IDENTITY_EVIDENCE_SPEC.md` | 6 | **not converged** | 5 |
+| **F3** | `F3_REACHABILITY_SPEC.md` | 3 | **NOT CLEAR — CLEAR withdrawn 2026-08-18** | 1 |
+| **F4** | `F4_SCOPE_AND_VISIBILITY_SPEC.md` | 4 | **NOT CLEAR — clear-streak withdrawn 2026-08-18** | 3 |
+| **F5** | `F5_HONESTY_SPEC.md` | 1 | **SKIPPED by ZD** — infrastructure failures | 3 |
+| **F6** | `F6_SUPPRESSION_FIX_SPEC.md` | 4 | **not converged** | 4 + 1 ASK-ZD |
+| **F7** | `F7_ENTITY_IDENTITY_SPEC.md` | 2 | **CLEAR** | 0 |
+| **F8** | `F8_ATTESTATION_SPEC.md` | 2 | **CLEAR** | 0 |
+
+**25 findings landed across the taxonomy**, every one unanimous at ≥95% from three checkers who each
+re-opened the citation and re-ran the probe. F1's 9 collapse to **3 distinct defects** after dedup across
+rounds — rounds 3, 4, 5 and 8 re-filed the same two.
+
+**Two strata converged: F7 and F8.** Both had every round graded by a full triad. Neither can fire in
+the production configuration, which is why neither landed anything — that fact is the headline of both
+specs.
+
+---
+
+## The F3 correction, recorded because it matters more than the verdict
+
+F3 was declared **CLEAR on 2026-08-17 and that was wrong.** Three round-2 findings had never been
+graded — their checker triad died on a session limit — and F3 completed its clear-streak *around*
+them. Graded on 2026-08-18: **1 LAND, 1 DEFER, 1 REJECT.** The LAND resets the streak, so F3 did not
+converge and the verdict was withdrawn.
+
+**The rule had a hole.** A dead checker round correctly failed to count as clear, but it did not stop
+later rounds completing the count around it. Corrected in the driver:
+
+```js
+: unadj.length > 0 ? 'INCOMPLETE-UNADJUDICATED-FINDINGS'
+```
+
+**A stratum can no longer reach CLEAR while any finding is unadjudicated.** F3 was the only stratum
+this affected; F7 and F8 had every round fully graded.
+
+---
+
+## What "not converged" means here, and what it does not
+
+It means the loop was stopped by decision, not by exhaustion — **not** that those strata are unsound
+or that their findings are provisional. Every landed finding in every spec cleared the same bar:
+reproduced by execution, cited to a line the auditor opened, and unanimously accepted by three
+independent checkers each at ≥95% confidence, each of whom re-opened the citation and re-ran the probe
+themselves.
+
+**What is genuinely unfinished** is coverage: F1, F2, F4 and F6 were still surfacing new defects when
+the loop closed, at a declining rate. Their auditors were asked five times whether the surface was
+worked out and refused to stop every time, each refusal citing code opened on that call and naming
+specific files never read. Those files are named in the specs.
+
+**The single largest open item is F6's ASK-ZD**, and it is not in any of the four "still surfacing"
+strata's fix lists: `parser.py:190`'s sentence regex does not tile its input, measured to drop text in
+**16.5% of paragraphs** of PMC13295119 — the article `cocitation.py:11` names as the source of the
+`100/124 = 80.6%` F6 figure. Three checkers reproduced it; the cost checker declined to LAND it because
+acting on it moves a published figure, changes what an F6 label refers to, and moves `parser.py`, which
+is governed. **It is ZD's decision, and it is in `F6_SUPPRESSION_FIX_SPEC.md`.**
 
 ---
 
 ## Round log
 
-_Appended, never rewritten. One block per stratum-round._
+_Historical. Statuses above supersede any status recorded here._
 
-### F1 · round 1 · 2026-08-17
-
-**Agents:** 3 finders over disjoint surfaces (transport+decision · search+orchestration ·
-instrumentation+artifacts), then 3 checkers (Reality · Blast radius · Cost). Unanimous LAND required.
-
-**Result: 12 candidates → 4 LAND · 4 DEFER · 2 ASK-ZD · 2 REJECT.**
-
-| | finding | cite |
-|---|---|---|
-| LAND | L-1 non-MEDLINE 200 recorded as `answered_absent` | `cre/f1/lookup.py:103-110` |
-| LAND | L-6 unreadable provider record scores `0.0` | `cre/f1/confirm.py:114-115` |
-| LAND | L-7 quarantine swallows the fail-fast auth error | `cre/f1/run.py:151-166` |
-| LAND | L-3 missing transport status counted as "answered" | `cre/f1/eval_report.py:127-132` |
-| LAND | L-0 Defect 4b route resolved by measurement (ZD, 2026-08-17) | `cre/f1/confirm.py:52` |
-| DEFER | D-2 F2 v3 record drops `transport_status` | `cre/f1/eval_report.py:303-319` |
-| DEFER | D-4 `fetch_answered()` fails OPEN | `cre/f1/schema.py:66-77` |
-| DEFER | D-9 no `f1_status` state for "confirm never ran" (twin of L-3) | `cre/f1/eval_report.py:133-138` |
-| DEFER | D-12 quarantine count computed and discarded | `cre/f1/run.py:142` |
-| ASK-ZD | Z-5 unbounded `Retry-After` | `cre/f1/ratelimit.py:90-95` |
-| ASK-ZD | Z-11 adapter receipt records the declaration, not the invocation | `cre/f1/recording_adapter.py:90-95` |
-| REJECT | ×2 duplicates — see `AUDIT_LOOP_REJECTIONS.md` R-005, R-006 | |
-
-**Citation integrity: clean.** All three checkers recorded `citation_verified: true` on all twelve
-candidates. No auditor carries a bad-citation signal out of this round.
-
-**Not saturated.** Three of the four landed findings are severity-CRITICAL false-accusation routes;
-none is instrumentation-only or cosmetic, so the §7.2 diminishing-returns test is not met.
-
-**Round 2 targets, carried forward:** every other site where the transport vocabulary is minted or
-read (L-1/L-3/L-6 are one defect at three layers — look for a fourth); `preband_contract` join
-accounting, which no finder reached in depth; `biblio_match`'s two `RetrievedRecord` construction
-sites (`:655`, `:680`), confirmed to exist but not traced.
+- **F1** r1: 12 → 4 LAND · r2: 3 → 1 LAND · r3: 4 → 3 LAND · r4: 3 → 2 LAND · r5: 3 → 1 LAND ·
+  r6: 1 → 0 LAND · r7: unadjudicated · r8: 1 → 1 LAND, round cap
+- **F2** r1: 4 → 2 LAND · r3: 2 → 0 LAND · r4: 2 → 1 LAND · r5: 2 → 1 LAND · r6: 1 → 1 LAND
+- **F3** r1: 4 → 0 LAND · r2: 3 → 1 LAND (backfilled 2026-08-18) · r3: 2 → 0 LAND
+- **F4** r1: 3 → 2 LAND · r2: 3 → 0 LAND · r3: 1 → 1 LAND (backfilled 2026-08-18) · r4: 1 → 0 LAND
+- **F5** r1: 5 → 3 LAND · skipped thereafter
+- **F6** r1: 7 → 2 LAND · r2: 4 → 2 LAND · r3: 1 → 0 LAND (split REJECT/LAND/DEFER) ·
+  r4: 2 → 0 LAND, **1 ASK-ZD at 96/99/93** — `parser.py:190` sentence segmentation
+- **F7** r1: 4 → 0 LAND · r2: 2 → 0 LAND → **CLEAR**
+- **F8** r1: 4 → 0 LAND · r2: 2 → 0 LAND → **CLEAR**

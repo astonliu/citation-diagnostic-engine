@@ -214,9 +214,10 @@ def test_queue_holds_every_surface_row_with_what_an_annotator_needs():
     assert len(queue) == 1
     row = queue[0]
     for key in ("claim_text", "cited_work_id", "candidate_work_id",
-                "cited_finding_span", "candidate_contradiction_span",
-                "scope_mismatch_axis", "reason"):
+                "cited_finding_span", "candidate_contradiction_span"):
         assert row.get(key) is not None
+    assert "scope_mismatch_axis" not in row
+    assert "reason" not in row
 
 
 def test_queue_is_blind_at_every_depth():
@@ -232,6 +233,11 @@ def test_assert_blind_catches_a_leak_nested_inside_a_row():
     bad = [{"claim_text": "x", "candidate": {"discovery_disposition": "surface"}}]
     with pytest.raises(ValueError, match="blind field"):
         q.assert_blind(bad)
+
+
+def test_assert_blind_catches_a_detector_value_under_a_renamed_key():
+    with pytest.raises(ValueError, match="detector value"):
+        q.assert_blind([{"human_note": "qualifying_contradiction"}])
 
 
 def test_do_not_surface_and_unassessable_are_counted_but_never_queued():

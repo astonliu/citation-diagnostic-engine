@@ -55,6 +55,17 @@ def test_valid_artifact_loads_with_full_provenance(tmp_path):
     assert prov["cleared_count"] == 1
 
 
+def test_loader_rejects_forged_performed_attestation(tmp_path):
+    path = write_artifact(tmp_path, [row("PMC1:B1", "cleared")])
+    manifest_path = path + pc.MANIFEST_SUFFIX
+    manifest = json.load(open(manifest_path, encoding="utf-8"))
+    manifest["check_attestations"] = {"F8": {"performed": True}}
+    open(manifest_path, "w", encoding="utf-8").write(json.dumps(manifest))
+    with pytest.raises(pc.PrebandContractError,
+                       match="performed F8 requires"):
+        pc.load_artifact(path)
+
+
 # --------------------------------------------- the duplicate-id counterexample
 
 def test_duplicate_id_is_rejected_not_last_write_wins(tmp_path):
@@ -339,7 +350,11 @@ def good_manifest(**over):
         "preband": {"canonical": True, "source": pc.SOURCE_ARTIFACT,
                     "corpus_manifest_sha256": DIG_A,
                     "preflight_parse_failures": {},
-                    "join": {"missing_from_disposition": 0}},
+                    "join": {"missing_from_disposition": 0},
+                    "check_attestations": {
+                        name: {"performed": True, "source": "fixture",
+                               "snapshot_date": "2026-08-18"}
+                        for name in ("F1", "F2", "F8")}},
         "corpus": {"manifest_sha256": DIG_A},
         "adapter": {"model": "m", "temperature": 0},
         "params": {"chain_genesis": ""},
@@ -369,6 +384,14 @@ def test_a_fully_bound_run_is_reportable(tmp_path):
     assert r["reportable"] is True, r["failures"]
     pc.assert_reportable_run(good_manifest(),
                              preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
+
+
+def test_missing_f8_attestation_is_not_reportable(tmp_path):
+    m = good_manifest()
+    m["preband"]["check_attestations"]["F8"]["performed"] = False
+    r = pc.reportability_report(m, preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
+    assert r["checks"]["F8_attested"] is False
+    assert r["reportable"] is False
 
 
 @pytest.mark.parametrize("over,clause", [

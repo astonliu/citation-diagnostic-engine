@@ -329,7 +329,7 @@ def test_reband_pmid_only_join_when_src_pmcid_absent(tmp_path):
                                 version="v3_1", src_pmcids={"PMC0001"})
     assert summary["n_joined"] == 1
     assert summary["n_pmid_only_join"] == 1
-    assert summary["n_ambiguous_dropped"] == 0
+    assert "n_ambiguous_dropped" not in summary
 
 
 def test_reband_fans_pmid_cache_row_to_every_source_occurrence(tmp_path):
@@ -348,7 +348,7 @@ def test_reband_fans_pmid_cache_row_to_every_source_occurrence(tmp_path):
     assert summary["n_joined"] == 2
     assert summary["n_cache_rows_joined"] == 1
     assert summary["n_occurrence_fanout"] == 1
-    assert summary["n_ambiguous_dropped"] == 0
+    assert "n_ambiguous_dropped" not in summary
     assert summary["n_records"] == 2
     rows = [json.loads(line) for line in open(summary["records_path"])]
     assert {row["citation_id"] for row in rows} == {"PMC0001:r1", "PMC0002:r1"}
@@ -417,7 +417,7 @@ def test_reband_counts_unmatched_cache_line(tmp_path):
                                "resolved": True, "title": "R", "authors": ["Z"],
                                "year": 2019}])
     summary = reband_from_cache(str(xml_dir), str(cache), out_dir=str(tmp_path),
-                                version="v3_1")
+                                version="v3_1", refuse_empty=False)
     assert summary["n_unmatched_dropped"] == 1
     assert summary["n_joined"] == 0
 
@@ -438,7 +438,7 @@ def test_reband_present_but_unmatched_src_pmcid_never_misjoins(tmp_path):
                                "resolved": True, "title": "Resolved paper",
                                "authors": ["Zauthor"], "year": 2019}])
     summary = reband_from_cache(str(xml_dir), str(cache), out_dir=str(tmp_path),
-                                version="v3_1")
+                                version="v3_1", refuse_empty=False)
     assert summary["n_joined"] == 0                # NOT re-joined to PMC_B
     assert summary["n_pmid_only_join"] == 0
     assert summary["n_unmatched_dropped"] == 1
@@ -451,7 +451,7 @@ def test_reband_present_but_unmatched_src_pmcid_never_misjoins(tmp_path):
 def test_reband_present_but_unmatched_src_pmcid_not_counted_ambiguous(tmp_path):
     # Related miscount variant: present-but-unmatched src_pmcid whose PMID is cited
     # by TWO other papers must be n_unmatched (definitely-sourced line), NOT
-    # n_ambiguous (the ambiguity only matters for the no-src_pmcid fallback).
+    # an obsolete always-zero ambiguity bucket.
     from cre.f1.f2_run_v3 import reband_from_cache
     xml_dir = tmp_path / "xml"; xml_dir.mkdir()
     _write_xml(str(xml_dir), "PMC_B", [("r1", "T one", "A", 2019, "999")])
@@ -461,9 +461,9 @@ def test_reband_present_but_unmatched_src_pmcid_not_counted_ambiguous(tmp_path):
                                "resolved": True, "title": "R", "authors": ["Z"],
                                "year": 2019}])
     summary = reband_from_cache(str(xml_dir), str(cache), out_dir=str(tmp_path),
-                                version="v3_1")
+                                version="v3_1", refuse_empty=False)
     assert summary["n_unmatched_dropped"] == 1
-    assert summary["n_ambiguous_dropped"] == 0
+    assert "n_ambiguous_dropped" not in summary
     assert summary["n_joined"] == 0
 
 

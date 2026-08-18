@@ -880,7 +880,8 @@ def test_unestablished_claim_passes_through_unchanged():
         policy=FORMAL_POLICY,
     )
     assert refined[0] is row
-    assert records[0] == {"claim_index": 0, "assessed": False}
+    assert records[0]["claim_index"] == 0 and records[0]["assessed"] is False
+    assert records[0]["evidence_scopes_match"] is True
     assert calls["n"] == 0
 
 
@@ -888,7 +889,8 @@ def test_unjudgeable_claim_passes_through_unchanged():
     row = ClaimSupport(0, SupportState.UNJUDGEABLE, "held", ())
     refined, records = refine(f4_json(), support=(row,))
     assert refined[0] is row
-    assert records[0] == {"claim_index": 0, "assessed": False}
+    assert records[0]["claim_index"] == 0 and records[0]["assessed"] is False
+    assert records[0]["evidence_scopes_match"] is True
 
 
 def test_input_already_weaker_strength_raises():
@@ -1183,7 +1185,8 @@ def test_one_unestablished_and_one_weaker_strength():
     )
     assert refined[0].state is SupportState.UNESTABLISHED
     assert refined[1].state is SupportState.WEAKER_STRENGTH
-    assert records[0] == {"claim_index": 0, "assessed": False}
+    assert records[0]["claim_index"] == 0 and records[0]["assessed"] is False
+    assert records[0]["evidence_scopes_match"] is True
     assert records[1]["derived"] == "F4"
 
 

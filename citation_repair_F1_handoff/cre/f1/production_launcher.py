@@ -67,6 +67,8 @@ GOVERNING_MODULES = (
     "band_prompts.py", "parser.py", "schema.py", "f3_provenance.py",
     "f4_strength.py", "f7_entity.py", "preband_contract.py",
     "parser_versions.py", "coverage_prompts_v3.py", "coverage_aggregate.py",
+    "f5_supersession.py", "f5_seams.py", "f5_contradiction_prompt.py",
+    "f5_discovery_queue.py",
 )
 
 
@@ -490,13 +492,15 @@ def verify_judge_governance(*, model: str, judge_model: str,
         "preregistration_amendment": preregistration_amendment,
         "scope_ruling": ruling,
         "compliance_note": (
+            "The preregistered different-family judge arrangement was used."
+            if "different_family_judge" in paths else
+            "A dated preregistration amendment authorized the judge arrangement."
+            if "dated_amendment" in paths else
             "SCOPE RULING, NOT COMPLIANCE: the preregistration section was ruled "
             f"not to bind this work by {ruling['decision_id']} "
             f"({ruling['date']}). Nothing cited by commit hash was changed, and "
             "no different-family judge was used. Do not read this run as having "
             "met the section's requirement."
-            if ruling is not None and not paths[:1] == ["different_family_judge"]
-            else "The preregistered different-family judge arrangement was used."
         ),
     }
 

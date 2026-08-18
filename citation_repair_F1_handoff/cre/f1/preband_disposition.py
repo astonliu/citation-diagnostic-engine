@@ -55,6 +55,7 @@ CITATION_ID_RE = re.compile(r"^PMC\d+:\S+$")
 
 ARTIFACT_FILENAME = "preband_disposition_v1.jsonl"
 MANIFEST_SUFFIX = ".manifest.json"
+ATTESTED_CHECKS = ("F1", "F2", "F8")
 
 
 class DispositionBuildError(ValueError):
@@ -176,10 +177,67 @@ def label_counts(rows: "Iterable[dict]") -> dict:
     return dict(sorted(out.items()))
 
 
+def _normalise_check_attestations(value) -> dict:
+    """Canonical per-check evidence for the Band-1 checks.
+
+    Omission is represented explicitly as ``performed=False`` rather than by
+    absence, so a checked-clean disposition and a never-checked disposition can
+    never have the same provenance bytes.
+    """
+    supplied = value if isinstance(value, dict) else {}
+    unknown = sorted(set(supplied) - set(ATTESTED_CHECKS))
+    if unknown:
+        raise DispositionBuildError(
+            f"check_attestations has unknown check(s): {unknown}")
+    out = {}
+    for name in ATTESTED_CHECKS:
+        raw = supplied.get(name)
+        if raw is None:
+            out[name] = {
+                "performed": False, "source": "", "snapshot_date": "",
+                "attempted": 0, "answered": 0, "transport_failed": 0,
+                "fired": 0, "reason": "not_attested",
+            }
+            continue
+        if not isinstance(raw, dict):
+            raise DispositionBuildError(
+                f"check_attestations.{name} must be an object")
+        performed = raw.get("performed")
+        source = raw.get("source", "")
+        snapshot = raw.get("snapshot_date", "")
+        if type(performed) is not bool:
+            raise DispositionBuildError(
+                f"check_attestations.{name}.performed must be a bool")
+        if not isinstance(source, str) or not isinstance(snapshot, str):
+            raise DispositionBuildError(
+                f"check_attestations.{name} source and snapshot_date must be strings")
+        if performed and (not source.strip() or not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}", snapshot.strip())):
+            raise DispositionBuildError(
+                f"performed {name} requires a nonblank source and an ISO "
+                "YYYY-MM-DD snapshot_date")
+        counts = {}
+        for field in ("attempted", "answered", "transport_failed", "fired"):
+            count = raw.get(field, 0)
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                raise DispositionBuildError(
+                    f"check_attestations.{name}.{field} must be a nonnegative int")
+            counts[field] = count
+        out[name] = {
+            "performed": performed,
+            "source": source.strip(),
+            "snapshot_date": snapshot.strip(),
+            **counts,
+            "reason": str(raw.get("reason") or "").strip(),
+        }
+    return out
+
+
 def write_disposition(log_source, out_path: str, *, f2_commit: str,
                       corpus_manifest_path: str = "",
                       generated_by: str = "",
-                      generated_at: str = "") -> dict:
+                      generated_at: str = "",
+                      check_attestations=None) -> dict:
     """Write the canonical artifact plus its binding manifest; return the manifest.
 
     ``f2_commit`` is REQUIRED and must be a full 40-hex OID: the artifact defines
@@ -206,6 +264,7 @@ def write_disposition(log_source, out_path: str, *, f2_commit: str,
 
     counts = label_counts(rows)
     pmcids = sorted({r["citing_pmcid"] for r in rows})
+    attestations = _normalise_check_attestations(check_attestations)
     manifest = {
         "schema": DISPOSITION_SCHEMA,
         "artifact_path": out_path,
@@ -228,6 +287,7 @@ def write_disposition(log_source, out_path: str, *, f2_commit: str,
         "citation_id_pattern": CITATION_ID_RE.pattern,
         "generated_by": generated_by,
         "generated_at": generated_at,
+        "check_attestations": attestations,
     }
     if corpus_manifest_path:
         manifest["corpus_manifest_path"] = corpus_manifest_path

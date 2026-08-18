@@ -11,8 +11,9 @@ from cre.f1.biblio_match import (
     VERDICT_MATCH, VERDICT_SAME_WORK_VARIANT, VERDICT_WRONG_PAPER, flag_verdict,
 )
 from cre.f1.eval_report import build_f2_record, high_band_rate_of_scoreable
-from cre.f1.schema import ClaimedRef, RetrievedRecord
-from cre.f1.work_identity import DOI_BIBLIOGRAPHIC_ANCHOR_TITLE_MIN
+from cre.f1.schema import ClaimedRef, Reference, RetrievedRecord
+from cre.f1.work_identity import (
+    DOI_BIBLIOGRAPHIC_ANCHOR_TITLE_MIN, roster_containment_diagnostic)
 
 
 def _c(**kw):
@@ -46,6 +47,9 @@ def test_authorized_six_rows_use_live_flag_and_record_paths(pmid, claimed, resol
     assert actual == record["verdict"] == verdict
     assert match.same_work_reason == record["same_work_reason"] == reason
     assert actual not in {VERDICT_MATCH, "cleared", "correct"}
+    if reason == "mixed_identity_citation":
+        assert match.identity_disposition == "mixed_identity_conflict"
+        assert record["identity_disposition"] == "mixed_identity_conflict"
 
 
 def test_authorized_six_accounting_is_three_high_three_quarantined():
@@ -101,6 +105,37 @@ def test_mixed_identity_needs_roster_and_large_year_conflict_not_print_drift():
     drift = _r(title=r.title, authors=r.authors, year=2015, journal=r.journal, volume=r.volume, pages=r.pages, doi=r.doi)
     verdict, match = flag_verdict(c, drift)
     assert not (verdict == VERDICT_SAME_WORK_VARIANT and match.same_work_reason == "mixed_identity_citation")
+
+
+def test_mixed_identity_quarantine_does_not_publish_a_same_work_sentence():
+    from cre.f1.decide import decide
+    ref = Reference("c", "", _c(title="Conflicted citation", claimed_pmid="1"))
+    ref.log.same_work_reason = "mixed_identity_citation"
+    ref.log.identity_disposition = "mixed_identity_conflict"
+    decide(ref, True, "reference_error", {})
+    assert ref.log.decided_by == "mixed_identity_conflict_quarantine"
+    assert "not described as a same-work variant" in ref.rationale
+
+
+def test_authoritative_alternate_title_preempts_derivative_keyword():
+    claimed = _c(title="Surgical treatment of intracranial meningiomas",
+                 authors=["Smith"], year=2020)
+    resolved = _r(
+        title="Perioperative management of meningioma: a systematic review of evidence",
+        authors=["Smith"], year=2020,
+        alternate_titles=["Surgical treatment of intracranial meningiomas"])
+    verdict, match = flag_verdict(claimed, resolved)
+    assert verdict == VERDICT_SAME_WORK_VARIANT
+    assert match.same_work_reason == "authoritative_title_alias"
+
+
+def test_roster_diagnostic_separates_unmeasurable_from_measured_zero():
+    short = roster_containment_diagnostic(
+        _c(authors=["Li", "Wu"]), _r(authors=["Li", "Wu"]))
+    disjoint = roster_containment_diagnostic(
+        _c(authors=["Alpha", "Bravo"]), _r(authors=["Charlie", "Delta"]))
+    assert short["measurable"] is False and short["value"] is None
+    assert disjoint["measurable"] is True and disjoint["value"] == 0.0
 
 
 # ---------------------------------------------------------------------

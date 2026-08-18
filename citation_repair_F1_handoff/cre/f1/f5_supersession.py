@@ -90,6 +90,12 @@ from .judgment_engine import ClaimSupport, SupportState, TemporalAssessment, Tem
 # module parses it, so a malformed / off-enum payload fails closed here.
 CallJudgeContradiction = Callable[..., str]
 
+# Development F5 is deliberately not reportable. One named authority is used by
+# records, manifests and the reportability gate so those surfaces cannot drift.
+F5_REPORTABLE = False
+F5_CONTRADICTION_PROMPT_VERSION = "f5_contradiction_v2"
+F5_RESPONSE_PARSER_VERSION = "strict_f5_contradiction_spanids_v1"
+
 
 # --------------------------------------------------------------------------
 # Enumerations (blueprint Sec 5, Sec 10, Sec 18a).
@@ -140,6 +146,25 @@ _SCOPE_MISMATCH_AXES = frozenset({
 _COMPARABILITY = frozenset({"comparable", "not_comparable", "uncertain"})
 _NOTICE_KIND = frozenset({"none", "retraction", "correction", "eoc"})
 _NOTICE_RESOLUTION = frozenset({"resolved_clear", "flagged", "unresolved"})
+# Did the metadata lookup ANSWER? `meta = fetch_meta(w) or {}` collapsed a
+# transport failure and a record carrying no notice into one value, and both came
+# back resolved_clear -- an outage reading as "not retracted". Same defect class
+# this file already names and guards for retrieval.
+_NOTICE_LOOKUP_STATUS = frozenset({"ok", "no_record", "not_performed"})
+# WHY the as_of_date comparison did or did not happen. A notice whose date could
+# not be compared is not a notice that was checked and cleared.
+_NOTICE_DATE_STATUS = frozenset(
+    {"not_applicable", "compared", "absent", "unparseable", "as_of_unavailable"})
+# WHICH SIDE OF THE RETRACTION a publication type puts this work on. PubMed's
+# "Retracted Publication" (this article WAS retracted) and "Retraction of
+# Publication" / "Retraction Notice" (this article IS the notice) mean OPPOSITE
+# things, and conflating them flags every notice while missing every retracted
+# paper -- an inversion that still looks like a working detector. ``ncbi_meta``
+# gets this right for F8; this vocabulary is how the F5 seam records the same
+# distinction instead of discarding it.
+_NOTICE_SOURCE_ROLE = frozenset(
+    {"unknown", "retracted_article", "retraction_notice", "correction_notice",
+     "eoc_notice", "no_notice_type"})
 _ADEQUACY = frozenset({"adequate", "inadequate", "empty"})
 _STATUS = frozenset({"ok", "failure", "partial"})
 _ATTESTATION_TYPES = frozenset(
@@ -179,7 +204,7 @@ class F5Policy:
     # v1 -> v2 (2026-08-12): the contradiction contract gained
     # ``scope_mismatch_axis``. A key-set change is exactly what this version
     # exists to signal, and the prompt text itself first shipped at v2.
-    contradiction_prompt_version: str = "f5_contradiction_v2"
+    contradiction_prompt_version: str = F5_CONTRADICTION_PROMPT_VERSION
     comparability_policy_version: str = "f5_comparability_v1"
     generator_model_id: str = ""
     verifier_model_id: str = ""
@@ -257,6 +282,10 @@ def validate_f5_policy(policy: F5Policy) -> None:
                  "policy_version"):
         if not getattr(policy, name).strip():
             raise ValueError(f"policy.{name} must be nonblank")
+    if policy.contradiction_prompt_version != F5_CONTRADICTION_PROMPT_VERSION:
+        raise ValueError(
+            "policy.contradiction_prompt_version does not identify the prompt "
+            f"this build can render ({F5_CONTRADICTION_PROMPT_VERSION!r})")
 
 
 # --------------------------------------------------------------------------
@@ -343,6 +372,17 @@ class NoticeStatus:
     notice_kind: str = "none"          # none | retraction | correction | eoc
     notice_resolution: str = "resolved_clear"  # resolved_clear | flagged | unresolved
     date: Optional[str] = None
+    # WHY this status says what it says. All defaulted, so every existing
+    # construction is unchanged, and every one of them is honest about having
+    # asserted nothing: a hand-built NoticeStatus did not perform a lookup.
+    lookup_status: str = "not_performed"
+    date_status: str = "not_applicable"
+    # The notice date EXACTLY as the metadata gave it, never parsed. ``date``
+    # above is contractually ISO and raises on anything else, so a malformed
+    # value had nowhere to live and was discarded -- taking with it the only
+    # evidence of why the timing gate did not run.
+    date_raw: Optional[str] = None
+    source_role: str = "unknown"
 
     def __post_init__(self) -> None:
         if self.notice_kind not in _NOTICE_KIND:
@@ -350,6 +390,17 @@ class NoticeStatus:
         if self.notice_resolution not in _NOTICE_RESOLUTION:
             raise ValueError(
                 f"NoticeStatus.notice_resolution must be one of {sorted(_NOTICE_RESOLUTION)}")
+        if self.lookup_status not in _NOTICE_LOOKUP_STATUS:
+            raise ValueError(
+                f"NoticeStatus.lookup_status must be one of {sorted(_NOTICE_LOOKUP_STATUS)}")
+        if self.date_status not in _NOTICE_DATE_STATUS:
+            raise ValueError(
+                f"NoticeStatus.date_status must be one of {sorted(_NOTICE_DATE_STATUS)}")
+        if self.source_role not in _NOTICE_SOURCE_ROLE:
+            raise ValueError(
+                f"NoticeStatus.source_role must be one of {sorted(_NOTICE_SOURCE_ROLE)}")
+        if self.date_raw is not None and not isinstance(self.date_raw, str):
+            raise ValueError("NoticeStatus.date_raw must be a string or None")
         if self.date is not None and not isinstance(self.date, str):
             raise ValueError("NoticeStatus.date must be a string or None")
         # PARSE it, do not merely type-check it. This date decides whether a notice
@@ -669,7 +720,6 @@ class TemporalAssessorRun:
         self.judge = judge_contradiction
         self.evidence = evidence
         self.policy = policy
-        self.reportable = False  # development-mode build: never reportable
         self.records: list[dict] = []
 
     # -- helpers ------------------------------------------------------------
@@ -952,10 +1002,12 @@ class TemporalAssessorRun:
             "model_version": policy.generator_model_id,
             "f5_policy_version": policy.policy_version,
             "comparability_policy_version": policy.comparability_policy_version,
+            "contradiction_prompt_version": policy.contradiction_prompt_version,
+            "response_parser_version": F5_RESPONSE_PARSER_VERSION,
             "verifier_result": "not_run",
             "verifier_model_version": policy.verifier_model_id,
             "verifier_evidence_hash": None,
-            "reportable": False,
+            "reportable": F5_REPORTABLE,
         }
 
         def finalize(temporal_state: str, reason: str) -> dict:

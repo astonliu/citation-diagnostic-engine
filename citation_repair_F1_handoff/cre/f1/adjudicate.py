@@ -38,6 +38,18 @@ REVIEW_LABELS = {F1, F2, "human_review"}
 VERDICTS = {"confirm", "reject", "uncertain"}
 
 
+def _taxonomy_label(value: str) -> str | None:
+    folded = (value or "").strip().casefold()
+    return next((label for label in TAXONOMY_LABELS
+                 if label.casefold() == folded), None)
+
+
+def _required(record: dict, key: str, where: str):
+    if key not in record:
+        raise ValueError(f"{where} is missing required provenance key {key!r}")
+    return record[key]
+
+
 def _load_jsonl(path: str) -> list[dict]:
     with open(path) as f:
         return [json.loads(line) for line in f if line.strip()]
@@ -61,6 +73,7 @@ class Candidate:
         retr = self.log.get("retrieved", {})
         lg = self.log.get("log", {})
         ev = self.pred.get("evidence", {})
+        transport = lg.get("pmid_transport_status")
         lines = [
             f"[{self.citation_id}]  predicted: {self.predicted_label}"
             f"  (decided_by={ev.get('decided_by','?')})",
@@ -69,11 +82,13 @@ class Candidate:
                                     claimed.get("year"), claimed.get("claimed_pmid")),
             "  RESOLVED  : " + (_fmt(retr.get("title"), retr.get("authors"),
                                      retr.get("year"), retr.get("pmid"))
-                                if retr.get("resolved") else "(claimed PMID did not resolve)"),
+                                if retr.get("resolved") else
+                                f"(unresolved; transport_status={transport or 'unrecorded'})"),
             f"  similarity: {lg.get('title_similarity')}   "
             f"author_match={lg.get('author_match')}   year_match={lg.get('year_match')}",
             f"  llm       : {lg.get('llm_verdict')}",
             f"  db_hits   : {ev.get('db_hits') or lg.get('db_hits')}",
+            f"  decided_by: {ev.get('decided_by') or lg.get('decided_by')}",
         ]
         return "\n".join(lines)
 
@@ -83,8 +98,9 @@ class Candidate:
         label = self.final_label or self.predicted_label
         g = GoldRecord(
             citation_id=self.citation_id,
-            citance=src_pred.get("citance", "") or self.log.get("citance", ""),
-            cited_reference_marker=claimed.get("marker", ""),
+            citance=_required(self.log, "citance", "log record"),
+            cited_reference_marker=_required(
+                self.log, "cited_reference_marker", "log record"),
             cited_paper=CitedPaper(
                 pmid=claimed.get("claimed_pmid", ""),
                 doi=claimed.get("claimed_doi", ""),
@@ -93,8 +109,8 @@ class Candidate:
                 year=claimed.get("year"),
             ),
             source_paper=SourcePaper(
-                pmid=self.log.get("source_pmid", ""),
-                title=self.log.get("source_title", ""),
+                pmid=_required(self.log, "source_pmid", "log record"),
+                title=_required(self.log, "source_title", "log record"),
             ),
             label=label,
             atomic_claims=[],                 # F1/F2 are existence-level
@@ -136,8 +152,9 @@ class Adjudicator:
                 v = input_fn("verdict [confirm/reject/uncertain] "
                              "(or 'relabel F2' etc.): ").strip().lower()
                 if v.startswith("relabel "):
-                    lbl = v.split(maxsplit=1)[1].upper()
-                    if lbl in TAXONOMY_LABELS:
+                    raw_label = v.split(maxsplit=1)[1]
+                    lbl = _taxonomy_label(raw_label)
+                    if lbl is not None:
                         cand.final_label = lbl
                         print_fn(f"  -> relabeled to {lbl}; now give a verdict")
                     else:
@@ -150,6 +167,7 @@ class Adjudicator:
     def write_worklist(self, path: str) -> None:
         cols = ["citation_id", "predicted_label", "title_similarity",
                 "llm_verdict", "claimed_title", "resolved_title",
+                "pmid_transport_status", "decided_by", "rationale",
                 "db_hits", "verdict", "final_label", "note"]
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=cols)
@@ -163,6 +181,10 @@ class Adjudicator:
                     "llm_verdict": lg.get("llm_verdict"),
                     "claimed_title": c.log.get("claimed", {}).get("title", ""),
                     "resolved_title": c.log.get("retrieved", {}).get("title", ""),
+                    "pmid_transport_status": lg.get("pmid_transport_status", ""),
+                    "decided_by": (c.pred.get("evidence", {}).get("decided_by")
+                                   or lg.get("decided_by", "")),
+                    "rationale": c.pred.get("rationale", ""),
                     "db_hits": json.dumps(c.pred.get("evidence", {}).get("db_hits", {})),
                     "verdict": "", "final_label": "", "note": "",
                 })
@@ -177,8 +199,13 @@ class Adjudicator:
                 v = (row.get("verdict") or "").strip().lower()
                 if v in VERDICTS:
                     c.verdict = v
-                fl = (row.get("final_label") or "").strip()
-                if fl in TAXONOMY_LABELS:
+                raw_label = (row.get("final_label") or "").strip()
+                if raw_label:
+                    fl = _taxonomy_label(raw_label)
+                    if fl is None:
+                        raise ValueError(
+                            f"{c.citation_id}: unrecognised final_label "
+                            f"{raw_label!r}")
                     c.final_label = fl
                 c.note = row.get("note", "") or c.note
         self._collect()

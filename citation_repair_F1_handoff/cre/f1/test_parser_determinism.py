@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from lxml import etree
 
-from cre.f1.parser import _authors_from, _surnames_under, parse_pmc_xml
+from cre.f1.parser import (
+    _SENT_RE, _authors_from, _sentence_spans, _surnames_under, parse_pmc_xml)
 
 
 _FOUR_AUTHOR = (
@@ -76,6 +77,34 @@ def test_parse_pmc_xml_multi_author_deterministic(tmp_path):
     p = tmp_path / "PMCX.xml"; p.write_bytes(doc)
     runs = {tuple(parse_pmc_xml(str(p))[0].claimed.authors) for _ in range(50)}
     assert runs == {("Phelps", "Huang", "Hoffman", "Selin")}
+
+
+def test_legacy_sentence_regex_is_unchanged_and_partition_gap_is_counted(capsys):
+    text = "Dose was 0.5 mg. Next."
+    diagnostics = []
+    spans = _sentence_spans(text, diagnostics)
+    assert _SENT_RE.pattern == r"[^.!?]*[.!?]+(?:\s+|$)|[^.!?]+$"
+    assert spans == [(11, 17, "5 mg. "), (17, 22, "Next.")]
+    assert diagnostics == [{
+        "kind": "sentence_spans_do_not_tile_input",
+        "text_sha256": "96cae425479f8888f234ef1a6ee52bfeee7cd3e1590329f5923703f16de14fb0",
+        "text_length": 22, "span_count": 2, "covered_chars": 11,
+        "uncovered_chars": 11, "uncovered_ranges": [[0, 11]],
+    }]
+    assert "sentence-partition-gap" in capsys.readouterr().err
+
+
+def test_parser_attaches_partition_gap_to_affected_reference(tmp_path):
+    doc = b"""<article><body><p>Dose was 0.5 mg <xref ref-type='bibr' rid='r1'>1</xref>.</p></body>
+    <back><ref-list><ref id='r1'><element-citation><article-title>A study</article-title>
+    <pub-id pub-id-type='pmid'>111</pub-id></element-citation></ref></ref-list></back></article>"""
+    path = tmp_path / "PMC1.xml"
+    path.write_bytes(doc)
+    ref = parse_pmc_xml(str(path))[0]
+    assert ref.citance_sentence_partition_failures
+    failure = ref.citance_sentence_partition_failures[0]
+    assert failure["kind"] == "sentence_spans_do_not_tile_input"
+    assert failure["uncovered_chars"] > 0
 
 
 def test_two_consecutive_rebands_byte_identical(tmp_path):

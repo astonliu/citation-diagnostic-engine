@@ -30,6 +30,10 @@ from . import eval_report
 _RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
 
 
+class NonRetryableProviderError(RuntimeError):
+    """A permanent provider/configuration failure that must abort the run."""
+
+
 def _extract_text(msg) -> str:
     """Concatenate the text blocks of a Messages response. Empty string for a
     refusal or an otherwise text-free response (no crash)."""
@@ -80,7 +84,7 @@ def make_completer(model: str, api_key: str = "", *, max_tokens: int = 400,
                     continue
                 if _is_retryable(exc):        # retries exhausted -> skip this ref
                     return ""
-                raise                          # non-retryable -> fail fast
+                raise NonRetryableProviderError(str(exc)) from exc
             return _extract_text(msg)
         return ""
     return complete
@@ -205,6 +209,8 @@ def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
                               match_threshold=match_threshold,
                               author_tripwire=author_tripwire, session=session,
                               retraction_cache=retraction_cache)
+        except NonRetryableProviderError:
+            raise
         except Exception as e:                # noqa: BLE001 - quarantine, never abort
             # ONE BAD ROW MUST NOT KILL THE RUN. A Crossref 200 whose `message`
             # is a string raised AttributeError out of confirm() and took the
@@ -233,8 +239,5 @@ def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
     # F2 measurement layer: UNSCOREABLE buckets, evidence bands, base rate.
     # Read-only; precision-vs-human is computed separately once adjudications
     # exist (eval_report.summarize(log_records, gold=...)).
-    try:
-        print(eval_report.format_report(eval_report.summarize(log_records)))
-    except Exception as e:                            # noqa: BLE001 - reporting must never break a run
-        print(f"[eval-report-skip] {e}")
+    print(eval_report.format_report(eval_report.summarize(log_records)))
     return counts

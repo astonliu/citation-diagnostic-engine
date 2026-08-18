@@ -265,6 +265,7 @@ def collect(xml_dir: str, out_dir: str, *, limit: int = 25,
         "attribution_hits": 0,
         "attribution_hits_no_pmid": 0,
         "cited_is_review": 0,
+        "review_lookup_failed": 0,
         "review_has_pmcid": 0,
         "emitted": 0,
         "filtered_out": 0,
@@ -321,7 +322,7 @@ def collect(xml_dir: str, out_dir: str, *, limit: int = 25,
                     rec["cited_pubtypes"] = pubtypes
                     review = is_review(pubtypes)
                     rec["cited_is_review"] = review
-                    if review:
+                    if review is True:
                         counts["cited_is_review"] += 1
                         cited_pmcid = ncbi_pmid_to_pmcid(pmid, api_key, email,
                                                          session)
@@ -333,6 +334,9 @@ def collect(xml_dir: str, out_dir: str, *, limit: int = 25,
                                     cited_pmcid, api_key, email, session)
                                 rec["provenance_candidates"] = prov or []
                                 rec["review_fulltext_available"] = avail
+                    elif review is None:
+                        counts["review_lookup_failed"] += 1
+                        rec["review_lookup_status"] = "unknown_transport_or_parse_failure"
                 else:
                     counts["attribution_hits_no_pmid"] += 1
                     rec["note"] = ("cited PMID unresolved; it must be resolved "
@@ -341,7 +345,7 @@ def collect(xml_dir: str, out_dir: str, *, limit: int = 25,
 
                 # Emit gate.
                 if require_review_oa:
-                    if rec["cited_is_review"] and rec["cited_pmcid"]:
+                    if rec["cited_is_review"] is True and rec["cited_pmcid"]:
                         rec["emit_reason"] = "review+pmcid"
                         emit = True
                     else:
