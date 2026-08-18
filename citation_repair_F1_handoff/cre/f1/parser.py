@@ -572,8 +572,11 @@ def link_citances(root, refs_by_id: dict, ordered_ref_ids=()) -> None:
                 clusters = []
             # A reference rendered in more than one cluster is not partitionable:
             # narrowing it to the first cluster silently drops the later claims.
-            # Fail closed for the whole sentence, preserving the legacy claim
-            # list and moving no reference into a guessed scope.
+            # Fail closed for THAT REFERENCE, not for every uniquely placed
+            # reference in the sentence.  A repeated range endpoint such as 2 in
+            # ``(2-9) ... (2,10-12)`` must not erase B8's unambiguous membership
+            # in the first cluster.
+            repeated_rids: set[str] = set()
             if clusters:
                 rid_clusters: dict[str, set[int]] = {}
                 for cluster in clusters:
@@ -581,8 +584,10 @@ def link_citances(root, refs_by_id: dict, ordered_ref_ids=()) -> None:
                         for rid in entries[entry_index][1]:
                             rid_clusters.setdefault(rid, set()).add(
                                 cluster["index"])
-                if any(len(indexes) > 1 for indexes in rid_clusters.values()):
-                    clusters = []
+                repeated_rids = {
+                    rid for rid, indexes in rid_clusters.items()
+                    if len(indexes) > 1
+                }
             clusters_by_span[span_i] = clusters
             cluster_of_entry = {e: c["index"] for c in clusters
                                 for e in c["entries"]}
@@ -601,8 +606,9 @@ def link_citances(root, refs_by_id: dict, ordered_ref_ids=()) -> None:
                         continue
                     ref.citance = sentence
                     ref.citance_citation_style = style
-                    ref.citance_marker_cluster_index = cluster_of_entry.get(
-                        e_i, -1)
+                    ref.citance_marker_cluster_index = (
+                        -1 if rid in repeated_rids
+                        else cluster_of_entry.get(e_i, -1))
                     if not ref.cited_reference_marker:
                         ref.cited_reference_marker = mtext
                     claims.append(((pos, 0, 0), ref))

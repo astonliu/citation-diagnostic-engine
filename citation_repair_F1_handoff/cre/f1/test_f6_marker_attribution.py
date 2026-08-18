@@ -381,6 +381,45 @@ def test_an_inferred_range_member_takes_the_opening_endpoints_cluster(tmp_path):
             for n in (1, 2, 3, 4, 5)] == [0, 0, 0, 1, 1]
 
 
+def test_repeated_range_endpoint_does_not_erase_unique_reference_scope(tmp_path):
+    """The live B8 false positive: B2 repeats, while B8 belongs only to 2-9.
+
+    The repeated endpoint stays fail-closed.  Its ambiguity must not delete the
+    three valid clusters and widen every unique member to the whole sentence.
+    """
+    sentence = (
+        "It is commonly found in environmental sources, such as soil and water, "
+        "and is known to cause skin and soft tissue infections "
+        f"({_xref('B2', '2')}-{_xref('B9', '9')}), intravascular device "
+        f"infections ({_xref('B2', '2')},{_xref('B10', '10')}-"
+        f"{_xref('B12', '12')}), and peritoneal dialysis-related peritonitis "
+        f"({_xref('B13', '13')}).")
+    refs = _parse(tmp_path,
+                  [(f"B{n}", str(1000 + n)) for n in range(1, 14)],
+                  [sentence])
+    by_id = _by_id(refs)
+
+    assert len(by_id["PMC1000:B8"].citance_marker_clusters) == 3
+    assert by_id["PMC1000:B8"].citance_marker_cluster_index == 0
+    assert by_id["PMC1000:B10"].citance_marker_cluster_index == 1
+    assert by_id["PMC1000:B13"].citance_marker_cluster_index == 2
+    assert by_id["PMC1000:B2"].citance_marker_cluster_index == -1
+
+    claims = [
+        "It is commonly found in environmental sources such as soil and water",
+        "It causes skin and soft tissue infections",
+        "It causes intravascular device infections",
+        "It causes peritoneal dialysis-related peritonitis",
+    ]
+    assert _scope(by_id["PMC1000:B8"], claims)["claims"] == claims[:2]
+    assert _scope(by_id["PMC1000:B10"], claims)["claims"] == claims[2:3]
+    assert _scope(by_id["PMC1000:B13"], claims)["claims"] == claims[3:]
+    repeated = _scope(by_id["PMC1000:B2"], claims)
+    assert repeated["status"] == ms.SCOPE_WHOLE_SENTENCE
+    assert repeated["reason"] == ms.REASON_AMBIGUOUS
+    assert repeated["claims"] == claims
+
+
 # ==========================================================================
 # ROW -- end to end through run_band: the fault that must stop firing,
 #        and the three that must not stop firing

@@ -348,23 +348,46 @@ def cluster_anchors(sentence: str, clusters) -> list:
 def assign_claims(sentence: str, clusters, claims) -> list:
     """One cluster index per claim, or ``None`` where attribution is ambiguous.
 
-    A claim belongs to the cluster whose ANCHOR it names, and to no other. A
-    claim naming two anchors spans clusters; a claim naming none paraphrased past
-    every anchor. Both return ``None``, and one ``None`` reverts the whole
-    sentence to today's behaviour -- narrowing on a guess is the one outcome this
-    is not allowed to produce.
+    A claim belongs first to the cluster whose ANCHOR it names, and to no other.
+    A claim naming two anchors spans clusters and returns ``None``.  When it
+    names no anchor, it may still belong to exactly one cluster if it overlaps
+    content found only in that cluster's owned region; overlap with zero or
+    multiple regions remains ``None``.  One ``None`` reverts the whole sentence
+    to today's behaviour -- narrowing on a guess is the one outcome this is not
+    allowed to produce.
     """
     anchors = cluster_anchors(sentence, clusters)
     if not anchors or any(not anchor for anchor in anchors):
         # A cluster whose marker follows a function word directly ("as shown in
         # 12,13") has no anchor to name, so nothing here can separate it.
         return [None] * len(claims)
+    regions = cluster_regions(sentence, clusters)
+    region_tokens = [_content_tokens(region) for region in regions]
+    # A token shared by two owned regions cannot distinguish their scopes.  The
+    # exclusive remainder is used only when a claim names no immediate anchor;
+    # an anchor match always wins, and multiple anchor matches remain ambiguous.
+    exclusive_regions = []
+    for i, tokens in enumerate(region_tokens):
+        others: set = set()
+        for j, other in enumerate(region_tokens):
+            if i != j:
+                others |= other
+        exclusive_regions.append(tokens - others)
+
     out: list = []
     for claim in claims:
         claim_tokens = _content_tokens(claim if isinstance(claim, str) else "")
         matched = [i for i, anchor in enumerate(anchors)
                    if claim_tokens & anchor]
-        out.append(matched[0] if len(matched) == 1 else None)
+        if len(matched) == 1:
+            out.append(matched[0])
+            continue
+        if matched:
+            out.append(None)
+            continue
+        region_matched = [i for i, tokens in enumerate(exclusive_regions)
+                          if claim_tokens & tokens]
+        out.append(region_matched[0] if len(region_matched) == 1 else None)
     return out
 
 
