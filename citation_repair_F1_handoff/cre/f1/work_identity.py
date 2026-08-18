@@ -1347,7 +1347,9 @@ def assess_same_work(claimed: ClaimedRef, resolved: RetrievedRecord, *,
             and is_distinctive_title(claimed.title)
             and is_distinctive_title(resolved.title)):
         return WorkIdentityEvidence(True, "overwhelming_bibliographic_anchor",
-                                    ("exact_doi", "year", "journal", "volume",
+                                    ("exact_doi", "year",
+                                     "journal" if journal else
+                                     "abbreviated_journal_anchor", "volume",
                                      "first_page",
                                      "title_sim>=%.2f" % DOI_BIBLIOGRAPHIC_ANCHOR_TITLE_MIN))
 

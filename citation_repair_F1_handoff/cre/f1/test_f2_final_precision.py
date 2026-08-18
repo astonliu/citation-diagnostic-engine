@@ -50,6 +50,10 @@ def test_authorized_six_rows_use_live_flag_and_record_paths(pmid, claimed, resol
     if reason == "mixed_identity_citation":
         assert match.identity_disposition == "mixed_identity_conflict"
         assert record["identity_disposition"] == "mixed_identity_conflict"
+    if reason == "overwhelming_bibliographic_anchor":
+        assert match.fields.journal_match is False
+        assert "abbreviated_journal_anchor" in match.identity_signals
+        assert "journal" not in match.identity_signals
 
 
 def test_authorized_six_accounting_is_three_high_three_quarantined():
