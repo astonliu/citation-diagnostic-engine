@@ -182,6 +182,29 @@ def test_default_gate_emits_review_candidate(tmp_path, review_dir, patched_ncbi)
     assert all(val is None for val in v.values())
 
 
+def test_review_lookup_failure_is_distinct_from_an_answered_nonreview(
+        tmp_path, review_dir, monkeypatch):
+    """A transport/parse failure must not publish the same funnel as "not a review"."""
+    monkeypatch.setattr(f3, "ncbi_pmid_to_pmcid",
+                        lambda *args, **kwargs: pytest.fail(
+                            "PMCID resolution must not run for a non-review or outage"))
+
+    monkeypatch.setattr(f3, "ncbi_pubtypes", lambda *args, **kwargs: None)
+    outage = f3.collect(review_dir, str(tmp_path / "outage"))
+
+    monkeypatch.setattr(
+        f3, "ncbi_pubtypes",
+        lambda *args, **kwargs: ["Journal Article"])
+    answered = f3.collect(review_dir, str(tmp_path / "answered"))
+
+    assert outage["counts"]["review_lookup_failed"] == 1
+    assert answered["counts"]["review_lookup_failed"] == 0
+    assert outage["counts"]["cited_is_review"] == 0
+    assert answered["counts"]["cited_is_review"] == 0
+    assert outage["counts"]["filtered_out"] == 1
+    assert answered["counts"]["filtered_out"] == 1
+
+
 def test_manifest_is_calibration_only(tmp_path, review_dir, patched_ncbi):
     out_dir = str(tmp_path / "out")
     manifest = f3.collect(review_dir, out_dir)
