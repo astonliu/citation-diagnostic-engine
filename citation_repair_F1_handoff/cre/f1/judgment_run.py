@@ -69,7 +69,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Callable, Iterable, Optional
 
 from . import judgment_band as jb
@@ -423,7 +425,7 @@ def _excluded_record(ref, disposition: str, preband_label=None) -> dict:
 def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract,
                         fetch_reflist=None, fetch_fulltext=None,
                         coverage_judge_v3=None, claims_cache=None,
-                        scope_counts=None) -> tuple:
+                        claims_cache_order=None, scope_counts=None) -> tuple:
     """PHASE 1 of :func:`judge_pair`: evidence, atomic claims, coverage verdicts.
 
     Split out because the CO-CITATION GROUP a reference belongs to cannot be
@@ -433,7 +435,9 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
     order, the record shape and the hash chain are exactly what they were.
 
     ``claims_cache`` is the per-document CITING-SENTENCE claim cache
-    (``sentence -> claims``), mirroring ``run_band``'s. Atomic claims are a pure
+    (``sentence -> claims``), mirroring ``run_band``'s.  A concurrent caller may
+    instead supply the internal ordered cache plus ``claims_cache_order``.
+    Atomic claims are a pure
     function of the sentence, so a group of four references sharing one citance
     made FOUR identical extraction calls on this path and one on the band path.
     That was waste at 1.30 billed calls/reference, and a latent correctness risk
@@ -482,6 +486,12 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
     sentence = item["citing_sentence"]
     if claims_cache is None:
         claims = jb.extract_atomic_claims(sentence, extractor=extractor)
+    elif isinstance(claims_cache, _OrderedClaimsCache):
+        if claims_cache_order is None:
+            raise ValueError(
+                "claims_cache_order is required for the ordered claims cache")
+        claims = claims_cache.get_or_extract(
+            sentence, claims_cache_order, extractor)
     else:
         if sentence not in claims_cache:
             # Assigned only on success, so a sentence whose reply is malformed
@@ -1147,17 +1157,20 @@ def _instrument_f5_seams(seams: dict) -> tuple[dict, dict]:
     observed = {"retrieval_calls": 0, "attestation_calls": 0,
                 "judge_calls": 0, "retrieval_protocols": []}
     wrapped = dict(seams)
+    observation_lock = threading.Lock()
 
     def observe(name, counter):
         fn = seams[name]
 
         def call(*args, **kwargs):
-            observed[counter] += 1
-            before = len(getattr(fn, "executed_protocols", ()))
+            with observation_lock:
+                observed[counter] += 1
+                before = len(getattr(fn, "executed_protocols", ()))
             result = fn(*args, **kwargs)
             if name == "retrieve_superseding_candidates":
-                protocols = list(getattr(fn, "executed_protocols", ()))
-                observed["retrieval_protocols"].extend(protocols[before:])
+                with observation_lock:
+                    protocols = list(getattr(fn, "executed_protocols", ()))
+                    observed["retrieval_protocols"].extend(protocols[before:])
             return result
         return call
 
@@ -1251,6 +1264,80 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
     return block
 
 
+class _OrderedClaimsCache:
+    """Per-document, thread-safe claim extraction with serial-equivalent reuse.
+
+    References are registered in document order before their worker is
+    submitted.  For one citing sentence, only the earliest registered reference
+    may call the extractor.  A successful result is reused by every later
+    reference, exactly like the former serial ``dict`` cache.  A failed attempt
+    is *not* cached: its owner raises and the next reference gets the retry,
+    preserving the existing per-reference quarantine rule.
+
+    Different citing sentences may extract concurrently.  That is the useful
+    parallelism; allowing two calls for the same sentence would spend more,
+    permit claim drift inside one co-citation group, and change results.
+    """
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._waiting: dict[str, list[int]] = {}
+        self._inflight: set[str] = set()
+        self._values: dict[str, list] = {}
+
+    def register(self, sentence: str, order: int) -> None:
+        with self._condition:
+            if sentence in self._values:
+                return
+            queue = self._waiting.setdefault(sentence, [])
+            if queue and order <= queue[-1]:
+                raise ValueError(
+                    "claims-cache registrations must follow document order")
+            queue.append(order)
+            self._condition.notify_all()
+
+    def get_or_extract(self, sentence: str, order: int, extractor) -> list:
+        with self._condition:
+            while True:
+                if sentence in self._values:
+                    return list(self._values[sentence])
+                queue = self._waiting.get(sentence) or []
+                if (queue and queue[0] == order
+                        and sentence not in self._inflight):
+                    self._inflight.add(sentence)
+                    break
+                self._condition.wait()
+
+        try:
+            claims = jb.extract_atomic_claims(sentence, extractor=extractor)
+        except BaseException:
+            with self._condition:
+                queue = self._waiting.get(sentence) or []
+                if queue and queue[0] == order:
+                    queue.pop(0)
+                self._inflight.discard(sentence)
+                self._condition.notify_all()
+            raise
+
+        with self._condition:
+            self._values[sentence] = list(claims)
+            self._waiting.pop(sentence, None)
+            self._inflight.discard(sentence)
+            self._condition.notify_all()
+        return list(claims)
+
+
+def _merge_marker_scope_counts(target: dict, source: dict) -> None:
+    """Fold one worker's marker-scope tally into the run in commit order."""
+    for key, value in source.items():
+        if isinstance(value, dict):
+            destination = target[key]
+            for subkey, amount in value.items():
+                destination[subkey] = destination.get(subkey, 0) + amount
+        else:
+            target[key] += value
+
+
 def run_natural_judgment(
     xml_dir: str, out_dir: str, *,
     extractor, coverage_judge, fetch_abstract, fetch_reflist=None,
@@ -1268,7 +1355,7 @@ def run_natural_judgment(
     assistant_prefill: str = "", stop_sequences: tuple = (), temperature=None,
     code_commit: str = "", corpus_manifest_path: str = "",
     require_full_coverage: bool = False, require_reportable: bool = False,
-    production: bool = False,
+    production: bool = False, max_workers: int = 1,
 ) -> dict:
     """Run the F3-F7 band end-to-end over a dir of natural PMC-OA citing papers.
 
@@ -1344,7 +1431,17 @@ def run_natural_judgment(
     checkpoints per document, so an interrupted document is replayed and its
     rows appended twice; both defects are pinned by strict xfails in
     ``test_adversarial_judgment_run``).
+
+    PARALLEL EXECUTION (``max_workers``).  Values above one overlap independent
+    reference work inside a document, while the co-citation barrier, counter
+    folds, durable records, annotation queue and hash chain all commit in the
+    original parser order.  Prompts, evidence scope, parsers, policies and retry
+    rules are unchanged.  F5/F7 Phase 2 remains serial when either stateful seam
+    bundle is wired; Phase 1 still overlaps safely.
     """
+    if (isinstance(max_workers, bool) or not isinstance(max_workers, int)
+            or not 1 <= max_workers <= 32):
+        raise ValueError("max_workers must be an integer from 1 through 32")
     if (f5_seams is None) != (f5_evidence_builder is None):
         raise ValueError(
             "f5_seams and f5_evidence_builder must be supplied together; a "
@@ -1523,6 +1620,9 @@ def run_natural_judgment(
             "layer": "F3-F7 natural-paper orchestration (judgment_run)",
             "status": "in_progress",
             "model": model,
+            **({"parallel_execution": {
+                "max_workers": max_workers, "ordered_commit": True}}
+               if max_workers > 1 else {}),
             "chain_genesis": genesis,
             "chain_tip": prev_link,
             "chain_record_count": chain_count,
@@ -1616,6 +1716,49 @@ def run_natural_judgment(
             queue_fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
             queue_fh.flush()
 
+    worker_pool = (ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix="cre-judgment")
+        if max_workers > 1 else None)
+    phase2_parallel = (
+        worker_pool is not None and f5_seams is None and f7_seams is None)
+
+    def coverage_attempt(item: dict, claims_cache, order: int) -> tuple:
+        # Each worker owns its tally.  Shared counter mutation would make a
+        # correct numeric result depend on thread timing; the main thread folds
+        # these in parser order after each future resolves.
+        local_scope_counts = marker_scope.new_counts()
+        try:
+            rec, claims, verdicts = judge_pair_coverage(
+                item, extractor=extractor, coverage_judge=coverage_judge,
+                fetch_abstract=fetch_abstract, fetch_reflist=fetch_reflist,
+                fetch_fulltext=fetch_fulltext,
+                coverage_judge_v3=coverage_judge_v3,
+                claims_cache=claims_cache, claims_cache_order=order,
+                scope_counts=local_scope_counts)
+            return rec, (item, claims, verdicts), local_scope_counts, None
+        except ValueError as exc:
+            return None, item, local_scope_counts, exc
+
+    def finish_attempt(rec: dict, item: dict, claims, verdicts,
+                       flags) -> tuple:
+        try:
+            finished = judge_pair_finish(
+                rec, item, claims, verdicts,
+                fetch_abstract=fetch_abstract, cogroup_covered=flags,
+                discriminator_call_llm=discriminator_call_llm,
+                f4_verifier_call_llm=f4_verifier_call_llm,
+                f3_fetch_reflist=f3_fetch_reflist,
+                f3_resolve_pmcid=f3_resolve_pmcid,
+                f4_policy=eff_f4_policy, f3_policy=f3_policy,
+                f5_seams=f5_seams,
+                f5_evidence_builder=f5_evidence_builder,
+                f5_policy=f5_policy, f7_seams=f7_seams,
+                f7_evidence_builder=f7_evidence_builder,
+                f7_policy=f7_policy)
+            return finished, None
+        except ValueError as exc:
+            return None, exc
+
     t0 = time.time()
     try:
         scanned = 0
@@ -1660,8 +1803,9 @@ def run_natural_judgment(
             # reference. Scoped to the document -- a citance is a within-document
             # object -- which captures the whole fanout while keeping the cache
             # bounded on a corpus run.
-            claims_cache: dict = {}
-            for ref in refs:
+            claims_cache = (_OrderedClaimsCache()
+                            if worker_pool is not None else {})
+            for order, ref in enumerate(refs):
                 refs_seen += 1
                 executed_ids.add(ref.citation_id)
                 # THE BAND-1 LABEL IS READ FIRST, and counted regardless of which
@@ -1698,31 +1842,49 @@ def run_natural_judgment(
                         pubtype_cache[pmid] = pubtypes_lookup(pmid)
                     item["cited_is_review"] = jb.is_review(pubtype_cache[pmid])
 
-                try:
-                    rec, claims, verdicts = judge_pair_coverage(
-                        item, extractor=extractor, coverage_judge=coverage_judge,
-                        fetch_abstract=fetch_abstract, fetch_reflist=fetch_reflist,
-                        fetch_fulltext=fetch_fulltext,
-                        coverage_judge_v3=coverage_judge_v3,
-                        claims_cache=claims_cache, scope_counts=scope_counts)
-                    if rec.get("fulltext_incomplete_hold") is True:
-                        # Its OWN tally, never `counts`. `counts` is one entry per
-                        # emitted record and is summed into `total_records`, so an
-                        # extra key there would corrupt the record count rather than
-                        # add a statistic -- same reason f4_counts is separate.
-                        # Counted at all because a run whose bodies mostly failed to
-                        # retrieve looks identical in the route counters to one
-                        # judged against complete text: DEC-032 makes both hold.
-                        fulltext_counts["no_usable_fulltext"] += 1
-                    pending.append((rec, (item, claims, verdicts)))
-                except ValueError as e:                   # strict-parser failure -> quarantine
+                if worker_pool is None:
+                    result = coverage_attempt(item, claims_cache, order)
+                else:
+                    claims_cache.register(item["citing_sentence"], order)
+                    result = worker_pool.submit(
+                        coverage_attempt, item, claims_cache, order)
+                # A future placeholder is resolved below in parser order.  On
+                # the one-worker path the tuple is already complete, preserving
+                # the original call sequence and failure semantics.
+                pending.append(result)
+
+            # Resolve Phase 1 in original reference order and fold every shared
+            # tally on the main thread.  Workers may finish in any order; none
+            # can commit observable run state out of order.
+            resolved_pending: list = []
+            for entry in pending:
+                if isinstance(entry, Future):
+                    entry = entry.result()
+                # Excluded records were appended directly as (rec, None).
+                if len(entry) == 2:
+                    resolved_pending.append(entry)
+                    continue
+                rec, extra_or_item, local_scope_counts, error = entry
+                _merge_marker_scope_counts(scope_counts, local_scope_counts)
+                if error is not None:
+                    item = extra_or_item
                     rec = _new_record(item)
                     rec["preband_cleared"] = True
                     rec["disposition"] = DISP_QUARANTINE_PARSE
-                    rec["parse_error"] = str(e)
+                    rec["parse_error"] = str(error)
                     rec["ts"] = int(time.time())
-                    print(f"[judgment-run-quarantine] {rec['citation_id']}: {e}")
-                    pending.append((rec, None))
+                    print(f"[judgment-run-quarantine] "
+                          f"{rec['citation_id']}: {error}")
+                    resolved_pending.append((rec, None))
+                    continue
+                if rec.get("fulltext_incomplete_hold") is True:
+                    # Its OWN tally, never `counts`. `counts` is one entry per
+                    # emitted record and is summed into `total_records`, so an
+                    # extra key there would corrupt the record count rather than
+                    # add a statistic -- same reason f4_counts is separate.
+                    fulltext_counts["no_usable_fulltext"] += 1
+                resolved_pending.append((rec, extra_or_item))
+            pending = resolved_pending
 
             # CO-CITATION AGGREGATION over the judged pairs of this document.
             judged_items = [extra[0] for _rec, extra in pending if extra is not None]
@@ -1743,38 +1905,62 @@ def run_natural_judgment(
                 groups_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
             groups_fh.flush()
 
-            # PHASE 2, in the original ref order.
-            for rec, extra in pending:
-                if extra is None:
+            # PHASE 2 computes independently but commits in original ref order.
+            # F5/F7 seam bundles may carry internal mutable audit state not owned
+            # by this orchestrator, so their Phase 2 remains serial rather than
+            # assuming thread safety and risking a semantic change.
+            if not phase2_parallel:
+                for rec, extra in pending:
+                    if extra is None:
+                        emit(rec)
+                        continue
+                    item, claims, verdicts = extra
+                    cid = item["citation_id"]
+                    flags, summary = overlay["by_citation_id"].get(
+                        cid, ((), None))
+                    if summary is not None:
+                        rec["cocitation"] = summary
+                    rec, error = finish_attempt(
+                        rec, item, claims, verdicts, flags)
+                    if error is not None:
+                        rec = _new_record(item)
+                        rec["preband_cleared"] = True
+                        rec["disposition"] = DISP_QUARANTINE_PARSE
+                        rec["parse_error"] = str(error)
+                        rec["ts"] = int(time.time())
+                        print(f"[judgment-run-quarantine] "
+                              f"{rec['citation_id']}: {error}")
                     emit(rec)
-                    continue
-                item, claims, verdicts = extra
-                cid = item["citation_id"]
-                flags, summary = overlay["by_citation_id"].get(cid, ((), None))
-                if summary is not None:
-                    rec["cocitation"] = summary
-                try:
-                    rec = judge_pair_finish(
-                        rec, item, claims, verdicts,
-                        fetch_abstract=fetch_abstract, cogroup_covered=flags,
-                        discriminator_call_llm=discriminator_call_llm,
-                        f4_verifier_call_llm=f4_verifier_call_llm,
-                        f3_fetch_reflist=f3_fetch_reflist,
-                        f3_resolve_pmcid=f3_resolve_pmcid,
-                        f4_policy=eff_f4_policy, f3_policy=f3_policy,
-                        f5_seams=f5_seams,
-                        f5_evidence_builder=f5_evidence_builder,
-                        f5_policy=f5_policy, f7_seams=f7_seams,
-                        f7_evidence_builder=f7_evidence_builder,
-                        f7_policy=f7_policy)
-                except ValueError as e:                   # strict-parser failure -> quarantine
-                    rec = _new_record(item)
-                    rec["preband_cleared"] = True
-                    rec["disposition"] = DISP_QUARANTINE_PARSE
-                    rec["parse_error"] = str(e)
-                    rec["ts"] = int(time.time())
-                    print(f"[judgment-run-quarantine] {rec['citation_id']}: {e}")
-                emit(rec)
+            else:
+                phase2_pending: list = []
+                for rec, extra in pending:
+                    if extra is None:
+                        phase2_pending.append((rec, None, None))
+                        continue
+                    item, claims, verdicts = extra
+                    cid = item["citation_id"]
+                    flags, summary = overlay["by_citation_id"].get(
+                        cid, ((), None))
+                    if summary is not None:
+                        rec["cocitation"] = summary
+                    result = worker_pool.submit(
+                        finish_attempt, rec, item, claims, verdicts, flags)
+                    phase2_pending.append((result, item, extra))
+
+                for result, item, extra in phase2_pending:
+                    if extra is None:
+                        emit(result)
+                        continue
+                    rec, error = result.result()
+                    if error is not None:
+                        rec = _new_record(item)
+                        rec["preband_cleared"] = True
+                        rec["disposition"] = DISP_QUARANTINE_PARSE
+                        rec["parse_error"] = str(error)
+                        rec["ts"] = int(time.time())
+                        print(f"[judgment-run-quarantine] "
+                              f"{rec['citation_id']}: {error}")
+                    emit(rec)
 
             ckpt_fh.write(json.dumps({"pmcid": pmcid}) + "\n")
             ckpt_fh.flush()
@@ -1782,6 +1968,8 @@ def run_natural_judgment(
             # Checkpoint boundary: advance the manifest anchor atomically.
             _write_json_atomic(manifest_path, progress_manifest())
     finally:
+        if worker_pool is not None:
+            worker_pool.shutdown(wait=True, cancel_futures=True)
         pred_fh.close()
         queue_fh.close()
         ckpt_fh.close()
@@ -1856,6 +2044,20 @@ def run_natural_judgment(
     manifest = {
         "layer": "F3-F7 natural-paper orchestration (judgment_run)",
         "status": status,
+        **({"parallel_execution": {
+            "max_workers": max_workers,
+            "phase1_workers": max_workers,
+            "phase2_workers": max_workers if phase2_parallel else 1,
+            "ordered_commit": True,
+            "cocitation_barrier_preserved": True,
+            "same_sentence_extraction": "ordered_single_flight",
+            "f5_f7_phase2_serialized": not phase2_parallel,
+            "quality_invariants": (
+                "Prompts, models, evidence scope, parsers, policies, verifier "
+                "gates, per-sentence extraction reuse, terminal filtering, "
+                "record order and hash-chain order are unchanged."
+            ),
+        }} if max_workers > 1 else {}),
         "discriminators_wired": discriminator_call_llm is not None,
         "warning": (
             "coverage->F6 always live; F4 (strength) + F3 (provenance) live only when "
@@ -2013,6 +2215,7 @@ def run_natural_judgment(
         "chain_record_count": chain_count,
         "params": {
             "xml_dir": xml_dir, "out_dir": out_dir, "max_docs": max_docs,
+            **({"max_workers": max_workers} if max_workers > 1 else {}),
             "email": email, "api_key_present": bool(api_key),
             "preband_disposition_supplied": disp is not None,
             "preband_disposition_size": len(disp) if disp is not None else 0,

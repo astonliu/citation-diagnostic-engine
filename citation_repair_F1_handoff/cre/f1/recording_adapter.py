@@ -29,6 +29,7 @@ is the only thing that would, and that is outside this repo.
 from __future__ import annotations
 
 import functools
+import threading
 
 #: Mirrors production_launcher's sentinels without importing it (the launcher
 #: imports judgment_run, and this module must stay usable on its own).
@@ -56,6 +57,7 @@ class AdapterReceipt:
         self.temperature = temperature
         self.assistant_prefill = assistant_prefill
         self.calls: list = []
+        self._lock = threading.Lock()
 
     def _base(self) -> dict:
         call: dict = {"model": self.model}
@@ -73,7 +75,8 @@ class AdapterReceipt:
         call = self._base()
         call["seam"] = seam
         call.update(extra)
-        self.calls.append(call)
+        with self._lock:
+            self.calls.append(call)
         return call
 
     # -- wrapping ---------------------------------------------------------
@@ -104,11 +107,13 @@ class AdapterReceipt:
         return {name: self.wrap(fn, seam=name) for name, fn in seams.items()}
 
     def summary(self) -> dict:
+        with self._lock:
+            calls = list(self.calls)
         by_seam: dict = {}
-        for c in self.calls:
+        for c in calls:
             k = c.get("seam", "?")
             by_seam[k] = by_seam.get(k, 0) + 1
-        return {"total_calls": len(self.calls),
+        return {"total_calls": len(calls),
                 "calls_by_seam": dict(sorted(by_seam.items())),
                 "model": self.model}
 
