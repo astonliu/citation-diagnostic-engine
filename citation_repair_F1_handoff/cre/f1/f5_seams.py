@@ -54,7 +54,7 @@ CANDIDATE_CAP = 50
 #: but does not fit the deadline.
 RERANKER = "none"
 
-RETRIEVAL_PROTOCOL_VERSION = "f5_retrieval_v2"
+RETRIEVAL_PROTOCOL_VERSION = "f5_retrieval_v3"
 
 
 def retrieval_protocol(*, after_date: str = "", as_of_date: str = "",
@@ -66,7 +66,10 @@ def retrieval_protocol(*, after_date: str = "", as_of_date: str = "",
     recorded so a reader can tell what was and was not looked at."""
     return {
         "protocol_version": RETRIEVAL_PROTOCOL_VERSION,
-        "sources_queried": [
+        # These are PLANNED sources. Per-call attempted/succeeded/skipped
+        # sources are populated from CandidateSearchResult.streams below. A
+        # static protocol must never claim that an unavailable input was queried.
+        "planned_sources": [
             "pubmed_esearch_claim", "pubmed_esearch_mesh",
             "pubmed_pubmed_citedin",
         ],
@@ -74,10 +77,19 @@ def retrieval_protocol(*, after_date: str = "", as_of_date: str = "",
         "mesh_terms": list(mesh_terms),
         "candidate_cap": candidate_cap,
         "reranker": RERANKER,
-        "structural_filter": [
+        "candidate_generation": (
+            "union of claim Title/Abstract search, cited-work MeSH search, and "
+            "the PubMed forward-citation neighbourhood"
+        ),
+        "structural_filters": [
             "publication date strictly after after_date",
-            "MeSH overlap with the cited work",
-            "citation neighbourhood via elink (citing the cited work)",
+            "publication date on or before as_of_date",
+        ],
+        "adequacy_requires": [
+            "all planned streams answered",
+            "all retained candidate metadata answered",
+            "no uncertain date-boundary exclusions",
+            "candidate retrieval was not truncated",
         ],
         "known_limitations": [
             "no learned reranker in v1 (monoT5 is the identified next gain)",
@@ -368,10 +380,29 @@ def make_retrieve_superseding_candidates(search_candidates, *, cap: int = CANDID
                 (), "empty", "failure", query_hash=query_hash,
                 rationale=f"retrieval returned invalid status {search_status!r}")
         if streams is not None:
-            protocol["executed_streams"] = list(streams)
+            executed = list(streams)
+            protocol["executed_streams"] = executed
+            protocol["sources_attempted"] = [
+                row.get("name") for row in executed
+                if not str(row.get("status") or "").startswith("skipped")]
+            protocol["sources_succeeded"] = [
+                row.get("name") for row in executed if row.get("status") == "ok"]
+            protocol["sources_skipped"] = [
+                row.get("name") for row in executed
+                if str(row.get("status") or "").startswith("skipped")]
         if query_hash:
             protocol["query_hash"] = query_hash
         protocol["truncated"] = truncated
+        streams_complete = streams is None or all(
+            isinstance(row, dict) and row.get("status") == "ok"
+            for row in streams)
+        # Defense in depth: production CandidateSearchResult already reports a
+        # skipped stream as partial. The adapter independently enforces the same
+        # rule so a malformed/older provider cannot turn an incomplete protocol
+        # into a confident negative merely by claiming status="ok".
+        effective_status = search_status
+        if search_status == "ok" and not streams_complete:
+            effective_status = "partial"
 
         seen, candidates = set(), []
         for hit in rows:
@@ -406,14 +437,14 @@ def make_retrieve_superseding_candidates(search_candidates, *, cap: int = CANDID
 
         if not candidates:
             return RetrievalResult(
-                (), "empty", search_status, query_hash=query_hash,
+                (), "empty", effective_status, query_hash=query_hash,
                 rationale=(search_rationale or
                            "no admissible later evidence was found under this "
                            "protocol; this is NOT a finding that none exists"))
-        adequacy = ("adequate" if search_status == "ok" and not truncated
+        adequacy = ("adequate" if effective_status == "ok" and not truncated
                     and len(candidates) < cap else "inadequate")
         return RetrievalResult(
-            tuple(candidates), adequacy, search_status, query_hash=query_hash,
+            tuple(candidates), adequacy, effective_status, query_hash=query_hash,
             rationale=(search_rationale or
                        f"{len(candidates)} candidate(s) under "
                        f"{RETRIEVAL_PROTOCOL_VERSION}"
@@ -508,4 +539,96 @@ def build_f5_seams(*, fetch_meta, fetch_abstract, search_candidates, complete,
         "find_supersession_attestation": observed_attestation,
         "judge_contradiction": make_judge_contradiction(
             complete, span_miss_log=span_miss_log),
+    }
+
+
+def make_f5_evidence_builder(fetch_meta, *, as_of_date: str):
+    """Build the ``item -> evidence`` half of the live F5 runner contract.
+
+    The assessment cutoff is explicit and fixed for the entire run. PubMed's
+    latest possible publication date is used for an imprecise cited date, so a
+    candidate is never called "later" merely because both papers share an
+    unresolved year/month boundary.
+    """
+    cutoff = _parse_date(as_of_date, "as_of_date")
+
+    def build(item: dict) -> dict:
+        if not isinstance(item, dict):
+            raise ValueError("F5 evidence item must be a dict")
+        cited_work_id = str(item.get("cited_pmid") or "").strip()
+        if not cited_work_id or not cited_work_id.isdigit():
+            raise ValueError("F5 evidence requires a decimal cited_pmid")
+        meta = fetch_meta(cited_work_id)
+        if not isinstance(meta, dict):
+            raise ValueError(
+                f"F5 cited metadata unavailable for PMID {cited_work_id}")
+        metadata_id = str(meta.get("id") or meta.get("pmid") or cited_work_id).strip()
+        if metadata_id != cited_work_id:
+            raise ValueError(
+                f"F5 cited metadata id {metadata_id!r} does not match "
+                f"PMID {cited_work_id!r}")
+        cited_date = str(meta.get("pub_date_latest") or meta.get("pub_date") or "").strip()
+        if not cited_date:
+            raise ValueError(
+                f"F5 cited metadata has no publication date for PMID {cited_work_id}")
+        cited_day = _parse_date(cited_date, "cited publication date")
+        if cited_day >= cutoff:
+            raise ValueError(
+                "F5 cited publication date must be strictly before as_of_date")
+        cited_meta = dict(meta)
+        cited_meta["pmid"] = cited_work_id
+        cited_meta["cited_work_id"] = cited_work_id
+        return {
+            "cited_work_id": cited_work_id,
+            "cited_meta": cited_meta,
+            "cited_date": cited_date,
+            "as_of_date": as_of_date,
+        }
+
+    return build
+
+
+def build_pubmed_f5_runtime(*, complete, as_of_date: str, api_key: str = "",
+                            email: "str | None" = None, session=None,
+                            cache_dir: "str | None" = None,
+                            timeout: float = 30.0, max_retries: int = 4,
+                            fetch_fulltext=None, cap: int = CANDIDATE_CAP,
+                            thin_source_log=None, span_miss_log=None,
+                            protocol_log=None) -> dict:
+    """Return both live F5 arguments accepted by ``run_natural_judgment``.
+
+    This is the concrete production wiring for the PubMed finder. It performs no
+    I/O until the returned seams/evidence builder are invoked, and callers can
+    pass the result directly as ``**build_pubmed_f5_runtime(...)``. Path A
+    remains disabled by ``F5Policy``; this only wires detection and Path B.
+    """
+    from .f5_candidate_finder import PubMedCandidateFinder
+    from .ncbi_meta import DEFAULT_EMAIL
+
+    finder = PubMedCandidateFinder(
+        api_key=api_key, email=email or DEFAULT_EMAIL, session=session,
+        cache_dir=cache_dir, timeout=timeout, max_retries=max_retries)
+    memory: dict[str, "dict | None"] = {}
+
+    def fetch_meta(work_id: str):
+        key = str(work_id or "").strip()
+        if key not in memory:
+            memory[key] = finder.fetch_metadata(key)
+        value = memory[key]
+        return dict(value) if isinstance(value, dict) else None
+
+    def fetch_abstract(work_id: str) -> str:
+        meta = fetch_meta(work_id)
+        return str((meta or {}).get("abstract") or "")
+
+    seams = build_f5_seams(
+        fetch_meta=fetch_meta, fetch_abstract=fetch_abstract,
+        search_candidates=finder.search_candidates, complete=complete,
+        fetch_fulltext=fetch_fulltext, cap=cap,
+        thin_source_log=thin_source_log, span_miss_log=span_miss_log,
+        protocol_log=protocol_log)
+    return {
+        "f5_seams": seams,
+        "f5_evidence_builder": make_f5_evidence_builder(
+            fetch_meta, as_of_date=as_of_date),
     }

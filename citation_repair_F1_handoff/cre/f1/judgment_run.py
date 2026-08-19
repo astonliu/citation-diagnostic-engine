@@ -947,7 +947,8 @@ def _module_hashes(fulltext_path: bool, f5_seams, f7_seams) -> dict:
                   "cre.f1.fulltext_reader", "cre.f1.sentence_spans"]
     if f5_seams is not None:
         names += ["cre.f1.f5_supersession", "cre.f1.f5_contradiction_prompt",
-                  "cre.f1.f5_seams", "cre.f1.f5_discovery_queue"]
+                  "cre.f1.f5_seams", "cre.f1.f5_candidate_finder",
+                  "cre.f1.f5_discovery_queue"]
     # F7 can OWN the published label (it rides highest in the engine ordering),
     # so an F7 run that does not hash f7_entity records the governing module of
     # its headline number nowhere. Same defect class the f5 block fixed.

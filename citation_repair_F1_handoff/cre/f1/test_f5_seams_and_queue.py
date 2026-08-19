@@ -123,9 +123,15 @@ def test_duplicate_hits_are_collapsed_before_RetrievalResult_rejects_them():
 
 def test_retrieval_protocol_is_readable_not_only_a_hash():
     protocol = s.retrieval_protocol(after_date="2020-01-01", as_of_date="2024-01-01")
-    for key in ("sources_queried", "date_window", "candidate_cap", "reranker",
-                "structural_filter", "known_limitations"):
+    for key in ("planned_sources", "date_window", "candidate_cap", "reranker",
+                "candidate_generation", "structural_filters",
+                "adequacy_requires", "known_limitations"):
         assert key in protocol
+    assert "sources_queried" not in protocol
+    assert protocol["structural_filters"] == [
+        "publication date strictly after after_date",
+        "publication date on or before as_of_date",
+    ]
     assert protocol["reranker"] == "none"          # stated limitation, not an oversight
 
 

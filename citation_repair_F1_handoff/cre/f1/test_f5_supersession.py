@@ -184,6 +184,28 @@ def run(support=None, *, evidence=EVIDENCE, policy=None, **seam_kwargs):
 SUPPORTED = (ClaimSupport(0, SupportState.SUPPORTED, "covered", ("cov-span",)),)
 
 
+def test_retrieval_receives_the_evidence_level_cited_work_id_without_mutation():
+    seen = {}
+    seams, _calls = make_seams()
+
+    def retrieve(cited_meta, claim, *, after_date, as_of_date):
+        seen.update(cited_meta)
+        return RetrievalResult(
+            candidates=(candidate(),), adequacy="adequate", status="ok",
+            query_hash="qh")
+
+    seams["retrieve_superseding_candidates"] = retrieve
+    evidence = {
+        **EVIDENCE,
+        "cited_work_id": "12345",
+        "cited_meta": dict(EVIDENCE["cited_meta"]),
+    }
+    decide_f5(CLAIMS, SUPPORTED, evidence, policy=F5Policy(), **seams)
+
+    assert seen["cited_work_id"] == "12345"
+    assert "cited_work_id" not in evidence["cited_meta"]
+
+
 # --------------------------------------------------------------------------
 # Deterministic Sec 18a.6 comparability combination.
 # --------------------------------------------------------------------------

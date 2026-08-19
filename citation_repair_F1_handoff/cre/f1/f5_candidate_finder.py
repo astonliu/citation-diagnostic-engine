@@ -65,10 +65,11 @@ class CandidateFinderError(RuntimeError):
 class CandidateSearchResult:
     """One auditable search result consumed by ``make_retrieve_*``.
 
-    ``status`` is ``ok`` only when every attempted stream and every retained
-    metadata lookup answered.  ``partial`` preserves useful hits while ensuring
-    the downstream F5 layer cannot turn incomplete retrieval into a confident
-    negative.  ``failure`` means no stream produced a usable answer.
+    ``status`` is ``ok`` only when every planned stream and every retained
+    metadata lookup answered. A skipped stream is incomplete retrieval, not a
+    smaller successful protocol. ``partial`` preserves useful hits while
+    ensuring the downstream F5 layer cannot turn incomplete retrieval into a
+    confident negative. ``failure`` means no stream produced a usable answer.
     """
 
     hits: tuple[dict, ...]
@@ -452,6 +453,20 @@ class PubMedCandidateFinder:
                 self._write_cache("metadata", pmid, {"record": record})
         return records, missing
 
+    def fetch_metadata(self, pmid: str) -> "dict | None":
+        """Fetch one PubMed record for the live F5 seam/evidence builder.
+
+        Transport and parse failures raise :class:`CandidateFinderError`; an
+        answered lookup with no usable record returns ``None``. Keeping those
+        outcomes distinct prevents an outage from becoming evidence of absence.
+        """
+        value = str(pmid or "").strip()
+        if not _PMID_RE.fullmatch(value):
+            raise ValueError("pmid must contain decimal digits only")
+        records, _missing = self._fetch_metadata([value])
+        record = records.get(value)
+        return dict(record) if record is not None else None
+
     def search_candidates(self, cited_meta: dict, claim: str, *,
                           after_date: str, as_of_date: str,
                           cap: int = 50) -> CandidateSearchResult:
@@ -632,12 +647,13 @@ class PubMedCandidateFinder:
             hits = hits[:cap]
             truncated = True
 
-        partial = bool(errors or missing or any(
+        skipped = [s for s in streams if s["status"].startswith("skipped")]
+        partial = bool(errors or skipped or missing or any(
             e["reason"] == "date_boundary_uncertain" for e in exclusions))
         status = "partial" if partial else "ok"
         rationale = (
             f"{len(hits)} admissible later candidate(s) from "
-            f"{len(succeeded)}/{len(attempted)} answered PubMed streams; "
+            f"{len(succeeded)}/{len(streams)} planned PubMed streams answered; "
             f"excluded={len(exclusions)}; truncated={str(truncated).lower()}"
         )
         return CandidateSearchResult(

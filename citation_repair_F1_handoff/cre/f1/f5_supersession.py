@@ -1040,8 +1040,18 @@ class TemporalAssessorRun:
         cited_tier = self._cited_tier(cited_meta)
         record["cited_tier"] = cited_tier.value
 
-        # Retrieval.
-        result = self.retrieve(cited_meta, claim, after_date=cited_date, as_of_date=as_of_date)
+        # Retrieval. ``cited_work_id`` is an evidence-level field, while the
+        # retrieval seam historically received only ``cited_meta``.  A live
+        # finder therefore could not run its forward-citation stream unless a
+        # caller happened to duplicate the PMID inside the metadata dict.  Make
+        # the identifier explicit at the seam boundary without mutating the
+        # caller's evidence object.  A conflicting metadata value is replaced by
+        # the validated evidence-level identifier; there is one cited work for
+        # this assessment, not two competing authorities.
+        retrieval_meta = dict(cited_meta)
+        retrieval_meta["cited_work_id"] = cited_work_id
+        result = self.retrieve(
+            retrieval_meta, claim, after_date=cited_date, as_of_date=as_of_date)
         if not isinstance(result, RetrievalResult):
             raise ValueError("retrieve_superseding_candidates must return a RetrievalResult")
         record["retrieval_adequacy"] = result.adequacy
