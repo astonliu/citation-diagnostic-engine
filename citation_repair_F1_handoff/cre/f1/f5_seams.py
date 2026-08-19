@@ -54,11 +54,11 @@ CANDIDATE_CAP = 50
 #: but does not fit the deadline.
 RERANKER = "none"
 
-RETRIEVAL_PROTOCOL_VERSION = "f5_retrieval_v1"
+RETRIEVAL_PROTOCOL_VERSION = "f5_retrieval_v2"
 
 
 def retrieval_protocol(*, after_date: str = "", as_of_date: str = "",
-                       mesh_terms=()) -> dict:
+                       mesh_terms=(), candidate_cap: int = CANDIDATE_CAP) -> dict:
     """The protocol in READABLE form, for the manifest.
 
     ``retrieval_query_hash`` on the record is a hash, and a hash is not a protocol
@@ -66,10 +66,13 @@ def retrieval_protocol(*, after_date: str = "", as_of_date: str = "",
     recorded so a reader can tell what was and was not looked at."""
     return {
         "protocol_version": RETRIEVAL_PROTOCOL_VERSION,
-        "sources_queried": ["pubmed_esearch", "pubmed_elink_citedin"],
+        "sources_queried": [
+            "pubmed_esearch_claim", "pubmed_esearch_mesh",
+            "pubmed_pubmed_citedin",
+        ],
         "date_window": {"after": after_date, "as_of": as_of_date},
         "mesh_terms": list(mesh_terms),
-        "candidate_cap": CANDIDATE_CAP,
+        "candidate_cap": candidate_cap,
         "reranker": RERANKER,
         "structural_filter": [
             "publication date strictly after after_date",
@@ -129,6 +132,17 @@ UNCLASSIFIED_TIER = EvidenceTier.PREPRINT_UNREVIEWED
 def classify_evidence_tier_explained(meta: dict) -> "tuple[EvidenceTier, str]":
     """``(tier, basis)`` -- the basis says WHICH signal decided, or 'unclassified'."""
     meta = meta or {}
+    # CandidateWork carries the result of this same deterministic classifier
+    # because the production finder fetched publication types before the
+    # temporal assessor receives the smaller CandidateWork object.  Honour only
+    # an exact enum value; an invented hint falls through to the source metadata
+    # rules rather than becoming authority by assertion.
+    hint = meta.get("tier_hint")
+    if isinstance(hint, str):
+        try:
+            return EvidenceTier(hint), f"tier_hint:{hint}"
+        except ValueError:
+            pass
     pubtypes = [str(p).strip().lower() for p in (meta.get("publication_types") or [])]
     for needle, tier in _PUBTYPE_TIER:
         if any(needle == p for p in pubtypes):
@@ -324,8 +338,10 @@ def make_retrieve_superseding_candidates(search_candidates, *, cap: int = CANDID
     def retrieve_superseding_candidates(cited_meta: dict, claim: str, *,
                                         after_date: str, as_of_date: str) -> RetrievalResult:
         mesh = list((cited_meta or {}).get("mesh_terms") or [])
-        executed_protocols.append(retrieval_protocol(
-            after_date=after_date, as_of_date=as_of_date, mesh_terms=mesh))
+        protocol = retrieval_protocol(
+            after_date=after_date, as_of_date=as_of_date, mesh_terms=mesh,
+            candidate_cap=cap)
+        executed_protocols.append(protocol)
         try:
             hits = search_candidates(cited_meta, claim, after_date=after_date,
                                      as_of_date=as_of_date, cap=cap)
@@ -337,8 +353,30 @@ def make_retrieve_superseding_candidates(search_candidates, *, cap: int = CANDID
             return RetrievalResult((), "empty", "failure",
                                    rationale="retrieval returned nothing at all")
 
+        # The production finder returns an auditable CandidateSearchResult.
+        # Keep accepting a plain iterable for offline fixtures and third-party
+        # adapters, but do not erase partial/truncated production retrieval into
+        # an apparently complete search.
+        search_status = getattr(hits, "status", "ok")
+        query_hash = str(getattr(hits, "query_hash", "") or "")
+        truncated = bool(getattr(hits, "truncated", False))
+        search_rationale = str(getattr(hits, "rationale", "") or "")
+        streams = getattr(hits, "streams", None)
+        rows = getattr(hits, "hits", hits)
+        if search_status not in {"ok", "partial", "failure"}:
+            return RetrievalResult(
+                (), "empty", "failure", query_hash=query_hash,
+                rationale=f"retrieval returned invalid status {search_status!r}")
+        if streams is not None:
+            protocol["executed_streams"] = list(streams)
+        if query_hash:
+            protocol["query_hash"] = query_hash
+        protocol["truncated"] = truncated
+
         seen, candidates = set(), []
-        for hit in hits:
+        for hit in rows:
+            if not isinstance(hit, dict):
+                continue
             work_id = str(hit.get("id") or "").strip()
             pub_date = str(hit.get("pub_date") or "").strip()
             if not work_id or work_id in seen:
@@ -346,21 +384,41 @@ def make_retrieve_superseding_candidates(search_candidates, *, cap: int = CANDID
             if after_date and pub_date and pub_date <= after_date:
                 continue          # strictly after, per the structural filter
             seen.add(work_id)
-            candidates.append(CandidateWork(id=work_id, pub_date=pub_date))
+            authors = tuple(str(x).strip() for x in (hit.get("authors") or ())
+                            if str(x).strip())
+            mesh_terms = tuple(str(x).strip() for x in
+                               (hit.get("mesh") or hit.get("mesh_terms") or ())
+                               if str(x).strip())
+            tier_hint = hit.get("tier_hint")
+            if tier_hint is None:
+                tier_hint = classify_evidence_tier(hit).value
+            candidates.append(CandidateWork(
+                id=work_id,
+                title=str(hit.get("title") or ""),
+                abstract=str(hit.get("abstract") or ""),
+                pub_date=pub_date,
+                authors=authors,
+                mesh=mesh_terms,
+                tier_hint=str(tier_hint),
+            ))
             if len(candidates) >= cap:
                 break
 
         if not candidates:
             return RetrievalResult(
-                (), "empty", "ok",
-                rationale=("no admissible later evidence was found under this "
+                (), "empty", search_status, query_hash=query_hash,
+                rationale=(search_rationale or
+                           "no admissible later evidence was found under this "
                            "protocol; this is NOT a finding that none exists"))
-        adequacy = "adequate" if len(candidates) < cap else "inadequate"
+        adequacy = ("adequate" if search_status == "ok" and not truncated
+                    and len(candidates) < cap else "inadequate")
         return RetrievalResult(
-            tuple(candidates), adequacy, "ok",
-            rationale=(f"{len(candidates)} candidate(s) under {RETRIEVAL_PROTOCOL_VERSION}"
-                       + (f"; CAPPED at {cap}, more may exist" if adequacy == "inadequate"
-                          else "")))
+            tuple(candidates), adequacy, search_status, query_hash=query_hash,
+            rationale=(search_rationale or
+                       f"{len(candidates)} candidate(s) under "
+                       f"{RETRIEVAL_PROTOCOL_VERSION}"
+                       + (f"; CAPPED/incomplete at {cap}, more may exist"
+                          if adequacy == "inadequate" else "")))
     retrieve_superseding_candidates.executed_protocols = executed_protocols
     return retrieve_superseding_candidates
 
