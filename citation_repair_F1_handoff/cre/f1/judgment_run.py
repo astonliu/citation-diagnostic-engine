@@ -118,6 +118,7 @@ from .f7_entity import (
     f7_reachability,
     hold_reason_histogram,
     make_entity_assessor,
+    validate_f7_record,
 )
 # The opt-in full-text coverage path (DEC-030/032). Both live OUTSIDE the frozen
 # substrate for the same reason coverage_aggregate does: band_prompts.py cannot be
@@ -564,7 +565,12 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
     if scope["status"] == marker_scope.SCOPE_SCOPED:
         item["claim_scope_id"] = scope["scope_id"]
     if marker_scope.should_record(scope):
-        rec["marker_scope"] = {k: v for k, v in scope.items() if k != "claims"}
+        scope_record = {k: v for k, v in scope.items() if k != "claims"}
+        rec["marker_scope"] = scope_record
+        # F7's evidence builder consumes the exact post-scope item later in
+        # Phase 2.  It needs the decision, not merely the cluster geometry, so a
+        # refused/ambiguous scope can never be mistaken for a successful one.
+        item["marker_scope"] = dict(scope_record)
     if scope_counts is not None:
         marker_scope.tally(scope_counts, scope, item.get("citing_pmcid") or "")
     if not fulltext_path:
@@ -778,11 +784,14 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
     # quarantine rather than being swallowed into a fabricated negative.
     entities: tuple = ()
     if f7_seams is not None and f7_evidence_builder is not None:
+        evidence_context = f7_evidence_builder(item)
         entity_assessor = make_entity_assessor(
             **f7_seams,
-            evidence_context=f7_evidence_builder(item),
+            evidence_context=evidence_context,
             policy=f7_policy if f7_policy is not None else F7Policy())
         entities = tuple(entity_assessor(claims))
+        for record in entity_assessor.records:
+            validate_f7_record(record, evidence_context)
         rec["f7_records"] = list(entity_assessor.records)
 
     own_buckets = jb.item_buckets(item)
@@ -1011,7 +1020,8 @@ def _module_hashes(fulltext_path: bool, f5_seams, f7_seams) -> dict:
     # so an F7 run that does not hash f7_entity records the governing module of
     # its headline number nowhere. Same defect class the f5 block fixed.
     if f7_seams is not None:
-        names.append("cre.f1.f7_entity")
+        names += ["cre.f1.f7_entity", "cre.f1.f7_evidence_builder",
+                  "cre.f1.f7_seams"]
     out: dict = {}
     for name in names:
         try:
@@ -1714,6 +1724,10 @@ def run_natural_judgment(
         raise ValueError(
             "f5_seams and f5_evidence_builder must be supplied together; a "
             "half-wired F5 path cannot publish coherent provenance")
+    if (f7_seams is None) != (f7_evidence_builder is None):
+        raise ValueError(
+            "f7_seams and f7_evidence_builder must be supplied together; a "
+            "half-wired F7 path cannot publish coherent provenance")
     f5_runtime = {"retrieval_calls": 0, "attestation_calls": 0,
                   "judge_calls": 0, "retrieval_protocols": []}
     if f5_seams is not None:
@@ -1756,6 +1770,11 @@ def run_natural_judgment(
         from .f7_entity import validate_f7_policy
         f7_reachability_report = validate_f7_policy(
             f7_policy if f7_policy is not None else F7Policy())
+        if production:
+            from .f7_seams import validate_production_f7_configuration
+            validate_production_f7_configuration(
+                seams=f7_seams, evidence_builder=f7_evidence_builder,
+                policy=f7_policy)
     # The full-text path needs BOTH seams, validated UP FRONT like every other
     # config defect -- before any output file exists, so it can never be mistaken
     # for a per-pair quarantine. Supplying only one would either judge full text
@@ -1987,8 +2006,10 @@ def run_natural_judgment(
     worker_pool = (ThreadPoolExecutor(
         max_workers=max_workers, thread_name_prefix="cre-judgment")
         if max_workers > 1 else None)
+    f7_parallel_safe = (f7_seams is None
+                        or getattr(f7_seams, "thread_safe", False) is True)
     phase2_parallel = (
-        worker_pool is not None and f5_seams is None and f7_seams is None)
+        worker_pool is not None and f5_seams is None and f7_parallel_safe)
 
     def coverage_attempt(item: dict, claims_cache, order: int) -> tuple:
         # Each worker owns its tally.  Shared counter mutation would make a
@@ -2320,6 +2341,8 @@ def run_natural_judgment(
             "cocitation_barrier_preserved": True,
             "same_sentence_extraction": "ordered_single_flight",
             "f5_f7_phase2_serialized": not phase2_parallel,
+            **({"f7_thread_safe_parallel": True}
+               if f7_seams is not None and phase2_parallel else {}),
             "quality_invariants": (
                 "Prompts, models, evidence scope, parsers, policies, verifier "
                 "gates, per-sentence extraction reuse, terminal filtering, "

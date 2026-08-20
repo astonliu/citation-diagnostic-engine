@@ -79,13 +79,13 @@ CallLLM = Callable[[str], str]
 # wiring, not a measurement, and any F7 count from this package is a count over
 # fixtures until this flag flips.
 # --------------------------------------------------------------------------
-PRODUCTION_F7_EVIDENCE_BUILDER = False
+PRODUCTION_F7_EVIDENCE_BUILDER = True
 PRODUCTION_F7_BUILDER_NOTE = (
-    "F7 has NO production evidence builder in this package: EvidenceContext is "
-    "constructed only in the F7 tests, so no F7 number here was computed over a "
-    "real paper. The seams, prompts, locks and audit records are real and "
-    "exercised; the input path is not built. Do not read any F7 rate from this "
-    "run as a measurement until this field is true."
+    "F7 has a production evidence builder in f7_evidence_builder.py. It consumes "
+    "the exact post-marker-scope run item, cross-binds the cited PMID to the "
+    "resolved PMCID, supplies only Results/Methods/table/figure text, and records "
+    "excluded sections by hash only. This capability flag does not mean F7 was "
+    "wired on a particular run; read it with f7.wired and seam_status.F7.wired."
 )
 
 
@@ -1019,6 +1019,10 @@ def validate_f7_record(record: dict, evidence_context: EvidenceContext) -> None:
         raise ValueError("citing_sentence_sha256 does not match the evidence context (replay)")
     if _evidence_context_sha256(evidence_context) != record["evidence_context_sha256"]:
         raise ValueError("evidence_context_sha256 does not match the evidence context (replay)")
+    if record.get("paper_resolved") is not evidence_context.paper_resolved:
+        raise ValueError("record paper_resolved does not match the evidence context (replay)")
+    if record.get("resolved_work_id") != evidence_context.resolved_work_id:
+        raise ValueError("record resolved_work_id does not match the evidence context (replay)")
     ctx_hashes = {s.content_sha256: s.text for s in evidence_context.body_sections}
     for used in record["used_section_sha256s"]:
         if used not in ctx_hashes or _sha256_text(ctx_hashes[used]) != used:
@@ -1173,7 +1177,8 @@ class EntityAssessorRun:
         # matches this tuple; without it clause-level attribution is unavailable.
         clause_ref = next(
             (c for c in ctx.claim_clause_refs
-             if c.claim_index == claim_index and c.clause_span == claimed_tuple["clause_span"]),
+             if c.claim_index == claim_index
+             and claimed_tuple["clause_span"] in c.clause_span),
             None,
         )
         if clause_ref is None:

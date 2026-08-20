@@ -328,13 +328,10 @@ def test_the_f7_block_no_longer_claims_wired_with_no_seams():
 
 
 def test_f7_wired_agrees_with_seam_status(tmp_path, monkeypatch):
-    """Seams supplied, no evidence builder: a real configuration, in which F7
-    cannot run. Both fields now come from ONE expression, so the manifest can no
-    longer say wired=true and wired=false about the same seam."""
-    manifest = f7_full_run(tmp_path, monkeypatch, f7_evidence_builder=None)
-    assert manifest["f7"]["wired"] is False
-    assert manifest["seam_status"]["F7"]["wired"] is False
-    assert manifest["f7"]["evidence_context_supplied"] is False
+    """A half-wired F7 is a configuration defect, not an unwired run."""
+    with pytest.raises(ValueError, match="half-wired F7"):
+        f7_full_run(tmp_path, monkeypatch, f7_evidence_builder=None)
+    assert not (tmp_path / "out" / "judgment_predictions.jsonl").exists()
 
 
 def test_a_fully_wired_run_agrees_the_other_way(tmp_path, monkeypatch):
@@ -356,16 +353,14 @@ def test_the_manifest_names_the_locked_types_not_just_their_digest(
     assert manifest["seam_status"]["F7"]["authorities_locked_types"] == ["gene"]
 
 
-def test_the_manifest_states_f7_has_no_production_evidence_builder(
+def test_the_manifest_states_f7_has_a_production_evidence_builder(
         tmp_path, monkeypatch):
-    """EvidenceContext is constructed only in this package's tests. Until that
-    changes, every F7 number is a number over fixtures, and the manifest says so
-    rather than leaving a reader to infer it from a builder they cannot see."""
+    """The capability flag is true only after the tested real adapter exists."""
     manifest = f7_full_run(tmp_path, monkeypatch)
-    assert PRODUCTION_F7_EVIDENCE_BUILDER is False
-    assert manifest["f7"]["production_evidence_builder"] is False
-    assert "no production evidence builder" in manifest["f7"]["production_note"].lower()
-    assert manifest["seam_status"]["F7"]["production_evidence_builder"] is False
+    assert PRODUCTION_F7_EVIDENCE_BUILDER is True
+    assert manifest["f7"]["production_evidence_builder"] is True
+    assert "post-marker-scope" in manifest["f7"]["production_note"]
+    assert manifest["seam_status"]["F7"]["production_evidence_builder"] is True
 
 
 def test_reportable_false_is_annotated_as_not_a_fault_report(tmp_path, monkeypatch):

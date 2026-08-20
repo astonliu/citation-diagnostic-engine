@@ -66,6 +66,7 @@ GOVERNING_MODULES = (
     "judgment_run.py", "judgment_band.py", "judgment_engine.py",
     "band_prompts.py", "parser.py", "schema.py", "f3_provenance.py",
     "f4_strength.py", "f7_entity.py", "preband_contract.py",
+    "f7_evidence_builder.py", "f7_seams.py",
     "parser_versions.py", "coverage_prompts_v3.py", "coverage_aggregate.py",
     "f5_activation.py", "f5_candidate_screen.py", "f5_evidence_store.py", "f5_notice.py",
     "f5_study_cluster.py", "f5_controversy_bundle.py",
@@ -582,7 +583,9 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
            model: str, authorized_models, adapter_receipt,
            judge_model: str = "", preregistration_amendment: str = "",
            preregistration_scope_ruling=None,
-           temperature=None, assistant_prefill=None, **run_kwargs) -> dict:
+           temperature=None, assistant_prefill=None,
+           f7_seams=None, f7_evidence_builder=None, f7_policy=None,
+           **run_kwargs) -> dict:
     """Verify every precondition, run in production mode, verify the receipt.
 
     Returns the run manifest with a ``launch_receipt`` block. Raises
@@ -598,6 +601,26 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
     if model not in allowed:
         raise LaunchRefused(
             f"model {model!r} is not in the DECISION-backed allowlist {allowed}")
+
+    # F7 is either explicitly unwired (all three absent) or fully production
+    # wired.  Validate before tree inspection and, critically, before the run
+    # can create an output directory.
+    f7_parts = (f7_seams, f7_evidence_builder, f7_policy)
+    if any(part is not None for part in f7_parts):
+        if not all(part is not None for part in f7_parts):
+            raise LaunchRefused(
+                "production F7 requires seams, evidence builder, and locked policy "
+                "together; otherwise leave all three explicitly unwired")
+        from .f7_seams import validate_production_f7_configuration
+        try:
+            validate_production_f7_configuration(
+                seams=f7_seams, evidence_builder=f7_evidence_builder,
+                policy=f7_policy, adapter_receipt=adapter_receipt)
+        except ValueError as exc:
+            raise LaunchRefused(f"production F7 configuration invalid: {exc}") from exc
+        if f7_policy.generator_model_id != model:
+            raise LaunchRefused(
+                "production F7 generator_model_id must equal the authorized run model")
 
     # --- temperature governance (DEC-046B pin / DEC-070 unsupported) ----
     temperature_governance = verify_temperature_governance(
@@ -627,6 +650,8 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         corpus_manifest_path=corpus_manifest_path,
         code_commit=tree["code_commit"], model=model,
         temperature=resolved_temperature,
+        f7_seams=f7_seams, f7_evidence_builder=f7_evidence_builder,
+        f7_policy=f7_policy,
         **({"assistant_prefill": resolved_prefill}
            if resolved_prefill is not None else {}),
         production=True, **run_kwargs)
