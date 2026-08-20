@@ -414,6 +414,9 @@ class Reference:
     source_pmcid: str = ""
     source_pmid: str = ""
     source_title: str = ""
+    # Nearest JATS <sec> title/type containing the first citance. Empty means the
+    # source section could not be established; consumers must not guess one.
+    citance_source_section: str = ""
     # CO-CITATION GROUP (the sentence occurrence this reference was cited in).
     #
     # ``citance`` alone is what the band judged against, and it is attached to

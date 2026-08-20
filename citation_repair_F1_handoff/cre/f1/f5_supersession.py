@@ -83,6 +83,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional, Sequence
 
+from .f5_activation import activation_decision_from_dict, decide_f5_activation
 from .judgment_engine import ClaimSupport, SupportState, TemporalAssessment, TemporalState
 
 # Seam type aliases (documentation only). ``judge_contradiction`` returns the
@@ -722,6 +723,20 @@ class TemporalAssessorRun:
         self.policy = policy
         self.records: list[dict] = []
 
+    def _claim_meta(self, claim_index: int) -> dict:
+        """Read either in-memory integer keys or JSON-round-tripped string keys."""
+        rows = self.evidence.get("claim_meta") or {}
+        integer_value = rows.get(claim_index)
+        string_value = rows.get(str(claim_index))
+        if integer_value is not None and string_value is not None:
+            if integer_value != string_value:
+                raise ValueError(
+                    "evidence['claim_meta'] has conflicting integer/string keys "
+                    f"for claim {claim_index}")
+            return dict(integer_value)
+        value = integer_value if integer_value is not None else string_value
+        return dict(value) if value is not None else {}
+
     # -- helpers ------------------------------------------------------------
     def _cited_tier(self, cited_meta: dict) -> EvidenceTier:
         return _tier_from(self.classify_tier(cited_meta), "cited tier")
@@ -957,17 +972,18 @@ class TemporalAssessorRun:
         return True
 
     # -- per-claim ----------------------------------------------------------
-    def _assess_claim(self, claim: str, claim_index: int) -> dict:
+    def _assess_claim(self, claim: str, claim_index: int, activation) -> dict:
         policy = self.policy
         cited_work_id = self.evidence["cited_work_id"]
         cited_meta = self.evidence["cited_meta"]
         cited_date = self.evidence["cited_date"]
         as_of_date = self.evidence["as_of_date"]
-        claim_meta = self.evidence.get("claim_meta", {}).get(claim_index, {})
+        claim_meta = self._claim_meta(claim_index)
 
         record: dict = {
             "claim_index": claim_index,
             "claim_text": claim,
+            "activation": activation.to_dict(),
             "claim_population_text": claim_meta.get("claim_population_text"),
             "intervention_or_exposure": claim_meta.get("intervention_or_exposure"),
             "comparator": claim_meta.get("comparator"),
@@ -1140,12 +1156,31 @@ class TemporalAssessorRun:
         self.records = []
         chosen: Optional[TemporalAssessment] = None
         any_unjudgeable = False
+        any_assessed = False
+        any_not_applicable = False
         for index, (claim, row) in enumerate(zip(claim_values, support_rows)):
             if row.state is not SupportState.SUPPORTED:
                 # SUPPORTED-only F5 target (Rec D). Passthrough, not assessed.
                 self.records.append({"claim_index": index, "assessed": False})
                 continue
-            record = self._assess_claim(claim, index)
+            activation = decide_f5_activation(claim, self._claim_meta(index))
+            if not activation.activates:
+                any_not_applicable = True
+                record = {
+                    "claim_index": index,
+                    "claim_text": claim,
+                    "assessed": False,
+                    "not_applicable": True,
+                    "activation": activation.to_dict(),
+                    "temporal_state": None,
+                    "reason": f"not_applicable:{activation.reason_code}",
+                    "reportable": F5_REPORTABLE,
+                }
+                record["record_sha256"] = record_sha256(record)
+                self.records.append(record)
+                continue
+            any_assessed = True
+            record = self._assess_claim(claim, index, activation)
             self.records.append(record)
             state = record["temporal_state"]
             if state == "QUALIFYING_CONTRADICTION" and chosen is None:
@@ -1168,6 +1203,13 @@ class TemporalAssessorRun:
             return TemporalAssessment(
                 state=TemporalState.UNJUDGEABLE,
                 rationale="at least one supported claim held for temporal review")
+        if not any_assessed and any_not_applicable:
+            # The frozen engine has no NOT_APPLICABLE temporal state.  Its neutral
+            # carrier is NO_QUALIFYING_CONTRADICTION, while the durable records and
+            # manifest explicitly distinguish this from a searched negative.
+            return TemporalAssessment(
+                state=TemporalState.NO_QUALIFYING_CONTRADICTION,
+                rationale="no F5-applicable supported claim")
         return TemporalAssessment(
             state=TemporalState.NO_QUALIFYING_CONTRADICTION,
             rationale="no qualifying temporal contradiction on any supported claim")
@@ -1237,6 +1279,16 @@ def _validate_evidence(evidence: dict) -> None:
     aod = _parse_date(evidence["as_of_date"], "evidence['as_of_date']")
     if cited >= aod:
         raise ValueError("evidence: cited_date must be strictly before as_of_date")
+    claim_meta = evidence.get("claim_meta", {})
+    if not isinstance(claim_meta, dict):
+        raise ValueError("evidence['claim_meta'] must be a dict when supplied")
+    for key, value in claim_meta.items():
+        if not ((isinstance(key, int) and not isinstance(key, bool) and key >= 0)
+                or (isinstance(key, str) and key.isdigit())):
+            raise ValueError(
+                "evidence['claim_meta'] keys must be nonnegative claim indices")
+        if not isinstance(value, dict):
+            raise ValueError("evidence['claim_meta'] values must be dicts")
 
 
 # --------------------------------------------------------------------------
@@ -1320,7 +1372,17 @@ def validate_f5_record(record: dict, policy: F5Policy) -> None:
     if not isinstance(record, dict):
         raise ValueError("record must be a dict")
     if record.get("assessed") is False:
-        return  # passthrough (non-SUPPORTED) row carries no derivable facts
+        if "activation" not in record:
+            return  # legacy non-SUPPORTED passthrough has no activation decision
+        activation = activation_decision_from_dict(record["activation"])
+        if activation.applicability != "not_applicable":
+            raise ValueError(
+                "an activation-bearing assessed=False record must be not_applicable")
+        if record.get("not_applicable") is not True:
+            raise ValueError("not-applicable activation record missing marker")
+        if record.get("record_sha256") != record_sha256(record):
+            raise ValueError("record_sha256 mismatch (tampered)")
+        return
     if not isinstance(policy, F5Policy):
         raise ValueError("policy must be an F5Policy")
     for key in ("temporal_state", "f5_path", "candidate_assessments",

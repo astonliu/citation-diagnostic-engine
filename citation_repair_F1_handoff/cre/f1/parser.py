@@ -319,6 +319,31 @@ def _sentence_for(pos: int, spans) -> str:
 _RANGE_DASH_RE = re.compile(r"^\s*[-‐‑‒–—]\s*$")
 
 
+def _source_section(block, parents) -> str:
+    """Nearest explicit JATS ``sec-type``, else nearest title, else empty.
+
+    An inner subsection title must not erase a typed parent.  For example,
+    ``Discussion > Previous Results`` remains Discussion; and
+    ``sec-type='methods'`` with title ``Study Design`` remains Methods.
+    """
+    node = block
+    titles: list[str] = []
+    while node is not None:
+        if _localname(node.tag) == "sec":
+            sec_type = str(node.get("sec-type") or "").strip()
+            title = ""
+            for child in node:
+                if _localname(child.tag) == "title":
+                    title = _text(child)
+                    break
+            if title:
+                titles.append(title)
+            if sec_type:
+                return sec_type
+        node = parents.get(node)
+    return " > ".join(reversed(titles))
+
+
 def _innermost_blocks(root):
     """Sentence-bearing blocks with no nested block, serialized once each.
 
@@ -326,6 +351,7 @@ def _innermost_blocks(root):
     make TWO passes over the same data -- one to validate the article's
     numbering, one to assign -- without walking or re-serializing the tree
     twice."""
+    parents = {child: parent for parent in root.iter() for child in parent}
     for block in root.iter():
         if _localname(block.tag) not in _BLOCK_TAGS:
             continue
@@ -339,7 +365,7 @@ def _innermost_blocks(root):
             continue
         text, markers = _serialize_with_markers(block)
         if markers:
-            yield text, markers
+            yield text, markers, _source_section(block, parents)
 
 
 def _positional_numbering(serialized, refs_by_id, ordered_ref_ids) -> dict:
@@ -361,7 +387,7 @@ def _positional_numbering(serialized, refs_by_id, ordered_ref_ids) -> dict:
     if not by_ordinal:
         return {}
     attested = 0
-    for _text, markers in serialized:
+    for _text, markers, _section in serialized:
         for _pos, rids, mtext in markers:
             label = mtext.strip()
             if not label.isdigit() or len(rids) != 1:
@@ -530,10 +556,11 @@ def link_citances(root, refs_by_id: dict, ordered_ref_ids=()) -> None:
     # before any sentence is clustered -- same all-or-nothing discipline as
     # _positional_numbering, and for the same reason.
     style = marker_scope.detect_citation_style(
-        [mtext for _text, markers in serialized for _pos, _rids, mtext in markers])
+        [mtext for _text, markers, _section in serialized
+         for _pos, _rids, mtext in markers])
     clustering = style == marker_scope.CITATION_STYLE_NUMERIC
     group_seq = 0
-    for text, markers in serialized:
+    for text, markers, source_section in serialized:
         partition_failures: list[dict] = []
         spans = _sentence_spans(text, partition_failures)
         if partition_failures:
@@ -605,6 +632,7 @@ def link_citances(root, refs_by_id: dict, ordered_ref_ids=()) -> None:
                     if ref is None or ref.citance:    # first citance wins
                         continue
                     ref.citance = sentence
+                    ref.citance_source_section = source_section
                     ref.citance_citation_style = style
                     ref.citance_marker_cluster_index = (
                         -1 if rid in repeated_rids
@@ -618,6 +646,7 @@ def link_citances(root, refs_by_id: dict, ordered_ref_ids=()) -> None:
                 if ref is None or ref.citance:        # first citance still wins
                     continue
                 ref.citance = sentence
+                ref.citance_source_section = source_section
                 ref.citance_citation_style = style
                 # A recovered interior belongs to the cluster of the endpoint
                 # that OPENED its range: "16-18" renders as one adjacent run, so

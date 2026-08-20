@@ -578,12 +578,44 @@ def make_f5_evidence_builder(fetch_meta, *, as_of_date: str):
         cited_meta = dict(meta)
         cited_meta["pmid"] = cited_work_id
         cited_meta["cited_work_id"] = cited_work_id
-        return {
+        evidence = {
             "cited_work_id": cited_work_id,
             "cited_meta": cited_meta,
             "cited_date": cited_date,
             "as_of_date": as_of_date,
         }
+        # Activation ownership/section facts are optional and claim-indexed.  The
+        # runner does not currently possess a trustworthy source-section field,
+        # so it must never infer one from sentence text or fabricate a default.
+        # A parser/fixture that does possess those facts supplies this explicitly;
+        # absent means the activation gate returns ``uncertain`` and continues.
+        claim_meta = item.get("f5_claim_meta")
+        source_section = item.get("citing_source_section")
+        if source_section is not None and (
+                not isinstance(source_section, str) or not source_section.strip()):
+            raise ValueError(
+                "item['citing_source_section'] must be a nonblank string when supplied")
+        if claim_meta is None and isinstance(source_section, str):
+            claims = item.get("atomic_claims") or []
+            if not isinstance(claims, list):
+                raise ValueError("item['atomic_claims'] must be a list")
+            claim_meta = {
+                index: {"source_section": source_section.strip()}
+                for index in range(len(claims))
+            }
+        if claim_meta is not None:
+            if not isinstance(claim_meta, dict):
+                raise ValueError("item['f5_claim_meta'] must be a dict when supplied")
+            copied = {}
+            for key, value in claim_meta.items():
+                if not isinstance(value, dict):
+                    raise ValueError(
+                        "item['f5_claim_meta'] values must be dicts")
+                copied[key] = dict(value)
+                if isinstance(source_section, str):
+                    copied[key].setdefault("source_section", source_section.strip())
+            evidence["claim_meta"] = copied
+        return evidence
 
     return build
 

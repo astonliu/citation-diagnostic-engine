@@ -364,6 +364,8 @@ def _new_record(item: dict) -> dict:
         "citing_pmcid": item.get("citing_pmcid"),
         "citing_pmid": item.get("citing_pmid"),
         "citing_sentence": item.get("citing_sentence"),
+        **({"citing_source_section": item["citing_source_section"]}
+           if item.get("citing_source_section") else {}),
         "cited_pmid": item.get("cited_pmid"),
         "cited_claimed": c,
         "cited_is_review": item.get("cited_is_review"),
@@ -946,7 +948,8 @@ def _module_hashes(fulltext_path: bool, f5_seams, f7_seams) -> dict:
         names += ["cre.f1.coverage_prompts_v3", "cre.f1.coverage_aggregate",
                   "cre.f1.fulltext_reader", "cre.f1.sentence_spans"]
     if f5_seams is not None:
-        names += ["cre.f1.f5_supersession", "cre.f1.f5_contradiction_prompt",
+        names += ["cre.f1.f5_activation", "cre.f1.f5_supersession",
+                  "cre.f1.f5_contradiction_prompt",
                   "cre.f1.f5_seams", "cre.f1.f5_candidate_finder",
                   "cre.f1.f5_discovery_queue"]
     # F7 can OWN the published label (it rides highest in the engine ordering),
@@ -1198,6 +1201,7 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
     (251/732) of pooled candidates assumed to hold no evidence actually held it."""
     from .f5_seams import CANDIDATE_CAP, RERANKER
     from .f5_supersession import F5Policy
+    from .f5_activation import ACTIVATION_SCHEMA_VERSION
     from .f5_contradiction_prompt import RESPONSE_PARSER_VERSION
     from .f5_discovery_queue import (
         QUEUE_VERSION, disposition_counts, negative_reason)
@@ -1220,6 +1224,21 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
         reason = negative_reason(str(status), str(adequacy))
         negative_counts[reason] = negative_counts.get(reason, 0) + 1
 
+    activation_records = [
+        record for record in (f5_records or [])
+        if isinstance(record.get("activation"), dict)
+    ]
+    activation_applicability_counts: dict[str, int] = {}
+    activation_reason_counts: dict[str, int] = {}
+    for record in activation_records:
+        activation = record["activation"]
+        applicability = str(activation.get("applicability"))
+        reason_code = str(activation.get("reason_code"))
+        activation_applicability_counts[applicability] = (
+            activation_applicability_counts.get(applicability, 0) + 1)
+        activation_reason_counts[reason_code] = (
+            activation_reason_counts.get(reason_code, 0) + 1)
+
     policy = f5_policy if f5_policy is not None else F5Policy()
     protocols = list((f5_runtime or {}).get("retrieval_protocols") or [])
     attestation_calls = int((f5_runtime or {}).get("attestation_calls") or 0)
@@ -1229,6 +1248,20 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
         "reportable": F5_REPORTABLE,
         "contradiction_prompt_version": policy.contradiction_prompt_version,
         "response_parser_version": RESPONSE_PARSER_VERSION,
+        "activation_schema_version": ACTIVATION_SCHEMA_VERSION,
+        "activation_applicability_counts": dict(sorted(
+            activation_applicability_counts.items())),
+        "activation_reason_counts": dict(sorted(activation_reason_counts.items())),
+        "activation_claims_considered": len(activation_records),
+        "activation_claims_activated": sum(
+            count for applicability, count
+            in activation_applicability_counts.items()
+            if applicability in {"eligible", "uncertain"}),
+        "activation_claims_searched": sum(
+            1 for record in activation_records
+            if record.get("retrieval_status") is not None),
+        "activation_not_applicable_claims": activation_applicability_counts.get(
+            "not_applicable", 0),
         "comparability_policy_version": policy.comparability_policy_version,
         "retrieval_calls": int((f5_runtime or {}).get("retrieval_calls") or 0),
         "retrieval_status_counts": tally("retrieval_status"),
