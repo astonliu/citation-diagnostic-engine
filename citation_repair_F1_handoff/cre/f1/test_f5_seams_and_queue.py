@@ -51,7 +51,7 @@ def test_tier_falls_back_to_mesh_only_when_publication_type_does_not_decide():
 def test_retraction_is_detected():
     check = s.make_check_formal_notice(
         lambda w: {"publication_types": ["Retracted Publication"],
-                   "notice_date": "2022-01-01"})
+                   "notice_date": "2022-01-01", "id": w})
     status = check("W1", as_of_date="2024-01-01")
     assert status.notice_kind == "retraction"
 
@@ -61,7 +61,7 @@ def test_notice_dated_after_as_of_date_is_not_applied():
     a function of the date you check. A later notice did not exist yet."""
     check = s.make_check_formal_notice(
         lambda w: {"publication_types": ["Retracted Publication"],
-                   "notice_date": "2025-06-01"})
+                   "notice_date": "2025-06-01", "id": w})
     assert check("W1", as_of_date="2024-01-01").notice_kind == "none"
 
 
@@ -113,6 +113,12 @@ def test_the_cap_is_recorded_and_a_capped_result_is_inadequate_not_adequate():
     assert s.retrieval_protocol()["candidate_cap"] == s.CANDIDATE_CAP
 
 
+@pytest.mark.parametrize("cap", [0, -1, True, 1.5])
+def test_candidate_cap_rejects_nonpositive_or_noninteger_values(cap):
+    with pytest.raises(ValueError, match="positive integer"):
+        s.make_retrieve_superseding_candidates(lambda *_a, **_k: [], cap=cap)
+
+
 def test_duplicate_hits_are_collapsed_before_RetrievalResult_rejects_them():
     hits = [{"id": "W1", "pub_date": "2021-01-01"},
             {"id": "W1", "pub_date": "2022-01-01"}]
@@ -157,7 +163,8 @@ def test_judge_resolves_selected_ids_so_the_verbatim_check_passes_by_constructio
     def fake_complete(prompt):
         assert "s1" in prompt and "[abstract]" in prompt
         return json.dumps({
-            "directional_contradiction": True, "claim_match": "match",
+            "directional_contradiction": True,
+            "relation_to_cited_finding": "opposes", "claim_match": "match",
             "outcome_relation": "same", "population_relation": "equivalent",
             "cited_direction": "decrease", "candidate_direction": "no_effect",
             "magnitude": "large", "confidence": 0.8, "scope_mismatch_axis": "none",
@@ -178,7 +185,9 @@ def test_unresolvable_span_is_logged_as_a_miss_and_does_not_raise():
 
     def fake_complete(prompt):
         return json.dumps({
-            "directional_contradiction": False, "claim_match": "uncertain",
+            "directional_contradiction": False,
+            "relation_to_cited_finding": "uncertain",
+            "claim_match": "uncertain",
             "outcome_relation": "uncertain", "population_relation": "unclear",
             "cited_direction": "unclear", "candidate_direction": "unclear",
             "magnitude": "unclear", "confidence": 0.1, "scope_mismatch_axis": "unclear",
@@ -192,6 +201,182 @@ def test_unresolvable_span_is_logged_as_a_miss_and_does_not_raise():
     assert len(misses) == 2
 
 
+def test_live_judge_transport_rejects_duplicate_keys_before_resolution():
+    import json
+    cited = f5.ComparabilitySource(abstract="Earlier result.")
+    candidate = f5.ComparabilitySource(results="Later opposite result.")
+    body = {
+        "directional_contradiction": True,
+        "relation_to_cited_finding": "opposes",
+        "claim_match": "match", "outcome_relation": "same",
+        "population_relation": "equivalent",
+        "cited_direction": "increase", "candidate_direction": "decrease",
+        "magnitude": "large", "confidence": 0.9,
+        "scope_mismatch_axis": "none",
+        "cited_finding_span": {"label": "abstract", "sentence_ids": ["s1"]},
+        "candidate_contradiction_span": {
+            "label": "results", "sentence_ids": ["s1"]},
+    }
+    raw = json.dumps(body).replace(
+        '"relation_to_cited_finding": "opposes",',
+        '"relation_to_cited_finding": "confirms", '
+        '"relation_to_cited_finding": "opposes",')
+    with pytest.raises(ValueError, match="duplicate JSON key"):
+        s.make_judge_contradiction(lambda _prompt: raw)(
+            cited, candidate, "claim")
+
+
+def _cacheable_sources():
+    cited = f5.ComparabilitySource(
+        abstract="Earlier result.", packet_sha256="a" * 64)
+    candidate = f5.ComparabilitySource(
+        results="Later opposite result.", packet_sha256="b" * 64)
+    return cited, candidate
+
+
+def _cacheable_response():
+    import json
+    return json.dumps({
+        "directional_contradiction": True,
+        "relation_to_cited_finding": "opposes",
+        "claim_match": "match", "outcome_relation": "same",
+        "population_relation": "equivalent",
+        "cited_direction": "increase", "candidate_direction": "decrease",
+        "magnitude": "large", "confidence": 0.9,
+        "scope_mismatch_axis": "none",
+        "cited_finding_span": {
+            "label": "abstract", "sentence_ids": ["s1"]},
+        "candidate_contradiction_span": {
+            "label": "results", "sentence_ids": ["s1"]},
+    })
+
+
+def test_pairwise_cache_reuses_only_the_same_bound_request():
+    calls = []
+
+    def complete(prompt):
+        calls.append(prompt)
+        return _cacheable_response()
+
+    cited, candidate = _cacheable_sources()
+    judge = s.make_judge_contradiction(
+        complete, judgment_cache={}, model_id="model-1",
+        model_settings={"temperature": 0})
+    first = judge(cited, candidate, "claim")
+    second = judge(cited, candidate, "claim")
+    assert first == second
+    assert (judge.calls, judge.model_calls, judge.cache_hits) == (2, 1, 1)
+    assert len(calls) == 1
+
+    changed_candidate = f5.ComparabilitySource(
+        results=candidate.results, packet_sha256="c" * 64)
+    judge(cited, changed_candidate, "claim")
+    judge(cited, candidate, "different claim")
+    assert (judge.calls, judge.model_calls, judge.cache_hits) == (4, 3, 1)
+
+
+def test_malformed_judgment_is_never_cached_and_is_retried():
+    replies = iter(("not json", _cacheable_response()))
+    cited, candidate = _cacheable_sources()
+    judge = s.make_judge_contradiction(
+        lambda _prompt: next(replies), judgment_cache={}, model_id="model-1",
+        model_settings={"temperature": 0})
+    with pytest.raises(Exception):
+        judge(cited, candidate, "claim")
+    assert f5._parse_contradiction(judge(cited, candidate, "claim"))
+    assert (judge.calls, judge.model_calls, judge.cache_hits) == (2, 2, 0)
+
+
+def test_pairwise_cache_single_flights_concurrent_identical_requests():
+    import concurrent.futures
+    import threading
+    import time
+
+    call_lock = threading.Lock()
+    model_calls = 0
+
+    def complete(_prompt):
+        nonlocal model_calls
+        with call_lock:
+            model_calls += 1
+        time.sleep(0.03)
+        return _cacheable_response()
+
+    cited, candidate = _cacheable_sources()
+    judge = s.make_judge_contradiction(
+        complete, judgment_cache={}, model_id="model-1",
+        model_settings={"temperature": 0})
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(judge, cited, candidate, "claim") for _ in range(2)]
+        results = [future.result() for future in futures]
+    assert results[0] == results[1]
+    assert model_calls == 1
+    assert (judge.calls, judge.model_calls, judge.cache_hits) == (2, 1, 1)
+
+
+def test_pairwise_cache_tracks_mutated_settings_in_the_request_key():
+    calls = []
+    settings = {"temperature": 0}
+    cited, candidate = _cacheable_sources()
+    judge = s.make_judge_contradiction(
+        lambda prompt: calls.append(prompt) or _cacheable_response(),
+        judgment_cache={}, model_id="model-1", model_settings=settings)
+    judge(cited, candidate, "claim")
+    settings["temperature"] = 1
+    judge(cited, candidate, "claim")
+    assert len(calls) == 2
+    assert (judge.model_calls, judge.cache_hits) == (2, 0)
+
+
+def test_shared_cache_single_flights_across_distinct_wrappers():
+    import concurrent.futures
+    import threading
+    import time
+
+    cache = {}
+    call_lock = threading.Lock()
+    model_calls = 0
+
+    def complete(_prompt):
+        nonlocal model_calls
+        with call_lock:
+            model_calls += 1
+        time.sleep(0.03)
+        return _cacheable_response()
+
+    cited, candidate = _cacheable_sources()
+    kwargs = dict(judgment_cache=cache, model_id="model-1",
+                  model_settings={"temperature": 0})
+    first = s.make_judge_contradiction(complete, **kwargs)
+    second = s.make_judge_contradiction(complete, **kwargs)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(first, cited, candidate, "claim"),
+                   pool.submit(second, cited, candidate, "claim")]
+        results = [future.result() for future in futures]
+    assert results[0] == results[1]
+    assert model_calls == 1
+    assert first.model_calls + second.model_calls == 1
+    assert first.cache_hits + second.cache_hits == 1
+
+
+def test_unresolved_sentence_ids_are_not_cached_as_absent_evidence():
+    import json
+
+    invalid = json.loads(_cacheable_response())
+    invalid["candidate_contradiction_span"]["sentence_ids"] = ["s99"]
+    replies = iter((json.dumps(invalid), _cacheable_response()))
+    cited, candidate = _cacheable_sources()
+    judge = s.make_judge_contradiction(
+        lambda _prompt: next(replies), judgment_cache={}, model_id="model-1",
+        model_settings={"temperature": 0})
+    first = f5._parse_contradiction(judge(cited, candidate, "claim"))
+    second = f5._parse_contradiction(judge(cited, candidate, "claim"))
+    assert first.candidate_contradiction_span == ""
+    assert second.candidate_contradiction_span == "Later opposite result."
+    assert (judge.model_calls, judge.cache_hits) == (2, 0)
+
+
 # ==========================================================================
 # Item 4 -- the discovery queue
 # ==========================================================================
@@ -199,12 +384,19 @@ def test_unresolvable_span_is_logged_as_a_miss_and_does_not_raise():
 def _records():
     return [{
         "claim_index": 0, "claim_text": "Metformin reduces HbA1c",
+        "activation": {"applicability": "eligible"},
         "cited_work_id": "W1", "cited_date": "2015-01-01",
+        "cited_source_packet_sha256": "a" * 64,
+        "controversy_bundle_sha256": "b" * 64,
+        "search_complete": False,
+        "controversy_bundle": {
+            "human_review_reason": "Review the complete controversy evidence"},
         "temporal_state": "QUALIFYING_CONTRADICTION", "proposed_route": "F5",
         "candidate_assessments": [
             {"candidate_work_id": "W2", "candidate_date": "2021-01-01",
              "discovery_disposition": "surface", "scope_mismatch_axis": "none",
              "reason": "directional_contradiction", "confidence": 0.9,
+             "candidate_source_packet_sha256": "c" * 64,
              "cited_finding_span": "Metformin reduced HbA1c by 1.2%.",
              "candidate_contradiction_span": "No between-group difference."},
             {"candidate_work_id": "W3", "candidate_date": "2022-01-01",
@@ -220,8 +412,12 @@ def test_queue_holds_every_surface_row_with_what_an_annotator_needs():
     assert len(queue) == 1
     row = queue[0]
     for key in ("claim_text", "cited_work_id", "candidate_work_id",
-                "cited_finding_span", "candidate_contradiction_span"):
+                "cited_finding_span", "candidate_contradiction_span",
+                "cited_source_packet_sha256",
+                "candidate_source_packet_sha256",
+                "controversy_bundle_sha256", "human_review_reason"):
         assert row.get(key) is not None
+    assert row["search_complete"] is False
     assert "scope_mismatch_axis" not in row
     assert "reason" not in row
 
@@ -253,6 +449,37 @@ def test_do_not_surface_and_unassessable_are_counted_but_never_queued():
     assert queued == {"W2"}
     assert q.disposition_counts(_records()) == {
         "surface": 1, "do_not_surface": 1, "unassessable": 1}
+
+
+def test_flagged_only_claim_gets_a_blind_direct_bundle_reference():
+    record = _records()[0]
+    record["candidate_assessments"] = [
+        dict(record["candidate_assessments"][2])]
+    queue = q.build_queue([record])
+    assert len(queue) == 1
+    assert queue[0]["row_kind"] == "controversy_bundle_reference"
+    assert queue[0]["candidate_work_id"] is None
+    assert queue[0]["controversy_bundle_sha256"] == "b" * 64
+    q.assert_blind(queue)
+
+
+def test_failed_empty_search_gets_a_blind_bundle_reference_warning():
+    record = _records()[0]
+    record["candidate_assessments"] = []
+    record["search_complete"] = False
+    queue = q.build_queue([record])
+    assert len(queue) == 1
+    assert queue[0]["row_kind"] == "controversy_bundle_reference"
+    assert queue[0]["search_complete"] is False
+    q.assert_blind(queue)
+
+
+def test_not_applicable_empty_claim_never_enters_f5_queue():
+    record = _records()[0]
+    record["candidate_assessments"] = []
+    record["search_complete"] = False
+    record["activation"] = {"applicability": "not_applicable"}
+    assert q.build_queue([record]) == []
 
 
 def test_the_queue_has_its_own_filename_not_the_shared_annotation_queue():

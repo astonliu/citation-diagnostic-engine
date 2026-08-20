@@ -31,7 +31,8 @@ def notice(pubtypes=("Retracted Publication",), notice_date="2022-01-01",
         meta = {"publication_types": list(pubtypes)}
         if notice_date is not None:
             meta["notice_date"] = notice_date
-    return s.make_check_formal_notice(lambda w: meta)
+    return s.make_check_formal_notice(
+        lambda w: ({**meta, "id": w} if isinstance(meta, dict) and meta else meta))
 
 
 # --------------------------------------------------------------------------
@@ -43,7 +44,7 @@ def test_a_slash_dated_notice_is_in_force_not_cleared():
     retraction therefore read as CLEAR when asked about June."""
     status = notice(notice_date="2024/01/15")("W", as_of_date="2024-06-01")
     assert status.notice_kind == "retraction"
-    assert status.notice_resolution == "flagged"
+    assert status.notice_resolution == "unresolved"
     assert status.date_status == "unparseable"
     assert status.date_raw == "2024/01/15"
 
@@ -54,6 +55,7 @@ def test_a_text_dated_notice_holds_instead_of_crashing_mid_run():
     and raised, taking the run with it. Both now take the same path."""
     status = notice(notice_date="15 Jan 2024")("W", as_of_date="2024-06-01")
     assert status.notice_kind == "retraction"
+    assert status.notice_resolution == "unresolved"
     assert status.date_status == "unparseable"
     assert status.date_raw == "15 Jan 2024"
 
@@ -67,7 +69,8 @@ def test_both_malformed_shapes_now_agree():
 
 def test_an_unparseable_as_of_date_does_not_clear_the_notice():
     status = notice(notice_date="2022-01-01")("W", as_of_date="not-a-date")
-    assert status.notice_kind == "retraction"
+    assert status.notice_kind == "none"
+    assert status.notice_resolution == "unresolved"
     assert status.date_status == "as_of_unavailable"
 
 
@@ -75,7 +78,7 @@ def test_a_real_comparison_is_recorded_as_one():
     """The load-bearing behaviour is unchanged, and now says that it happened."""
     later = notice(notice_date="2025-06-01")("W", as_of_date="2024-01-01")
     assert later.notice_kind == "none"          # did not exist yet
-    assert later.date_status == "compared"
+    assert later.date_status == "after_cutoff"
     earlier = notice(notice_date="2022-01-01")("W", as_of_date="2024-01-01")
     assert earlier.notice_kind == "retraction"
     assert earlier.date_status == "compared"
@@ -91,7 +94,7 @@ def test_an_undated_notice_stays_in_force_and_says_the_gate_did_not_run():
     today, so this is the default case, not the edge."""
     status = notice(notice_date=None)("W", as_of_date="1900-01-01")
     assert status.notice_kind == "retraction"
-    assert status.notice_resolution == "flagged"
+    assert status.notice_resolution == "unresolved"
     assert status.date_status == "absent"
     assert status.date_raw is None
 
@@ -105,7 +108,8 @@ def test_no_answer_is_not_a_clean_record():
     This module already guards that exact confusion for retrieval."""
     failed = s.make_check_formal_notice(lambda w: None)("W", as_of_date="2024-06-01")
     clean = s.make_check_formal_notice(
-        lambda w: {"publication_types": ["Journal Article"]})("W", as_of_date="2024-06-01")
+        lambda w: {"id": w, "publication_types": ["Journal Article"]})(
+            "W", as_of_date="2024-06-01")
     assert failed.lookup_status == "no_record"
     assert failed.notice_resolution == "unresolved"      # holds, never clears
     assert clean.lookup_status == "ok"

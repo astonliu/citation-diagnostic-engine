@@ -26,18 +26,44 @@ stays False.
 """
 from __future__ import annotations
 
-import dataclasses
+import datetime
+import hashlib
 import json
+import threading
 from typing import Optional
 
 from . import f5_contradiction_prompt as fcp
 from .f5_supersession import (
-    Attestation, CandidateWork, ComparabilitySource, EvidenceTier, NoticeStatus,
+    Attestation, CandidateWork, ComparabilitySource, EvidenceTier,
     RetrievalResult,
     # The ONE date parser, borrowed rather than reimplemented: a second
     # implementation is a second thing that can disagree about what a date is.
-    _parse_date,
+    _parse_contradiction, _parse_date, _reject_duplicate_keys,
 )
+from .f5_evidence_store import (
+    FACT_ASSESSMENT_NOT_PERFORMED,
+    F5EvidenceStore,
+    adapt_fulltext_sections,
+)
+from .f5_notice import make_notice_resolver
+
+
+def _notice_from_pubtypes(pubtypes):
+    """Legacy classifier retained for callers that inspect publication types.
+
+    The cutoff-aware resolver additionally uses linked PubMed relationships to
+    distinguish a correction/EoC notice article from the affected subject.
+    """
+    lowered = {str(value).strip().casefold() for value in (pubtypes or ())}
+    if "retracted publication" in lowered:
+        return "retraction", "retracted_article"
+    if lowered & {"retraction of publication", "retraction notice"}:
+        return "none", "retraction_notice"
+    if "expression of concern" in lowered:
+        return "eoc", "eoc_notice"
+    if lowered & {"published erratum", "erratum"}:
+        return "correction", "correction_notice"
+    return "none", "no_notice_type"
 
 # --------------------------------------------------------------------------
 # Retrieval protocol -- recorded, not implied.
@@ -55,6 +81,18 @@ CANDIDATE_CAP = 50
 RERANKER = "none"
 
 RETRIEVAL_PROTOCOL_VERSION = "f5_retrieval_v3"
+
+
+class _JudgmentCacheControl:
+    """Synchronization shared by every wrapper using one cache dictionary."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.inflight: dict[str, threading.Event] = {}
+
+
+_JUDGMENT_CACHE_CONTROL_KEY = object()
+_JUDGMENT_CACHE_INIT_LOCK = threading.Lock()
 
 
 def retrieval_protocol(*, after_date: str = "", as_of_date: str = "",
@@ -177,152 +215,106 @@ def classify_evidence_tier(meta: dict) -> EvidenceTier:
 # --------------------------------------------------------------------------
 # 3a. check_formal_notice -- the F5/F8 boundary.
 # --------------------------------------------------------------------------
-# THE PT INVERSION. These two mean OPPOSITE things:
-#   "Retracted Publication"     -- THIS article was retracted
-#   "Retraction of Publication" / "Retraction Notice"
-#                               -- this article IS the notice that retracts
-#                                  some OTHER article
-# ``_RETRACTION_TYPES`` used to carry both, so citing a retraction notice --
-# legitimate, and routine in meta-research -- read as citing a retracted paper.
-# Matching is EXACT rather than substring for the same reason: "retracted
-# publication" is not a substring of "retraction of publication", but a looser
-# pattern like "retract" matches both and inverts the detector while still
-# looking like it works. ``ncbi_meta.RETRACTED_PUBTYPE`` is the F1/F8 layer's
-# statement of the same rule; this is deliberately the same shape.
-_RETRACTION_TYPES = ("retracted publication",)
-_RETRACTION_NOTICE_TYPES = ("retraction of publication", "retraction notice")
-_CORRECTION_TYPES = ("published erratum", "erratum")
-_EOC_TYPES = ("expression of concern",)
-
-
-def _notice_from_pubtypes(pubtypes) -> tuple:
-    """Return ``(notice_kind, source_role)``.
-
-    The role is what the old single return value threw away: a work carrying a
-    retraction-NOTICE type is not a retracted work, so its kind is "none" -- and
-    saying only "none" would make it indistinguishable from a paper with no
-    notice types at all, which is how the inversion hid.
-    """
-    lowered = [str(p).strip().lower() for p in (pubtypes or [])]
-    if any(p in _RETRACTION_TYPES for p in lowered):
-        return "retraction", "retracted_article"
-    # Checked BEFORE the softer categories and reported explicitly: this work is
-    # the notice, not its subject, and F5 has no quarrel with it.
-    if any(p in _RETRACTION_NOTICE_TYPES for p in lowered):
-        return "none", "retraction_notice"
-    if any(any(t in p for t in _EOC_TYPES) for p in lowered):
-        return "eoc", "eoc_notice"
-    if any(any(t in p for t in _CORRECTION_TYPES) for p in lowered):
-        return "correction", "correction_notice"
-    return "none", "no_notice_type"
-
-
 def make_check_formal_notice(fetch_meta):
-    """``check_formal_notice(work_id, *, as_of_date)`` over an injected metadata
-    reader, so the network call is testable without one.
-
-    ``as_of_date`` is LOAD-BEARING, not decorative: Bakker et al. document papers
-    being retracted while reviews are in press, so notice status is a function of
-    the date you check. A notice dated AFTER as_of_date is not applied -- at that
-    moment it did not yet exist.
-
-    DATES ARE PARSED, NEVER COMPARED AS STRINGS. The comparison used to be
-    ``str(date) > str(as_of_date)``, which is lexicographic: "2024/01/15" sorts
-    ABOVE "2024-06-01" because "/" (0x2F) is above "-" (0x2D), so a real January
-    retraction read as CLEAR in June. The failure was also ASYMMETRIC -- a
-    non-ISO date that happened to sort earlier fell through into
-    ``NoticeStatus``, whose validator raises, so "15 Jan 2024" crashed the run
-    while "2024/01/15" silently cleared it. This file already states the
-    principle for the other direction ("a silently reinterpreted [date] is a
-    correctness bug, not a formatting nicety"); it is now applied here.
-
-    Every way the comparison can fail to happen is NAMED on the returned status
-    (``lookup_status`` / ``date_status`` / ``date_raw`` / ``source_role``) rather
-    than folded into a clear, and every one of them fails CLOSED: an
-    uncomparable notice stays in force.
-    """
-    def check_formal_notice(work_id: str, *, as_of_date: str) -> NoticeStatus:
-        raw_meta = fetch_meta(work_id)
-        if not raw_meta:
-            # A LOOKUP THAT DID NOT ANSWER IS NOT A CLEAN RECORD. ``or {}``
-            # collapsed None (the reader failed) and {} (it answered, nothing to
-            # report) into one value, and both returned resolved_clear -- an
-            # outage wearing the same string as a verified absence, which is the
-            # confusion this module guards against for retrieval and did not
-            # guard against here. Unresolved, so it holds rather than clears.
-            return NoticeStatus(
-                notice_kind="none", notice_resolution="unresolved",
-                lookup_status="no_record", source_role="unknown")
-        kind, source_role = _notice_from_pubtypes(raw_meta.get("publication_types"))
-        if kind == "none":
-            return NoticeStatus(
-                notice_kind="none", notice_resolution="resolved_clear",
-                lookup_status="ok", source_role=source_role)
-
-        resolution = "unresolved" if kind == "eoc" else "flagged"
-        raw_date = raw_meta.get("notice_date") or None
-        in_force = NoticeStatus(
-            notice_kind=kind, notice_resolution=resolution,
-            lookup_status="ok", source_role=source_role,
-            date_raw=str(raw_date) if raw_date is not None else None,
-            date_status="absent")
-        if raw_date is None:
-            # AN UNDATED NOTICE CANNOT BE TIMED. It stays in force -- the
-            # fail-closed direction -- but the gate did NOT run, and date_status
-            # says so instead of leaving "in force at every as_of_date" looking
-            # like a comparison that was made. Worth knowing how common this is:
-            # nothing in production populates notice_date today.
-            return in_force
-        try:
-            notice_day = _parse_date(str(raw_date), "notice_date")
-        except ValueError:
-            # Malformed, symmetrically: it never clears and it never crashes.
-            return dataclasses.replace(in_force, date_status="unparseable")
-        try:
-            as_of_day = _parse_date(str(as_of_date), "as_of_date")
-        except ValueError:
-            return dataclasses.replace(in_force, date_status="as_of_unavailable")
-        if notice_day > as_of_day:
-            # Not yet in force at the moment being assessed.
-            return NoticeStatus(
-                notice_kind="none", notice_resolution="resolved_clear",
-                lookup_status="ok", source_role=source_role,
-                date=str(raw_date), date_raw=str(raw_date),
-                date_status="compared")
-        return dataclasses.replace(
-            in_force, date=str(raw_date), date_status="compared")
-    return check_formal_notice
+    """Build the cutoff-aware linked-notice resolver over injected metadata."""
+    return make_notice_resolver(fetch_meta)
 
 
 # --------------------------------------------------------------------------
 # 3c. fetch_comparability_source -- abstract first, escalate only if needed.
 # --------------------------------------------------------------------------
-def make_fetch_comparability_source(fetch_abstract, fetch_fulltext=None,
-                                    *, thin_source_log=None):
+def make_fetch_comparability_source(
+        fetch_abstract, fetch_fulltext=None, *, fetch_meta=None,
+        assess_missing_facts=None, fact_assessor_version="none",
+        fetch_notice=None,
+        source_packet_log=None, thin_source_log=None, retrieved_at=None):
     """``fetch_comparability_source(work_id, *, as_of_date)``.
 
     ABSTRACT FIRST. Rosemblat measured that for the species axis the disambiguating
     fact was in the evidence sentence in 6 of 24 cases but required the FULL
     ABSTRACT in 17 of 24 -- so the abstract is the floor, not the sentence.
-    DeepSciVerify's escalation resolved 67% of instances without full-text
-    retrieval, so full text is fetched only when the abstract is thin.
+    Full text is fetched only when an injected, versioned fact assessor names
+    required facts absent from the abstract. Character count is never used.
 
     A THIN SOURCE MUST BE VISIBLE. ``_source_text`` is the only thing span
     verification checks against, so an empty source silently turns every candidate
     into UNASSESSABLE. Anything thin is appended to ``thin_source_log`` so the run
     can report it instead of reporting a quiet zero."""
+    clock = retrieved_at or (
+        lambda: datetime.datetime.now(datetime.timezone.utc).isoformat())
+    packet_log = source_packet_log if source_packet_log is not None else []
+    store = None
+    if fetch_meta is not None:
+        store = F5EvidenceStore(
+            fetch_metadata=fetch_meta, fetch_abstract=fetch_abstract,
+            fetch_fulltext=fetch_fulltext,
+            classify_evidence_tier=classify_evidence_tier,
+            assess_missing_facts=assess_missing_facts,
+            fact_assessor_version=fact_assessor_version,
+            fetch_notice=fetch_notice,
+            retrieved_at=clock,
+        )
+
     def fetch_comparability_source(work_id: str, *, as_of_date: str) -> ComparabilitySource:
-        abstract = (fetch_abstract(work_id) or "").strip()
-        methods = results = None
-        if len(abstract) < 200 and fetch_fulltext is not None:
-            full = fetch_fulltext(work_id) or {}
-            methods = (full.get("methods") or None)
-            results = (full.get("results") or None)
-        source = ComparabilitySource(abstract=abstract or None, methods=methods,
-                                     results=results)
-        if thin_source_log is not None and not (abstract or methods or results):
+        if store is not None:
+            packet = store.get(work_id, as_of_date=as_of_date)
+            if not any(
+                    row.get("packet_sha256") == packet.packet_sha256
+                    for row in packet_log):
+                packet_log.append(packet.to_dict())
+            source = ComparabilitySource(
+                abstract=packet.abstract, methods=packet.methods,
+                results=packet.results, other_sections=packet.other_sections,
+                protocol=packet.protocol,
+                registry_record=packet.registry_record,
+                publication_type="; ".join(packet.publication_types) or None,
+                work_id=packet.work_id, source_status=packet.source_status,
+                missing_facts=packet.missing_facts,
+                packet_sha256=packet.packet_sha256,
+            )
+        else:
+            # Offline/backward-compatible seam construction without metadata can
+            # still use fact-based escalation, but cannot claim a source packet.
+            abstract = (fetch_abstract(work_id) or "").strip()
+            methods = results = other_sections = None
+            adapted = None
+            missing = (FACT_ASSESSMENT_NOT_PERFORMED,)
+            if assess_missing_facts is not None:
+                missing = tuple(assess_missing_facts(
+                    work_id=work_id, abstract=abstract or None,
+                    methods=None, results=None, other_sections=None))
+            if missing and fetch_fulltext is not None:
+                adapted = adapt_fulltext_sections(
+                    fetch_fulltext(work_id), work_id=work_id)
+                methods, results = adapted.methods, adapted.results
+                other_sections = adapted.other_sections
+                if assess_missing_facts is not None:
+                    missing = tuple(assess_missing_facts(
+                        work_id=work_id, abstract=abstract or None,
+                        methods=methods, results=results,
+                        other_sections=other_sections))
+            has_text = bool(abstract or methods or results or other_sections)
+            source_status = (
+                "failure" if not has_text else
+                "partial" if (
+                    missing
+                    or (adapted is not None and adapted.source_status != "complete")
+                ) else "complete"
+            )
+            source = ComparabilitySource(
+                abstract=abstract or None, methods=methods, results=results,
+                other_sections=other_sections,
+                work_id=work_id,
+                source_status=source_status,
+                missing_facts=missing,
+            )
+        if thin_source_log is not None and not (
+                source.abstract or source.methods or source.results
+                or source.other_sections):
             thin_source_log.append(work_id)
         return source
+    fetch_comparability_source.evidence_store = store
+    fetch_comparability_source.source_packet_log = packet_log
     return fetch_comparability_source
 
 
@@ -345,6 +337,8 @@ def make_retrieve_superseding_candidates(search_candidates, *, cap: int = CANDID
     its entire yield. ``__post_init__`` already enforces empty <=> adequacy=empty,
     so a failure with no candidates is reported as empty+failure and the detector
     holds rather than concluding."""
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+        raise ValueError("candidate cap must be a positive integer")
     executed_protocols = protocol_log if protocol_log is not None else []
 
     def retrieve_superseding_candidates(cited_meta: dict, claim: str, *,
@@ -431,6 +425,19 @@ def make_retrieve_superseding_candidates(search_candidates, *, cap: int = CANDID
                 authors=authors,
                 mesh=mesh_terms,
                 tier_hint=str(tier_hint),
+                registry_ids=tuple(str(x).strip() for x in
+                                   (hit.get("registry_ids") or ()) if str(x).strip()),
+                version_work_ids=tuple(str(x).strip() for x in
+                                       (hit.get("version_work_ids") or ())
+                                       if str(x).strip()),
+                cohort_ids=tuple(str(x).strip() for x in
+                                 (hit.get("cohort_ids") or ()) if str(x).strip()),
+                dataset_ids=tuple(str(x).strip() for x in
+                                  (hit.get("dataset_ids") or ()) if str(x).strip()),
+                demonstrably_distinct_from=tuple(
+                    str(x).strip() for x in
+                    (hit.get("demonstrably_distinct_from") or ()) if str(x).strip()),
+                doi=str(hit.get("doi") or "") or None,
             ))
             if len(candidates) >= cap:
                 break
@@ -451,6 +458,7 @@ def make_retrieve_superseding_candidates(search_candidates, *, cap: int = CANDID
                        + (f"; CAPPED/incomplete at {cap}, more may exist"
                           if adequacy == "inadequate" else "")))
     retrieve_superseding_candidates.executed_protocols = executed_protocols
+    retrieve_superseding_candidates.candidate_cap = cap
     return retrieve_superseding_candidates
 
 
@@ -480,7 +488,9 @@ def find_supersession_attestation(cited_meta: dict, claim: str, candidate_id: st
 # --------------------------------------------------------------------------
 # 3f. judge_contradiction -- renders ids, resolves ids, emits the contract.
 # --------------------------------------------------------------------------
-def make_judge_contradiction(complete, *, span_miss_log=None):
+def make_judge_contradiction(
+        complete, *, span_miss_log=None, judgment_cache=None,
+        model_id: "str | None" = None, model_settings=None):
     """``judge_contradiction(cited_source, candidate_source, claim) -> str``.
 
     ``complete(prompt) -> str`` is the model call, injected so this is testable
@@ -490,27 +500,118 @@ def make_judge_contradiction(complete, *, span_miss_log=None):
     detector records as ``span_unverifiable`` -- a RECORDED MISS, which is the
     DEC-047 rule, and it is appended to ``span_miss_log`` so misses are counted
     rather than inferred."""
+    cache = judgment_cache if judgment_cache is not None else {}
+    if not isinstance(cache, dict):
+        raise ValueError("judgment_cache must be a dict or None")
+    resolved_model_id = str(
+        model_id or getattr(complete, "model_id", "") or "").strip()
+    resolved_settings = (
+        model_settings if model_settings is not None
+        else getattr(complete, "model_settings", {}))
+
+    # The cache may be shared by several wrappers in one run. Its lock and
+    # in-flight map must therefore be shared too, or concurrent wrappers both
+    # become owners and duplicate the paid request.
+    with _JUDGMENT_CACHE_INIT_LOCK:
+        control = cache.get(_JUDGMENT_CACHE_CONTROL_KEY)
+        if control is None:
+            control = _JudgmentCacheControl()
+            cache[_JUDGMENT_CACHE_CONTROL_KEY] = control
+        elif not isinstance(control, _JudgmentCacheControl):
+            raise ValueError("judgment_cache contains invalid control state")
+
+    def current_settings_json() -> str:
+        try:
+            return json.dumps(
+                resolved_settings, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False)
+        except (TypeError, ValueError):
+            return ""
+
+    def cache_key(cited_source, candidate_source, claim: str) -> str | None:
+        settings_json = current_settings_json()
+        if (not cited_source.packet_sha256 or not candidate_source.packet_sha256
+                or not resolved_model_id or not settings_json):
+            return None
+        body = {
+            "claim_sha256": hashlib.sha256(
+                claim.encode("utf-8")).hexdigest(),
+            "cited_packet_sha256": cited_source.packet_sha256,
+            "candidate_packet_sha256": candidate_source.packet_sha256,
+            "prompt_version": fcp.CONTRADICTION_PROMPT_VERSION,
+            "parser_version": fcp.RESPONSE_PARSER_VERSION,
+            "model_id": resolved_model_id,
+            "settings": json.loads(settings_json),
+        }
+        return hashlib.sha256(json.dumps(
+            body, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")).hexdigest()
+
     def judge_contradiction(cited_source, candidate_source, claim: str) -> str:
         judge_contradiction.calls += 1
+        key = cache_key(cited_source, candidate_source, claim)
+        owner = False
+        if key is not None:
+            while True:
+                with control.lock:
+                    cached = cache.get(key)
+                    if isinstance(cached, str):
+                        judge_contradiction.cache_hits += 1
+                        return cached
+                    event = control.inflight.get(key)
+                    if event is None:
+                        event = threading.Event()
+                        control.inflight[key] = event
+                        owner = True
+                        break
+                event.wait()
         prompt = fcp.render_prompt(cited_source, candidate_source, claim)
-        raw = complete(prompt)
-        obj = json.loads(raw)
+        try:
+            judge_contradiction.model_calls += 1
+            raw = complete(prompt)
+            obj = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
 
-        cited_units = fcp.source_units(cited_source)
-        cand_units = fcp.source_units(candidate_source)
-        for key, units in (("cited_finding_span", cited_units),
-                           ("candidate_contradiction_span", cand_units)):
-            entry = obj.get(key)
-            if isinstance(entry, str):
-                # A judge that ignored the instruction and quoted prose: align it
-                # rather than discard it, same floor as the coverage judge.
-                entry = {"label": "abstract", "text": entry}
-            text, span_source = fcp.resolve_span(entry, units)
-            if span_source == fcp.SPAN_SOURCE_UNRESOLVED and span_miss_log is not None:
-                span_miss_log.append({"key": key, "entry": entry})
-            obj[key] = text
-        return json.dumps(obj)
+            cited_units = fcp.source_units(cited_source)
+            cand_units = fcp.source_units(candidate_source)
+            unresolved_span = False
+            for span_key, units in (("cited_finding_span", cited_units),
+                                    ("candidate_contradiction_span", cand_units)):
+                entry = obj.get(span_key)
+                if isinstance(entry, str):
+                    # A judge that ignored the instruction and quoted prose: align it
+                    # rather than discard it, same floor as the coverage judge.
+                    entry = {"label": "abstract", "text": entry}
+                text, span_source = fcp.resolve_span(entry, units)
+                if (span_source == fcp.SPAN_SOURCE_UNRESOLVED
+                        and span_miss_log is not None):
+                    span_miss_log.append({"key": span_key, "entry": entry})
+                if span_source == fcp.SPAN_SOURCE_UNRESOLVED:
+                    unresolved_span = True
+                obj[span_key] = text
+            resolved = json.dumps(obj)
+            # Only a fully valid resolved response is reusable. Exceptions and
+            # malformed/partial outputs wake waiters but never become absence.
+            _parse_contradiction(resolved)
+            # A sentence-id miss is a recoverable resolution failure, not a
+            # reusable judgment. Settings are re-read after the call so a
+            # mutable settings object cannot cache an answer under stale facts.
+            if (key is not None and not unresolved_span
+                    and key == cache_key(cited_source, candidate_source, claim)):
+                with control.lock:
+                    cache[key] = resolved
+            return resolved
+        finally:
+            if key is not None and owner:
+                with control.lock:
+                    event = control.inflight.pop(key, None)
+                    if event is not None:
+                        event.set()
     judge_contradiction.calls = 0
+    judge_contradiction.model_calls = 0
+    judge_contradiction.cache_hits = 0
+    judge_contradiction.cache = cache
+    judge_contradiction.model_id = resolved_model_id
+    judge_contradiction.model_settings = resolved_settings
     return judge_contradiction
 
 
@@ -519,9 +620,36 @@ def make_judge_contradiction(complete, *, span_miss_log=None):
 # --------------------------------------------------------------------------
 def build_f5_seams(*, fetch_meta, fetch_abstract, search_candidates, complete,
                    fetch_fulltext=None, cap: int = CANDIDATE_CAP,
+                   screen_candidates=None,
+                   assess_missing_facts=None, fact_assessor_version="none",
+                   source_packet_log=None, retrieved_at=None,
                    thin_source_log=None, span_miss_log=None,
-                   protocol_log=None) -> dict:
-    """All six seams, ready for ``decide_f5(..., f5_seams=...)``."""
+                   protocol_log=None, judgment_cache=None,
+                   judgment_model_id: "str | None" = None,
+                   judgment_model_settings=None) -> dict:
+    """All F5 seams, ready for ``decide_f5(..., f5_seams=...)``.
+
+    ``screen_candidates`` is optional.  With no screen the original path is
+    preserved and every structurally admissible candidate reaches deep review.
+    """
+    if screen_candidates is not None and not callable(screen_candidates):
+        raise ValueError("screen_candidates must be callable or None")
+    notice_resolver = make_check_formal_notice(fetch_meta)
+
+    def packet_notice(work_id: str, *, as_of_date: str) -> dict:
+        status = notice_resolver(work_id, as_of_date=as_of_date)
+        return {
+            "notice_kind": status.notice_kind,
+            "notice_resolution": status.notice_resolution,
+            "date": status.date,
+            "lookup_status": status.lookup_status,
+            "date_status": status.date_status,
+            "date_raw": status.date_raw,
+            "source_role": status.source_role,
+            "linked_notice_work_id": status.linked_notice_work_id,
+            "relationship": status.relationship,
+        }
+
     def observed_attestation(cited_meta: dict, claim: str, candidate_id: str,
                              *, as_of_date: str):
         observed_attestation.calls += 1
@@ -530,15 +658,23 @@ def build_f5_seams(*, fetch_meta, fetch_abstract, search_candidates, complete,
     observed_attestation.calls = 0
 
     return {
-        "check_formal_notice": make_check_formal_notice(fetch_meta),
+        "check_formal_notice": notice_resolver,
         "classify_evidence_tier": classify_evidence_tier,
         "fetch_comparability_source": make_fetch_comparability_source(
-            fetch_abstract, fetch_fulltext, thin_source_log=thin_source_log),
+            fetch_abstract, fetch_fulltext, fetch_meta=fetch_meta,
+            assess_missing_facts=assess_missing_facts,
+            fact_assessor_version=fact_assessor_version,
+            fetch_notice=packet_notice,
+            source_packet_log=source_packet_log,
+            thin_source_log=thin_source_log, retrieved_at=retrieved_at),
         "retrieve_superseding_candidates": make_retrieve_superseding_candidates(
             search_candidates, cap=cap, protocol_log=protocol_log),
         "find_supersession_attestation": observed_attestation,
         "judge_contradiction": make_judge_contradiction(
-            complete, span_miss_log=span_miss_log),
+            complete, span_miss_log=span_miss_log,
+            judgment_cache=judgment_cache, model_id=judgment_model_id,
+            model_settings=judgment_model_settings),
+        "screen_candidates": screen_candidates,
     }
 
 
@@ -625,8 +761,14 @@ def build_pubmed_f5_runtime(*, complete, as_of_date: str, api_key: str = "",
                             cache_dir: "str | None" = None,
                             timeout: float = 30.0, max_retries: int = 4,
                             fetch_fulltext=None, cap: int = CANDIDATE_CAP,
+                            screen_candidates=None,
+                            assess_missing_facts=None,
+                            fact_assessor_version="none",
+                            source_packet_log=None, retrieved_at=None,
                             thin_source_log=None, span_miss_log=None,
-                            protocol_log=None) -> dict:
+                            protocol_log=None, judgment_cache=None,
+                            judgment_model_id: "str | None" = None,
+                            judgment_model_settings=None) -> dict:
     """Return both live F5 arguments accepted by ``run_natural_judgment``.
 
     This is the concrete production wiring for the PubMed finder. It performs no
@@ -657,8 +799,14 @@ def build_pubmed_f5_runtime(*, complete, as_of_date: str, api_key: str = "",
         fetch_meta=fetch_meta, fetch_abstract=fetch_abstract,
         search_candidates=finder.search_candidates, complete=complete,
         fetch_fulltext=fetch_fulltext, cap=cap,
+        screen_candidates=screen_candidates,
+        assess_missing_facts=assess_missing_facts,
+        fact_assessor_version=fact_assessor_version,
+        source_packet_log=source_packet_log, retrieved_at=retrieved_at,
         thin_source_log=thin_source_log, span_miss_log=span_miss_log,
-        protocol_log=protocol_log)
+        protocol_log=protocol_log, judgment_cache=judgment_cache,
+        judgment_model_id=judgment_model_id,
+        judgment_model_settings=judgment_model_settings)
     return {
         "f5_seams": seams,
         "f5_evidence_builder": make_f5_evidence_builder(

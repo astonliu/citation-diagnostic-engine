@@ -225,6 +225,57 @@ def _write_json_atomic(path: str, obj: dict) -> None:
     os.replace(tmp, path)
 
 
+def _write_jsonl_atomic(path: str, rows) -> None:
+    """Write canonical JSONL as one atomic artifact, never a partial success."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(
+                row, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False) + "\n")
+    os.replace(tmp, path)
+
+
+def _require_f5_artifact_coverage(
+        f5_block: dict, *, packet_hashes, bundle_hashes,
+        packet_by_hash=None, f5_records=None) -> None:
+    """Every prediction-referenced F5 object must be recoverable from files."""
+    missing_packets = set(f5_block.get("source_packet_hashes") or []) - set(
+        packet_hashes)
+    if missing_packets:
+        raise ValueError(
+            "F5 source packet artifact is missing prediction-referenced "
+            f"packets: {sorted(missing_packets)}")
+    missing_bundles = set(
+        f5_block.get("controversy_bundle_hashes") or []) - set(bundle_hashes)
+    if missing_bundles:
+        raise ValueError(
+            "F5 controversy artifact is missing prediction-referenced "
+            f"bundles: {sorted(missing_bundles)}")
+    if packet_by_hash is None or f5_records is None:
+        return
+
+    def require_packet_identity(work_id, packet_hash, role):
+        if packet_hash is None:
+            return
+        packet = packet_by_hash.get(packet_hash)
+        if packet is None:  # Named more specifically by the coverage check.
+            return
+        if packet.get("work_id") != work_id:
+            raise ValueError(
+                f"F5 {role} packet identity mismatch: work {work_id!r} "
+                f"references packet for {packet.get('work_id')!r}")
+
+    for record in f5_records:
+        require_packet_identity(
+            record.get("cited_work_id"),
+            record.get("cited_source_packet_sha256"), "cited")
+        for candidate in record.get("candidate_assessments") or []:
+            require_packet_identity(
+                candidate.get("candidate_work_id"),
+                candidate.get("candidate_source_packet_sha256"), "candidate")
+
+
 def _read_jsonl_lines(path: str) -> list:
     if not os.path.exists(path):
         return []
@@ -949,8 +1000,12 @@ def _module_hashes(fulltext_path: bool, f5_seams, f7_seams) -> dict:
                   "cre.f1.fulltext_reader", "cre.f1.sentence_spans"]
     if f5_seams is not None:
         names += ["cre.f1.f5_activation", "cre.f1.f5_supersession",
+                  "cre.f1.f5_candidate_screen",
                   "cre.f1.f5_contradiction_prompt",
-                  "cre.f1.f5_seams", "cre.f1.f5_candidate_finder",
+                  "cre.f1.f5_seams", "cre.f1.f5_evidence_store",
+                  "cre.f1.f5_notice", "cre.f1.f5_study_cluster",
+                  "cre.f1.f5_controversy_bundle",
+                  "cre.f1.f5_candidate_finder",
                   "cre.f1.f5_discovery_queue"]
     # F7 can OWN the published label (it rides highest in the engine ordering),
     # so an F7 run that does not hash f7_entity records the governing module of
@@ -1159,7 +1214,18 @@ def _instrument_f5_seams(seams: dict) -> tuple[dict, dict]:
     copied only when that seam exposes an executed-protocol log.
     """
     observed = {"retrieval_calls": 0, "attestation_calls": 0,
-                "judge_calls": 0, "retrieval_protocols": []}
+                "judge_calls": 0, "judge_model_calls": 0,
+                "judge_cache_hits": 0, "retrieval_protocols": []}
+    evidence_store = getattr(
+        seams.get("fetch_comparability_source"), "evidence_store", None)
+    observed["evidence_store_counters"] = (
+        getattr(evidence_store, "counters", {}) if evidence_store is not None else {})
+    observed["source_packet_log"] = getattr(
+        seams.get("fetch_comparability_source"), "source_packet_log", [])
+    observed["candidate_cap"] = getattr(
+        seams.get("retrieve_superseding_candidates"),
+        "candidate_cap", "not_collected")
+    observed["_judge_counter_source"] = seams.get("judge_contradiction")
     wrapped = dict(seams)
     observation_lock = threading.Lock()
 
@@ -1202,6 +1268,11 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
     from .f5_seams import CANDIDATE_CAP, RERANKER
     from .f5_supersession import F5Policy
     from .f5_activation import ACTIVATION_SCHEMA_VERSION
+    from .f5_evidence_store import SOURCE_PACKET_SCHEMA_VERSION
+    from .f5_notice import NOTICE_RESOLVER_VERSION
+    from .f5_study_cluster import STUDY_CLUSTER_VERSION
+    from .f5_controversy_bundle import CONTROVERSY_BUNDLE_SCHEMA_VERSION
+    from .f5_candidate_screen import CANDIDATE_SCREEN_VERSION
     from .f5_contradiction_prompt import RESPONSE_PARSER_VERSION
     from .f5_discovery_queue import (
         QUEUE_VERSION, disposition_counts, negative_reason)
@@ -1214,6 +1285,12 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
                 key = str(value)
                 out[key] = out.get(key, 0) + 1
         return dict(sorted(out.items()))
+
+    def stage_total(field: str) -> int:
+        return sum(
+            int((record.get("cost_stage_counts") or {}).get(field) or 0)
+            for record in (f5_records or [])
+            if isinstance(record, dict))
 
     negative_counts = {}
     for record in f5_records or []:
@@ -1239,9 +1316,107 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
         activation_reason_counts[reason_code] = (
             activation_reason_counts.get(reason_code, 0) + 1)
 
+    packet_hashes = set()
+    controversy_bundle_hashes = set()
+    source_status_counts: dict[str, int] = {}
+    notice_resolution_counts: dict[str, int] = {}
+    study_cluster_components: list[set[str]] = []
+    for record in f5_records or []:
+        bundle_hash = record.get("controversy_bundle_sha256")
+        if bundle_hash:
+            controversy_bundle_hashes.add(str(bundle_hash))
+        cited_hash = record.get("cited_source_packet_sha256")
+        if cited_hash:
+            packet_hashes.add(str(cited_hash))
+        cited_status = record.get("cited_source_status")
+        if cited_status:
+            key = f"cited:{cited_status}"
+            source_status_counts[key] = source_status_counts.get(key, 0) + 1
+        cited_notice_resolution = record.get("cited_notice_resolution")
+        if cited_notice_resolution:
+            key = f"cited:{cited_notice_resolution}"
+            notice_resolution_counts[key] = notice_resolution_counts.get(key, 0) + 1
+        for cluster in record.get("study_clusters") or []:
+            if isinstance(cluster, dict):
+                evidence_ids = cluster.get("identity_evidence_ids")
+                if not evidence_ids:
+                    evidence_ids = [
+                        f"pmid:{value}" for value in cluster.get("work_ids") or []]
+                component = {
+                    str(value) for value in evidence_ids
+                    if isinstance(value, str) and value}
+                if component:
+                    study_cluster_components.append(component)
+        for candidate in record.get("candidate_assessments") or []:
+            candidate_hash = candidate.get("candidate_source_packet_sha256")
+            if candidate_hash:
+                packet_hashes.add(str(candidate_hash))
+            candidate_status = candidate.get("candidate_source_status")
+            if candidate_status:
+                key = f"candidate:{candidate_status}"
+                source_status_counts[key] = source_status_counts.get(key, 0) + 1
+            candidate_notice_resolution = candidate.get("candidate_notice_resolution")
+            if candidate_notice_resolution:
+                key = f"candidate:{candidate_notice_resolution}"
+                notice_resolution_counts[key] = notice_resolution_counts.get(key, 0) + 1
+
+    # Claims can retrieve different reports from one version family. Merge the
+    # exact identity evidence across the entire run before counting votes; a
+    # per-claim union of opaque cluster IDs can count one study twice.
+    merged_components: list[set[str]] = []
+    for component in study_cluster_components:
+        overlaps = [existing for existing in merged_components
+                    if existing & component]
+        if not overlaps:
+            merged_components.append(set(component))
+            continue
+        combined = set(component)
+        for existing in overlaps:
+            combined.update(existing)
+            merged_components.remove(existing)
+        merged_components.append(combined)
+    run_study_clusters = []
+    for component in sorted(merged_components, key=lambda values: sorted(values)):
+        canonical = "\x1f".join(sorted(component)).encode("utf-8")
+        run_study_clusters.append({
+            "cluster_id": f"run:{hashlib.sha256(canonical).hexdigest()[:20]}",
+            "identity_evidence_ids": sorted(component),
+        })
+    study_cluster_ids = {
+        cluster["cluster_id"] for cluster in run_study_clusters}
+
     policy = f5_policy if f5_policy is not None else F5Policy()
     protocols = list((f5_runtime or {}).get("retrieval_protocols") or [])
     attestation_calls = int((f5_runtime or {}).get("attestation_calls") or 0)
+    judge_source = (f5_runtime or {}).get("_judge_counter_source")
+    def observed_judge_counter(attribute: str, fallback_key: str):
+        if judge_source is not None:
+            value = getattr(judge_source, attribute, None)
+        else:
+            value = (f5_runtime or {}).get(fallback_key)
+        if (isinstance(value, int) and not isinstance(value, bool)
+                and value >= 0):
+            return value
+        return "not_collected"
+
+    judge_model_calls = observed_judge_counter(
+        "model_calls", "judge_model_calls")
+    judge_cache_hits = observed_judge_counter(
+        "cache_hits", "judge_cache_hits")
+    evidence_counters = dict(
+        (f5_runtime or {}).get("evidence_store_counters") or {})
+    protocol_caps = {
+        protocol.get("candidate_cap") for protocol in protocols
+        if isinstance(protocol, dict)
+        and isinstance(protocol.get("candidate_cap"), int)
+        and not isinstance(protocol.get("candidate_cap"), bool)
+    }
+    reported_candidate_cap = (f5_runtime or {}).get(
+        "candidate_cap", "not_collected")
+    if reported_candidate_cap == "not_collected" and len(protocol_caps) == 1:
+        reported_candidate_cap = next(iter(protocol_caps))
+    elif len(protocol_caps) > 1:
+        reported_candidate_cap = "inconsistent_across_executed_protocols"
     block = {
         "mode": policy.mode,
         "deploy_path_a": policy.deploy_path_a,
@@ -1249,6 +1424,21 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
         "contradiction_prompt_version": policy.contradiction_prompt_version,
         "response_parser_version": RESPONSE_PARSER_VERSION,
         "activation_schema_version": ACTIVATION_SCHEMA_VERSION,
+        "candidate_screen_version": CANDIDATE_SCREEN_VERSION,
+        "candidate_screen_enabled": policy.candidate_screen_enabled,
+        "source_packet_schema_version": SOURCE_PACKET_SCHEMA_VERSION,
+        "source_packet_hashes": sorted(packet_hashes),
+        "source_packet_count": len(packet_hashes),
+        "controversy_bundle_schema_version": CONTROVERSY_BUNDLE_SCHEMA_VERSION,
+        "controversy_bundle_hashes": sorted(controversy_bundle_hashes),
+        "controversy_bundle_count": len(controversy_bundle_hashes),
+        "source_status_counts": dict(sorted(source_status_counts.items())),
+        "notice_resolver_version": NOTICE_RESOLVER_VERSION,
+        "notice_resolution_counts": dict(sorted(notice_resolution_counts.items())),
+        "study_cluster_version": STUDY_CLUSTER_VERSION,
+        "study_cluster_ids": sorted(study_cluster_ids),
+        "study_cluster_count": len(study_cluster_ids),
+        "study_clusters": run_study_clusters,
         "activation_applicability_counts": dict(sorted(
             activation_applicability_counts.items())),
         "activation_reason_counts": dict(sorted(activation_reason_counts.items())),
@@ -1267,7 +1457,11 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
         "retrieval_status_counts": tally("retrieval_status"),
         "retrieval_adequacy_counts": tally("retrieval_adequacy"),
         "negative_reason_counts": dict(sorted(negative_counts.items())),
-        "candidate_cap": CANDIDATE_CAP,
+        "candidate_cap": reported_candidate_cap,
+        "deep_comparison_budget": policy.max_deep_comparisons,
+        "budget_exhausted_claims": sum(
+            record.get("budget_exhausted") is True
+            for record in (f5_records or []) if isinstance(record, dict)),
         "reranker": RERANKER,
         "queue_version": QUEUE_VERSION,
         "disposition_counts": disposition_counts(f5_records),
@@ -1280,6 +1474,46 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
             "No attestation lookup call was observed; seam provenance is not asserted."),
         "contradiction_judge_calls": int(
             (f5_runtime or {}).get("judge_calls") or 0),
+        "stage_counters": {
+            "retrieval_calls": int(
+                (f5_runtime or {}).get("retrieval_calls") or 0),
+            "evidence_metadata_calls": int(
+                evidence_counters.get("metadata_calls") or 0),
+            "evidence_abstract_calls": int(
+                evidence_counters.get("abstract_calls") or 0),
+            "fulltext_attempts": int(
+                evidence_counters.get("fulltext_attempts") or 0),
+            "fulltext_successes": int(
+                evidence_counters.get("fulltext_successes") or 0),
+            "fulltext_failures": int(
+                evidence_counters.get("fulltext_failures") or 0),
+            "evidence_cache_hits": int(
+                evidence_counters.get("cache_hits") or 0),
+            "pairwise_judge_requests": int(
+                (f5_runtime or {}).get("judge_calls") or 0),
+            "pairwise_model_calls": judge_model_calls,
+            "pairwise_cache_hits": judge_cache_hits,
+            "abstract_screen_calls": stage_total("abstract_screen_calls"),
+            "candidates_retrieved": stage_total("candidates_retrieved"),
+            "candidates_structurally_admissible": stage_total(
+                "candidates_structurally_admissible"),
+            "screen_plausible": stage_total("screen_plausible"),
+            "screen_clear_mismatch": stage_total("screen_clear_mismatch"),
+            "screen_uncertain": stage_total("screen_uncertain"),
+            "candidates_entering_deep_comparison": stage_total(
+                "candidates_entering_deep_comparison"),
+            "deep_comparison_calls": stage_total("deep_comparison_calls"),
+            "candidates_budget_skipped": stage_total(
+                "candidates_budget_skipped"),
+            "candidates_aggregated": stage_total("candidates_aggregated"),
+        },
+        "cost_counters": {
+            "model_calls": judge_model_calls,
+            "model_calls_avoided_by_cache": judge_cache_hits,
+            "input_tokens": "not_collected",
+            "output_tokens": "not_collected",
+            "cost_usd": "not_collected",
+        },
         "production_evidence_builder": False,
         "real_data_runs_completed": 0,
         "audit_convergence": "not_converged_one_round_only",
@@ -2471,6 +2705,61 @@ def run_natural_judgment(
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         manifest["f5_discovery_queue_path"] = f5_queue_path
         manifest["f5"]["queued_rows"] = len(f5_queue)
+        manifest["f5"]["discovery_queue_artifact_sha256"] = _sha256_file(
+            f5_queue_path)
+
+        # Persist the source-bound evidence and receiver bundles independently
+        # of the prediction rows. Deduplicate packets by their content hash;
+        # every bundle remains one claim/citation decision. Both files are
+        # canonical and atomically replaced, so their recorded SHA describes
+        # exactly the bytes a receiver reads.
+        packet_by_hash = {}
+        for packet in f5_runtime.get("source_packet_log") or []:
+            from .f5_evidence_store import source_packet_from_dict
+            validated_packet = source_packet_from_dict(packet)
+            packet = validated_packet.to_dict()
+            packet_hash = validated_packet.packet_sha256
+            previous = packet_by_hash.get(packet_hash)
+            if previous is not None and previous != packet:
+                raise ValueError("one F5 packet hash names conflicting packet rows")
+            packet_by_hash[packet_hash] = packet
+        packet_rows = [packet_by_hash[key] for key in sorted(packet_by_hash)]
+        bundle_rows = [
+            record["controversy_bundle"] for record in f5_records_all
+            if isinstance(record.get("controversy_bundle"), dict)]
+        from .f5_controversy_bundle import validate_controversy_bundle
+        for record in f5_records_all:
+            bundle = record.get("controversy_bundle")
+            if isinstance(bundle, dict):
+                validate_controversy_bundle(
+                    bundle,
+                    candidate_assessments=record.get("candidate_assessments"),
+                    record=record)
+        bundle_rows.sort(key=lambda row: (
+            str(row.get("citation_id") or ""),
+            int(row.get("claim_index") or 0),
+            str(row.get("bundle_sha256") or "")))
+        artifact_bundle_hashes = {
+            row["bundle_sha256"] for row in bundle_rows}
+        _require_f5_artifact_coverage(
+            manifest["f5"], packet_hashes=packet_by_hash,
+            bundle_hashes=artifact_bundle_hashes,
+            packet_by_hash=packet_by_hash, f5_records=f5_records_all)
+        packet_path = os.path.join(out_dir, "f5_evidence_packets.jsonl")
+        bundle_path = os.path.join(out_dir, "f5_controversy_bundles.jsonl")
+        _write_jsonl_atomic(packet_path, packet_rows)
+        _write_jsonl_atomic(bundle_path, bundle_rows)
+        manifest["f5"].update({
+            "source_packet_artifact_path": packet_path,
+            "source_packet_artifact_rows": len(packet_rows),
+            "source_packet_artifact_sha256": _sha256_file(packet_path),
+            "source_packet_artifact_packet_hashes": sorted(packet_by_hash),
+            "controversy_bundle_artifact_path": bundle_path,
+            "controversy_bundle_artifact_rows": len(bundle_rows),
+            "controversy_bundle_artifact_sha256": _sha256_file(bundle_path),
+            "controversy_bundle_artifact_bundle_hashes": sorted(
+                row["bundle_sha256"] for row in bundle_rows),
+        })
     # Reportability is a STRICTER predicate than "completed without error", and
     # it is evaluated on the finished manifest plus the predictions file, so it
     # cannot be satisfied by intent. Recorded on every run -- a non-reportable

@@ -315,22 +315,46 @@ def test_f5_wired_through_runner_emits_temporal_finding(tmp_path, monkeypatch):
         CandidateWork, ComparabilitySource, EvidenceTier, NoticeStatus,
         RetrievalResult,
     )
+    from .f5_evidence_store import build_source_packet
 
-    cited_src = ComparabilitySource(abstract="Drug X reduced outcome Y in adults.")
+    def packet(work_id, date, abstract):
+        return build_source_packet(
+            {"id": work_id, "title": f"Work {work_id}", "pub_date": date,
+             "pub_date_latest": date, "pub_date_precision": "day",
+             "authors": ["Author"], "publication_types": [
+                 "Randomized Controlled Trial"]},
+            as_of_date="2024-01-01", retrieved_at="2024-01-01T00:00:00+00:00",
+            evidence_tier="rct", evidence_tier_basis="test",
+            abstract=abstract, historical_content_verified=True)
+
+    cited_packet = packet(
+        "111", "2010-01-01", "Drug X reduced outcome Y in adults.")
+    candidate_packet = packet(
+        "222", "2020-01-01",
+        "A larger trial found Drug X did NOT reduce outcome Y in adults.")
+    cited_src = ComparabilitySource(
+        abstract=cited_packet.abstract, work_id="111",
+        packet_sha256=cited_packet.packet_sha256)
     cand_src = ComparabilitySource(
-        abstract="A larger trial found Drug X did NOT reduce outcome Y in adults.")
+        abstract=candidate_packet.abstract, work_id="222",
+        packet_sha256=candidate_packet.packet_sha256)
 
     def f5_retrieve(cited_meta, claim, *, after_date, as_of_date):
         return RetrievalResult(
-            candidates=(CandidateWork(id="W2", pub_date="2020-01-01",
-                                      authors=("Jones",), tier_hint="rct"),),
+            candidates=(CandidateWork(id="222", pub_date="2020-01-01",
+                                      authors=("Jones",), tier_hint="rct",
+                                      registry_ids=("NCT00000002",),
+                                      demonstrably_distinct_from=("111",)),),
             adequacy="adequate", status="ok", query_hash="qh")
 
     def f5_fetch(work_id, *, as_of_date):
-        return cand_src if work_id == "W2" else cited_src
+        return cand_src if work_id == "222" else cited_src
+
+    f5_fetch.source_packet_log = [
+        cited_packet.to_dict(), candidate_packet.to_dict()]
 
     def f5_notice(work_id, *, as_of_date):
-        return NoticeStatus()
+        return NoticeStatus(lookup_status="ok", source_role="no_notice_type")
 
     def f5_tier(meta):
         hint = meta.get("tier_hint") if isinstance(meta, dict) else None
@@ -341,9 +365,10 @@ def test_f5_wired_through_runner_emits_temporal_finding(tmp_path, monkeypatch):
 
     def f5_judge(cited_source, cand_source, claim):
         return json.dumps({
-            "directional_contradiction": True, "claim_match": "match",
+            "directional_contradiction": True,
+            "relation_to_cited_finding": "opposes", "claim_match": "match",
             "outcome_relation": "same", "population_relation": "equivalent",
-            "cited_direction": "reduces", "candidate_direction": "no effect",
+            "cited_direction": "decrease", "candidate_direction": "no_effect",
             "magnitude": "reversal",
             "cited_finding_span": "Drug X reduced outcome Y in adults",
             "candidate_contradiction_span": "Drug X did NOT reduce outcome Y in adults",
@@ -369,8 +394,9 @@ def test_f5_wired_through_runner_emits_temporal_finding(tmp_path, monkeypatch):
         preband_disposition=CLEARED, model="test-model",
         f5_seams=f5_seams,
         f5_evidence_builder=lambda item: {
-            "cited_work_id": "W1",
-            "cited_meta": {"authors": ["Smith"], "cited_tier": "rct"},
+            "cited_work_id": "111",
+            "cited_meta": {"authors": ["Smith"], "cited_tier": "rct",
+                           "registry_ids": ["NCT00000001"]},
             "cited_date": "2010-01-01", "as_of_date": "2024-01-01"},
     )
     rows = [json.loads(l) for l in
@@ -384,6 +410,24 @@ def test_f5_wired_through_runner_emits_temporal_finding(tmp_path, monkeypatch):
     assert manifest["f5"]["attestation_lookup_performed"] is True
     assert manifest["f5"]["attestation_calls"] == 1
     assert manifest["f5"]["contradiction_judge_calls"] == 1
+    packet_path = out_dir / "f5_evidence_packets.jsonl"
+    bundle_path = out_dir / "f5_controversy_bundles.jsonl"
+    assert manifest["f5"]["source_packet_artifact_rows"] == 2
+    assert manifest["f5"]["controversy_bundle_artifact_rows"] == 1
+    assert manifest["f5"]["source_packet_count"] == 2
+    assert manifest["f5"]["controversy_bundle_count"] == 1
+    assert manifest["f5"]["source_packet_artifact_sha256"] == \
+        jr._sha256_file(str(packet_path))
+    assert manifest["f5"]["controversy_bundle_artifact_sha256"] == \
+        jr._sha256_file(str(bundle_path))
+    assert len(packet_path.read_text().splitlines()) == 2
+    assert len(bundle_path.read_text().splitlines()) == 1
+    assert manifest["f5"]["source_packet_artifact_packet_hashes"] == sorted(
+        [cited_packet.packet_sha256, candidate_packet.packet_sha256])
+    assert manifest["f5"]["controversy_bundle_artifact_bundle_hashes"] == [
+        row["f5_records"][0]["controversy_bundle_sha256"]]
+    assert manifest["f5"]["discovery_queue_artifact_sha256"] == jr._sha256_file(
+        manifest["f5_discovery_queue_path"])
     assert "F5_CONTRADICTION_PROMPT" in manifest["prompt_sha256"]
     assert "retrieval_protocol" not in manifest["f5"]
     assert "exposed no executed-protocol" in manifest["f5"]["retrieval_protocol_note"]
@@ -414,6 +458,114 @@ def test_f5_manifest_distinguishes_absence_from_retrieval_outage():
     assert absence["negative_reason_counts"] != outage["negative_reason_counts"]
 
 
+def test_f5_manifest_reports_observed_cache_savings_without_inventing_cost():
+    def judge(*_args):
+        raise AssertionError("not called")
+
+    judge.model_calls = 3
+    judge.cache_hits = 7
+    runtime = {
+        "retrieval_calls": 4, "attestation_calls": 0, "judge_calls": 10,
+        "retrieval_protocols": [], "_judge_counter_source": judge,
+        "evidence_store_counters": {
+            "metadata_calls": 8, "abstract_calls": 6,
+            "fulltext_attempts": 2, "fulltext_successes": 1,
+            "fulltext_failures": 1, "cache_hits": 5,
+        },
+    }
+    block = jr._f5_manifest_block(None, [], runtime)
+    assert block["stage_counters"] == {
+        "retrieval_calls": 4,
+        "evidence_metadata_calls": 8,
+        "evidence_abstract_calls": 6,
+        "fulltext_attempts": 2,
+        "fulltext_successes": 1,
+        "fulltext_failures": 1,
+        "evidence_cache_hits": 5,
+        "pairwise_judge_requests": 10,
+        "pairwise_model_calls": 3,
+        "pairwise_cache_hits": 7,
+        "abstract_screen_calls": 0,
+        "candidates_retrieved": 0,
+        "candidates_structurally_admissible": 0,
+        "screen_plausible": 0,
+        "screen_clear_mismatch": 0,
+        "screen_uncertain": 0,
+        "candidates_entering_deep_comparison": 0,
+        "deep_comparison_calls": 0,
+        "candidates_budget_skipped": 0,
+        "candidates_aggregated": 0,
+    }
+    assert block["cost_counters"] == {
+        "model_calls": 3,
+        "model_calls_avoided_by_cache": 7,
+        "input_tokens": "not_collected",
+        "output_tokens": "not_collected",
+        "cost_usd": "not_collected",
+    }
+
+
+def test_f5_manifest_uses_actual_cap_and_does_not_invent_judge_cost_counts():
+    retrieve = lambda *_args, **_kwargs: None
+    retrieve.candidate_cap = 2
+    judge = lambda *_args, **_kwargs: None
+    _, runtime = jr._instrument_f5_seams({
+        "retrieve_superseding_candidates": retrieve,
+        "fetch_comparability_source": lambda *_a, **_k: None,
+        "check_formal_notice": lambda *_a, **_k: None,
+        "classify_evidence_tier": lambda *_a, **_k: None,
+        "find_supersession_attestation": lambda *_a, **_k: None,
+        "judge_contradiction": judge,
+    })
+    runtime["judge_calls"] = 1
+    block = jr._f5_manifest_block(None, [], runtime)
+    assert block["candidate_cap"] == 2
+    assert block["stage_counters"]["pairwise_model_calls"] == "not_collected"
+    assert block["stage_counters"]["pairwise_cache_hits"] == "not_collected"
+    assert block["cost_counters"]["model_calls"] == "not_collected"
+    assert block["cost_counters"]["model_calls_avoided_by_cache"] == \
+        "not_collected"
+
+
+def test_f5_artifact_coverage_rejects_missing_referenced_evidence():
+    block = {
+        "source_packet_hashes": ["cited", "candidate"],
+        "controversy_bundle_hashes": ["bundle"],
+    }
+    with pytest.raises(ValueError, match="missing prediction-referenced packets"):
+        jr._require_f5_artifact_coverage(
+            block, packet_hashes={"cited"}, bundle_hashes={"bundle"})
+    with pytest.raises(ValueError, match="missing prediction-referenced bundles"):
+        jr._require_f5_artifact_coverage(
+            block, packet_hashes={"cited", "candidate"}, bundle_hashes=set())
+    # Extra packets from a quarantined attempt are retained, not rejected.
+    jr._require_f5_artifact_coverage(
+        block, packet_hashes={"cited", "candidate", "extra"},
+        bundle_hashes={"bundle", "extra-bundle"})
+
+
+def test_f5_artifact_coverage_binds_packet_hashes_to_work_ids():
+    block = {
+        "source_packet_hashes": ["cited", "candidate"],
+        "controversy_bundle_hashes": ["bundle"],
+    }
+    records = [{
+        "cited_work_id": "111", "cited_source_packet_sha256": "cited",
+        "candidate_assessments": [{
+            "candidate_work_id": "222",
+            "candidate_source_packet_sha256": "cited",
+        }],
+    }]
+    packets = {
+        "cited": {"work_id": "111"},
+        "candidate": {"work_id": "222"},
+    }
+    with pytest.raises(ValueError, match="candidate packet identity mismatch"):
+        jr._require_f5_artifact_coverage(
+            block, packet_hashes=packets, bundle_hashes={"bundle"},
+            packet_by_hash=packets, f5_records=records)
+
+
 def test_f5_unwired_holds_temporal_unjudgeable(tmp_path, monkeypatch):
     """Without F5 seams the temporal seam stays UNJUDGEABLE and no F5 finding or
     f5_records appear -- byte-identical to the pre-wiring behavior."""
@@ -424,6 +576,9 @@ def test_f5_unwired_holds_temporal_unjudgeable(tmp_path, monkeypatch):
         disposition=CLEARED, monkeypatch=monkeypatch)
     assert "F5" not in rows[0]["findings"]
     assert "f5_records" not in rows[0]
+    out_dir = tmp_path / "out"
+    assert not (out_dir / "f5_evidence_packets.jsonl").exists()
+    assert not (out_dir / "f5_controversy_bundles.jsonl").exists()
 
 
 # --------------------------------------------------------------------------

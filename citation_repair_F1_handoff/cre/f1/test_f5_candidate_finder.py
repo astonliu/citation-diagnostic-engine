@@ -115,6 +115,35 @@ def test_pubmed_metadata_keeps_the_fields_f5_needs():
     assert row["publication_types"] == ["Randomized Controlled Trial"]
 
 
+def test_pubmed_metadata_keeps_notice_version_doi_and_trial_identity():
+    xml = """
+    <PubmedArticleSet><PubmedArticle><MedlineCitation>
+      <PMID>104</PMID><Article><ArticleTitle>Trial report</ArticleTitle>
+        <Journal><JournalIssue><PubDate><Year>2022</Year></PubDate></JournalIssue></Journal>
+        <AuthorList><Author><LastName>Jones</LastName></Author></AuthorList>
+        <PublicationTypeList><PublicationType>Randomized Controlled Trial</PublicationType></PublicationTypeList>
+      </Article>
+      <DataBankList><DataBank><DataBankName>ClinicalTrials.gov</DataBankName>
+        <AccessionNumberList><AccessionNumber>NCT00000001</AccessionNumber></AccessionNumberList>
+      </DataBank></DataBankList>
+      <CommentsCorrectionsList>
+        <CommentsCorrections RefType="UpdateOf"><PMID>103</PMID></CommentsCorrections>
+        <CommentsCorrections RefType="RetractionIn"><PMID>105</PMID></CommentsCorrections>
+      </CommentsCorrectionsList>
+    </MedlineCitation><PubmedData><ArticleIdList>
+      <ArticleId IdType="doi">10.1234/example</ArticleId>
+    </ArticleIdList></PubmedData></PubmedArticle></PubmedArticleSet>
+    """
+    row = finder._parse_pubmed_xml(xml)["104"]
+    assert row["registry_ids"] == ["clinicaltrialsgov:NCT00000001"]
+    assert row["doi"] == "10.1234/example"
+    assert row["version_work_ids"] == ["103"]
+    assert row["comments_corrections"] == [
+        {"ref_type": "UpdateOf", "pmid": "103", "note": ""},
+        {"ref_type": "RetractionIn", "pmid": "105", "note": ""},
+    ]
+
+
 def test_three_stream_union_deduplicates_filters_dates_and_preserves_sources(
         tmp_path, monkeypatch):
     direct_requests(monkeypatch)

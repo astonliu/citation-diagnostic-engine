@@ -11,10 +11,11 @@ opinion: ``proposed_route``, ``temporal_state``, ``confidence`` and
 the built artifact rather than trusting the builder. The judge is never gold, and
 an annotator who can see the proposed route is no longer annotating independently.
 
-RECORDED, NOT QUEUED. ``do_not_surface`` and ``unassessable`` rows are counted and
-kept in the record; they are simply not put in front of an annotator. That is the
-DEC-045 read-across -- a NO_CLAIMS reference is recorded and counted, never queued
--- and it is why the counts live in the manifest even though the queue does not.
+RECORDED, NOT DIRECTLY QUEUED. ``do_not_surface`` and ``unassessable`` candidate
+rows are counted and kept in the bundle rather than exposed as machine-selected
+pairwise tasks. If a claim has retained candidates but none surfaces, one blind
+bundle-reference row keeps that controversy reachable without leaking the
+detector's reason or route.
 
 ABSENCE LANGUAGE. Nothing here may say that no superseding paper exists. F5 can
 report only "none found under this protocol": SciFact-Open measured that 34.3%
@@ -76,9 +77,13 @@ def build_queue(records) -> "list[dict]":
     candidates is two independent judgements."""
     queue = []
     for record in records or []:
+        surfaced = 0
+        activation_applicability = (record.get("activation") or {}).get(
+            "applicability")
         for cand in record.get("candidate_assessments") or []:
             if cand.get("discovery_disposition") != "surface":
                 continue
+            surfaced += 1
             queue.append({
                 "queue_version": QUEUE_VERSION,
                 "claim_index": record.get("claim_index"),
@@ -89,6 +94,41 @@ def build_queue(records) -> "list[dict]":
                 "candidate_date": cand.get("candidate_date"),
                 "cited_finding_span": cand.get("cited_finding_span"),
                 "candidate_contradiction_span": cand.get("candidate_contradiction_span"),
+                "cited_source_packet_sha256": record.get(
+                    "cited_source_packet_sha256"),
+                "candidate_source_packet_sha256": cand.get(
+                    "candidate_source_packet_sha256"),
+                "controversy_bundle_sha256": record.get(
+                    "controversy_bundle_sha256"),
+                "search_complete": record.get("search_complete"),
+                "human_review_reason": (record.get("controversy_bundle") or {}).get(
+                    "human_review_reason"),
+                "row_kind": "candidate_review",
+            })
+        if (surfaced == 0 and record.get("controversy_bundle_sha256")
+                and (record.get("candidate_assessments")
+                     or (record.get("search_complete") is False
+                         and activation_applicability in {
+                             "eligible", "uncertain"}))):
+            queue.append({
+                "queue_version": QUEUE_VERSION,
+                "row_kind": "controversy_bundle_reference",
+                "claim_index": record.get("claim_index"),
+                "claim_text": record.get("claim_text"),
+                "cited_work_id": record.get("cited_work_id"),
+                "cited_date": record.get("cited_date"),
+                "candidate_work_id": None,
+                "candidate_date": None,
+                "cited_finding_span": record.get("cited_finding_span"),
+                "candidate_contradiction_span": None,
+                "cited_source_packet_sha256": record.get(
+                    "cited_source_packet_sha256"),
+                "candidate_source_packet_sha256": None,
+                "controversy_bundle_sha256": record.get(
+                    "controversy_bundle_sha256"),
+                "search_complete": record.get("search_complete"),
+                "human_review_reason": (record.get("controversy_bundle") or {}).get(
+                    "human_review_reason"),
             })
     return queue
 

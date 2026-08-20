@@ -130,6 +130,7 @@ def test_scope_axis_is_on_the_contract_and_closed():
 def _reply(**over):
     body = {
         "directional_contradiction": True,
+        "relation_to_cited_finding": "opposes",
         "claim_match": "match",
         "outcome_relation": "same",
         "population_relation": "equivalent",
@@ -153,6 +154,41 @@ def test_parser_accepts_the_axis_and_exposes_it():
 def test_parser_rejects_an_off_list_axis():
     with pytest.raises(ValueError):
         f5._parse_contradiction(_reply(scope_mismatch_axis="vibes"))
+
+
+def test_parser_rejects_confirmation_with_opposite_directions():
+    with pytest.raises(ValueError, match="confirmation requires"):
+        f5._parse_contradiction(_reply(
+            directional_contradiction=False,
+            relation_to_cited_finding="confirms",
+            cited_direction="increase", candidate_direction="decrease"))
+
+
+def test_parser_rejects_mixed_relation_without_a_mixed_direction():
+    with pytest.raises(ValueError, match="mixed relation"):
+        f5._parse_contradiction(_reply(
+            directional_contradiction=False,
+            relation_to_cited_finding="mixed"))
+
+
+def test_parser_rejects_opposition_with_the_same_clear_direction():
+    with pytest.raises(ValueError, match="opposition requires"):
+        f5._parse_contradiction(_reply(
+            cited_direction="decrease", candidate_direction="decrease"))
+
+
+def test_parser_rejects_neutral_with_different_clear_directions():
+    with pytest.raises(ValueError, match="neutral relation conflicts"):
+        f5._parse_contradiction(_reply(
+            directional_contradiction=False,
+            relation_to_cited_finding="neutral",
+            cited_direction="increase", candidate_direction="decrease"))
+
+
+@pytest.mark.parametrize("axis", ["species_or_strain", "unclear"])
+def test_parser_rejects_scope_mismatch_on_fully_comparable_axes(axis):
+    with pytest.raises(ValueError, match="comparable relation axes"):
+        f5._parse_contradiction(_reply(scope_mismatch_axis=axis))
 
 
 def test_parser_strictness_is_unchanged_by_the_new_key():

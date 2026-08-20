@@ -67,7 +67,9 @@ GOVERNING_MODULES = (
     "band_prompts.py", "parser.py", "schema.py", "f3_provenance.py",
     "f4_strength.py", "f7_entity.py", "preband_contract.py",
     "parser_versions.py", "coverage_prompts_v3.py", "coverage_aggregate.py",
-    "f5_activation.py", "f5_supersession.py", "f5_seams.py",
+    "f5_activation.py", "f5_candidate_screen.py", "f5_evidence_store.py", "f5_notice.py",
+    "f5_study_cluster.py", "f5_controversy_bundle.py",
+    "f5_supersession.py", "f5_seams.py",
     "f5_candidate_finder.py",
     "f5_contradiction_prompt.py", "f5_discovery_queue.py",
 )

@@ -84,6 +84,18 @@ from enum import Enum
 from typing import Any, Callable, Optional, Sequence
 
 from .f5_activation import activation_decision_from_dict, decide_f5_activation
+from .f5_candidate_screen import (
+    CANDIDATE_SCREEN_VERSION, CandidateScreenBatch, CandidateScreenDecision,
+    validate_candidate_screen_batch,
+)
+from .f5_controversy_bundle import build_controversy_bundle
+from .f5_evidence_store import (
+    FACT_ASSESSMENT_NOT_PERFORMED, source_packet_from_dict,
+)
+from .f5_study_cluster import (
+    cluster_studies, compare_studies, identity_from_mapping,
+    source_bound_distinct_data,
+)
 from .judgment_engine import ClaimSupport, SupportState, TemporalAssessment, TemporalState
 
 # Seam type aliases (documentation only). ``judge_contradiction`` returns the
@@ -94,8 +106,8 @@ CallJudgeContradiction = Callable[..., str]
 # Development F5 is deliberately not reportable. One named authority is used by
 # records, manifests and the reportability gate so those surfaces cannot drift.
 F5_REPORTABLE = False
-F5_CONTRADICTION_PROMPT_VERSION = "f5_contradiction_v2"
-F5_RESPONSE_PARSER_VERSION = "strict_f5_contradiction_spanids_v1"
+F5_CONTRADICTION_PROMPT_VERSION = "f5_contradiction_v3"
+F5_RESPONSE_PARSER_VERSION = "strict_f5_relation_spanids_v2"
 
 
 # --------------------------------------------------------------------------
@@ -129,6 +141,9 @@ _TIER_RANK: dict[EvidenceTier, int] = {
 
 _CLAIM_MATCH = frozenset({"match", "mismatch", "uncertain"})
 _OUTCOME_RELATION = frozenset({"same", "not_same", "uncertain"})
+_RELATION_TO_CITED = frozenset(
+    {"opposes", "confirms", "mixed", "neutral", "uncertain"})
+_DIRECTIONS = frozenset({"increase", "decrease", "no_effect", "mixed", "unclear"})
 _POPULATION_RELATION = frozenset(
     {"equivalent", "encompassing_direct",
      "encompassing_without_qualifying_direct_evidence", "narrower", "disjoint",
@@ -151,11 +166,13 @@ _NOTICE_RESOLUTION = frozenset({"resolved_clear", "flagged", "unresolved"})
 # transport failure and a record carrying no notice into one value, and both came
 # back resolved_clear -- an outage reading as "not retracted". Same defect class
 # this file already names and guards for retrieval.
-_NOTICE_LOOKUP_STATUS = frozenset({"ok", "no_record", "not_performed"})
+_NOTICE_LOOKUP_STATUS = frozenset(
+    {"ok", "no_record", "not_performed", "failure"})
 # WHY the as_of_date comparison did or did not happen. A notice whose date could
 # not be compared is not a notice that was checked and cleared.
 _NOTICE_DATE_STATUS = frozenset(
-    {"not_applicable", "compared", "absent", "unparseable", "as_of_unavailable"})
+    {"not_applicable", "compared", "absent", "unparseable",
+     "as_of_unavailable", "boundary_uncertain", "after_cutoff"})
 # WHICH SIDE OF THE RETRACTION a publication type puts this work on. PubMed's
 # "Retracted Publication" (this article WAS retracted) and "Retraction of
 # Publication" / "Retraction Notice" (this article IS the notice) mean OPPOSITE
@@ -165,7 +182,8 @@ _NOTICE_DATE_STATUS = frozenset(
 # distinction instead of discarding it.
 _NOTICE_SOURCE_ROLE = frozenset(
     {"unknown", "retracted_article", "retraction_notice", "correction_notice",
-     "eoc_notice", "no_notice_type"})
+     "eoc_notice", "corrected_article", "corrected_republication",
+     "eoc_subject", "no_notice_type"})
 _ADEQUACY = frozenset({"adequate", "inadequate", "empty"})
 _STATUS = frozenset({"ok", "failure", "partial"})
 _ATTESTATION_TYPES = frozenset(
@@ -202,6 +220,10 @@ class F5Policy:
     confidence_floor: Optional[float] = 0.25      # discovery: low / high-recall
     eoc_caps_at_path_b: bool = True
     deploy_path_a: bool = False                   # LOCKED off in this build
+    candidate_screen_enabled: bool = False
+    # Optional cost ceiling.  None preserves the original all-candidate path;
+    # exhaustion retains skipped candidates and blocks a confident negative.
+    max_deep_comparisons: Optional[int] = None
     # v1 -> v2 (2026-08-12): the contradiction contract gained
     # ``scope_mismatch_axis``. A key-set change is exactly what this version
     # exists to signal, and the prompt text itself first shipped at v2.
@@ -240,6 +262,14 @@ def validate_f5_policy(policy: F5Policy) -> None:
         raise ValueError("policy.eoc_caps_at_path_b must be a bool")
     if type(policy.deploy_path_a) is not bool:
         raise ValueError("policy.deploy_path_a must be a bool")
+    if type(policy.candidate_screen_enabled) is not bool:
+        raise ValueError("policy.candidate_screen_enabled must be a bool")
+    if (policy.max_deep_comparisons is not None
+            and (not isinstance(policy.max_deep_comparisons, int)
+                 or isinstance(policy.max_deep_comparisons, bool)
+                 or policy.max_deep_comparisons < 0)):
+        raise ValueError(
+            "policy.max_deep_comparisons must be None or a nonnegative integer")
     # HARD GATE (blueprint Sec 13): this development-mode build runs under a hard
     # deploy_path_a=False. Path-A autonomous replacement is not derivable until the
     # Roberts advisor locks are frozen; enabling it here is rejected outright so a
@@ -301,6 +331,12 @@ class CandidateWork:
     authors: tuple[str, ...] = ()
     mesh: tuple[str, ...] = ()
     tier_hint: Optional[str] = None
+    registry_ids: tuple[str, ...] = ()
+    version_work_ids: tuple[str, ...] = ()
+    cohort_ids: tuple[str, ...] = ()
+    dataset_ids: tuple[str, ...] = ()
+    demonstrably_distinct_from: tuple[str, ...] = ()
+    doi: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -308,10 +344,14 @@ class CandidateWork:
         if not isinstance(self.pub_date, str) or not self.pub_date.strip():
             raise ValueError("CandidateWork.pub_date must be a nonblank ISO date")
         _parse_date(self.pub_date, "CandidateWork.pub_date")
-        if not isinstance(self.authors, tuple):
-            raise ValueError("CandidateWork.authors must be a tuple")
-        if not isinstance(self.mesh, tuple):
-            raise ValueError("CandidateWork.mesh must be a tuple")
+        for name in (
+            "authors", "mesh", "registry_ids", "version_work_ids",
+            "cohort_ids", "dataset_ids", "demonstrably_distinct_from",
+        ):
+            if not isinstance(getattr(self, name), tuple):
+                raise ValueError(f"CandidateWork.{name} must be a tuple")
+        if self.doi is not None and not isinstance(self.doi, str):
+            raise ValueError("CandidateWork.doi must be a string or None")
 
 
 @dataclass(frozen=True)
@@ -356,16 +396,38 @@ class ComparabilitySource:
     abstract: Optional[str] = None
     methods: Optional[str] = None
     results: Optional[str] = None
+    other_sections: Optional[str] = None
     protocol: Optional[str] = None
     registry_record: Optional[str] = None
     publication_type: Optional[str] = None
+    work_id: str = ""
+    source_status: str = "complete"
+    missing_facts: tuple[str, ...] = ()
+    packet_sha256: Optional[str] = None
 
     def __post_init__(self) -> None:
-        for name in ("abstract", "methods", "results", "protocol",
+        for name in ("abstract", "methods", "results", "other_sections", "protocol",
                      "registry_record", "publication_type"):
             value = getattr(self, name)
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"ComparabilitySource.{name} must be a string or None")
+        if not isinstance(self.work_id, str):
+            raise ValueError("ComparabilitySource.work_id must be a string")
+        if self.work_id and not re.fullmatch(r"[0-9]+", self.work_id):
+            raise ValueError("ComparabilitySource.work_id must be a decimal PMID or empty")
+        if self.source_status not in {"complete", "partial", "failure"}:
+            raise ValueError(
+                "ComparabilitySource.source_status must be complete, partial, or failure")
+        if not isinstance(self.missing_facts, tuple) or any(
+                not isinstance(value, str) or not value.strip()
+                for value in self.missing_facts):
+            raise ValueError(
+                "ComparabilitySource.missing_facts must be a tuple of nonblank strings")
+        if self.packet_sha256 is not None and (
+                not isinstance(self.packet_sha256, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", self.packet_sha256)):
+            raise ValueError(
+                "ComparabilitySource.packet_sha256 must be lowercase sha256 or None")
 
 
 @dataclass(frozen=True)
@@ -384,6 +446,8 @@ class NoticeStatus:
     # evidence of why the timing gate did not run.
     date_raw: Optional[str] = None
     source_role: str = "unknown"
+    linked_notice_work_id: Optional[str] = None
+    relationship: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.notice_kind not in _NOTICE_KIND:
@@ -410,6 +474,15 @@ class NoticeStatus:
         # disables that comparison rather than failing closed.
         if self.date is not None:
             _parse_date(self.date, "NoticeStatus.date")
+        if self.linked_notice_work_id is not None and (
+                not isinstance(self.linked_notice_work_id, str)
+                or not re.fullmatch(r"[0-9]+", self.linked_notice_work_id)):
+            raise ValueError(
+                "NoticeStatus.linked_notice_work_id must be decimal PMID or None")
+        if self.relationship is not None and (
+                not isinstance(self.relationship, str)
+                or not self.relationship.strip()):
+            raise ValueError("NoticeStatus.relationship must be nonblank or None")
 
 
 @dataclass(frozen=True)
@@ -448,6 +521,7 @@ class ContradictionJudgment:
     confidence; CODE (not the model) derives ``comparability_decision`` and the
     frozen-engine booleans."""
     directional_contradiction: bool
+    relation_to_cited_finding: str
     claim_match: str
     outcome_relation: str
     population_relation: str
@@ -528,16 +602,35 @@ def _norm_authors(authors: Any) -> Optional[frozenset]:
     return names or None
 
 
-def _assess_independence(cited_meta: dict, candidate: CandidateWork) -> tuple[str, str]:
-    """Authorship/cohort-based independence (blueprint Sec 6-D, Sec 9-6, Sec 9-26).
+def _candidate_study_mapping(candidate: CandidateWork) -> dict:
+    return {
+        "registry_ids": candidate.registry_ids,
+        "version_work_ids": candidate.version_work_ids,
+        "cohort_ids": candidate.cohort_ids,
+        "dataset_ids": candidate.dataset_ids,
+        "demonstrably_distinct_from": candidate.demonstrably_distinct_from,
+        "doi": candidate.doi,
+        "tier_hint": candidate.tier_hint,
+    }
 
-    The Lock-D AND/OR combinator (how author-overlap and data-source signals
-    combine) is UNFROZEN, so this fails closed exactly where the combinator would
-    decide: a confirmed same-cohort re-analysis is definitively NOT independent;
-    disjoint authorship (no shared authors, both known) is definitively
-    independent; author overlap or missing author info -> ``unknown`` (queued for
-    a human in discovery mode). Returns ``(independence, basis)``.
-    """
+
+def _study_identity_dict(identity) -> dict:
+    return {
+        "work_id": identity.work_id,
+        "registry_ids": list(identity.registry_ids),
+        "doi": identity.doi,
+        "version_work_ids": list(identity.version_work_ids),
+        "cohort_ids": list(identity.cohort_ids),
+        "dataset_ids": list(identity.dataset_ids),
+        "demonstrably_distinct_from": list(
+            identity.demonstrably_distinct_from),
+        "primary_study": identity.primary_study,
+    }
+
+
+def _study_relation(cited_meta: dict, candidate: CandidateWork,
+                    cited_work_id: Optional[str] = None):
+    """Structured study relation; authorship alone never establishes identity."""
     same_cohort_ids = cited_meta.get("same_cohort_work_ids")
     if same_cohort_ids is not None:
         # Accept ANY iterable of work ids (list/tuple/set/frozenset/dict_keys/
@@ -556,16 +649,40 @@ def _assess_independence(cited_meta: dict, candidate: CandidateWork) -> tuple[st
                 "cited_meta['same_cohort_work_ids'] must be an iterable of work ids"
             ) from exc
         if is_same_cohort:
-            return "not_independent", "same_cohort_reanalysis"
+            cited = identity_from_mapping(cited_meta, work_id=str(
+                cited_work_id or cited_meta.get("id") or cited_meta.get("pmid")
+                or "cited"))
+            candidate_meta = {
+                "cohort_ids": [f"legacy-same-cohort:{candidate.id}"],
+            }
+            cited_meta_with_cohort = dict(cited_meta)
+            cited_meta_with_cohort["cohort_ids"] = [
+                f"legacy-same-cohort:{candidate.id}"]
+            return compare_studies(
+                identity_from_mapping(cited_meta_with_cohort, work_id=cited.work_id),
+                identity_from_mapping(candidate_meta, work_id=candidate.id),
+            )
+    candidate_meta = _candidate_study_mapping(candidate)
+    cited_id = str(
+        cited_work_id or cited_meta.get("id") or cited_meta.get("pmid") or "cited")
+    return compare_studies(
+        identity_from_mapping(cited_meta, work_id=cited_id),
+        identity_from_mapping(candidate_meta, work_id=candidate.id),
+    )
+
+
+def _assess_independence(cited_meta: dict, candidate: CandidateWork,
+                         cited_work_id: Optional[str] = None) -> tuple[str, str]:
+    relation = _study_relation(cited_meta, candidate, cited_work_id)
+    if relation.independence != "unknown":
+        return relation.independence, relation.basis
     cited_authors = _norm_authors(cited_meta.get("authors"))
     cand_authors = _norm_authors(candidate.authors)
     if cited_authors is None or cand_authors is None:
         return "unknown", "author_info_missing"
     if cited_authors & cand_authors:
-        # Author overlap WITHOUT a confirmed shared cohort is exactly the open
-        # AND/OR combinator cell -> fail closed to unknown until Lock D freezes.
         return "unknown", "author_overlap_open_combinator"
-    return "independent", "disjoint_authorship"
+    return "unknown", "disjoint_authorship_insufficient"
 
 
 # --------------------------------------------------------------------------
@@ -582,7 +699,8 @@ def _reject_duplicate_keys(pairs) -> dict:
 
 
 _CONTRADICTION_KEYS = frozenset(
-    {"directional_contradiction", "claim_match", "outcome_relation",
+    {"directional_contradiction", "relation_to_cited_finding",
+     "claim_match", "outcome_relation",
      "population_relation", "cited_direction", "candidate_direction", "magnitude",
      "cited_finding_span", "candidate_contradiction_span", "confidence",
      # Eleventh key (2026-08-12). The module already ROUTES scope mismatch
@@ -621,6 +739,17 @@ def _parse_contradiction(text: str) -> ContradictionJudgment:
     directional = obj["directional_contradiction"]
     if type(directional) is not bool:  # bool subclasses int; require an actual JSON bool
         raise ValueError("directional_contradiction must be an actual JSON boolean")
+    relation = obj["relation_to_cited_finding"]
+    if relation not in _RELATION_TO_CITED:
+        raise ValueError(
+            f"relation_to_cited_finding must be one of {sorted(_RELATION_TO_CITED)}")
+    if directional and relation != "opposes":
+        raise ValueError(
+            "directional_contradiction=true requires relation_to_cited_finding='opposes'")
+    if relation in {"confirms", "mixed", "neutral", "uncertain"} and directional:
+        raise ValueError(
+            f"relation_to_cited_finding={relation!r} requires "
+            "directional_contradiction=false")
     claim_match = obj["claim_match"]
     if claim_match not in _CLAIM_MATCH:
         raise ValueError(f"claim_match must be one of {sorted(_CLAIM_MATCH)}")
@@ -635,6 +764,30 @@ def _parse_contradiction(text: str) -> ContradictionJudgment:
                  "cited_finding_span", "candidate_contradiction_span"):
         if not isinstance(obj[name], str):
             raise ValueError(f"{name} must be a string")
+    cited_direction = obj["cited_direction"]
+    candidate_direction = obj["candidate_direction"]
+    if cited_direction not in _DIRECTIONS or candidate_direction not in _DIRECTIONS:
+        raise ValueError(f"directions must be one of {sorted(_DIRECTIONS)}")
+    if relation == "confirms" and (
+            cited_direction != candidate_direction
+            or cited_direction not in {"increase", "decrease", "no_effect"}):
+        raise ValueError(
+            "confirmation requires the same clear cited and candidate direction")
+    clear_directions = {"increase", "decrease", "no_effect"}
+    if relation == "opposes" and (
+            cited_direction not in clear_directions
+            or candidate_direction not in clear_directions
+            or cited_direction == candidate_direction):
+        raise ValueError(
+            "opposition requires different clear cited and candidate directions")
+    if (relation == "neutral" and cited_direction in clear_directions
+            and candidate_direction in clear_directions
+            and cited_direction != candidate_direction):
+        raise ValueError(
+            "neutral relation conflicts with different clear source directions")
+    if relation == "mixed" and "mixed" not in {
+            cited_direction, candidate_direction}:
+        raise ValueError("mixed relation requires a mixed source direction")
     confidence = obj["confidence"]
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
         raise ValueError("confidence must be a number")
@@ -644,13 +797,19 @@ def _parse_contradiction(text: str) -> ContradictionJudgment:
     if scope_axis not in _SCOPE_MISMATCH_AXES:
         raise ValueError(
             f"scope_mismatch_axis must be one of {sorted(_SCOPE_MISMATCH_AXES)}")
+    if (derive_comparability_decision(
+            claim_match, outcome_relation, population_relation) == "comparable"
+            and scope_axis != "none"):
+        raise ValueError(
+            "comparable relation axes require scope_mismatch_axis='none'")
     return ContradictionJudgment(
         directional_contradiction=directional,
+        relation_to_cited_finding=relation,
         claim_match=claim_match,
         outcome_relation=outcome_relation,
         population_relation=population_relation,
-        cited_direction=obj["cited_direction"],
-        candidate_direction=obj["candidate_direction"],
+        cited_direction=cited_direction,
+        candidate_direction=candidate_direction,
         magnitude=obj["magnitude"],
         cited_finding_span=obj["cited_finding_span"],
         candidate_contradiction_span=obj["candidate_contradiction_span"],
@@ -662,8 +821,25 @@ def _parse_contradiction(text: str) -> ContradictionJudgment:
 def _source_text(src: ComparabilitySource) -> str:
     """Concatenated evidence text used for verbatim span verification (blueprint
     Sec 5: the abstract/full-text within the bundle serves the span check)."""
-    parts = [src.abstract, src.methods, src.results, src.protocol, src.registry_record]
+    parts = [src.abstract, src.methods, src.results, src.other_sections,
+             src.protocol, src.registry_record]
     return "\n".join(p for p in parts if isinstance(p, str) and p)
+
+
+def _source_has_named_fact_gap(src: ComparabilitySource) -> bool:
+    """Whether evidence is unusable even for a positive contradiction.
+
+    A missing-fact assessor that was not installed is explicitly unknown, not a
+    claim that a particular fact is absent.  It may still expose exact positive
+    evidence to the judge.  Transport failure or a named missing fact may not.
+    """
+    return src.source_status == "failure" or any(
+        fact != FACT_ASSESSMENT_NOT_PERFORMED for fact in src.missing_facts)
+
+
+def _source_incomplete_for_negative(src: ComparabilitySource) -> bool:
+    """Confident negatives require verified-complete evidence."""
+    return src.source_status != "complete" or bool(src.missing_facts)
 
 
 def _tier_from(value: object, name: str) -> EvidenceTier:
@@ -692,6 +868,8 @@ def record_sha256(record: dict) -> str:
 
 # Per-candidate outcome categories (internal).
 _QUALIFYING = "QUALIFYING"
+_CONFIRMING = "CONFIRMING"
+_MIXED = "MIXED"
 _HARD_NONQUALIFYING = "HARD_NONQUALIFYING"   # judgeable + clearly nonqualifying
 _UNASSESSABLE = "UNASSESSABLE"               # could not judge (blocks negative)
 _BORDERLINE = "BORDERLINE"                   # ordinary uncertainty (blocks negative)
@@ -711,7 +889,8 @@ class TemporalAssessorRun:
 
     def __init__(self, *, retrieve_superseding_candidates, fetch_comparability_source,
                  check_formal_notice, classify_evidence_tier,
-                 find_supersession_attestation, judge_contradiction, evidence: dict,
+                 find_supersession_attestation, judge_contradiction,
+                 screen_candidates, evidence: dict,
                  policy: F5Policy):
         self.retrieve = retrieve_superseding_candidates
         self.fetch_source = fetch_comparability_source
@@ -719,6 +898,7 @@ class TemporalAssessorRun:
         self.classify_tier = classify_evidence_tier
         self.find_attestation = find_supersession_attestation
         self.judge = judge_contradiction
+        self.screen = screen_candidates
         self.evidence = evidence
         self.policy = policy
         self.records: list[dict] = []
@@ -751,25 +931,42 @@ class TemporalAssessorRun:
         }
         return _tier_from(self.classify_tier(meta), "candidate tier")
 
-    # -- per-candidate ------------------------------------------------------
-    def _assess_candidate(self, *, claim: str, cited_work_id: str, cited_meta: dict,
-                          cited_date: str, as_of_date: str, cited_source: ComparabilitySource,
-                          cited_tier: EvidenceTier, cited_eoc_caps: bool,
-                          candidate: CandidateWork) -> _CandResult:
-        policy = self.policy
-        cand = {
+    @staticmethod
+    def _new_candidate_assessment(candidate: CandidateWork) -> dict:
+        return {
             "candidate_work_id": candidate.id,
             "candidate_date": candidate.pub_date,
             "candidate_tier": None,
             "candidate_notice_kind": None,
             "candidate_notice_resolution": None,
+            "candidate_notice_lookup_status": None,
+            "candidate_notice_date_status": None,
+            "candidate_notice_date": None,
+            "candidate_notice_date_raw": None,
+            "candidate_notice_source_role": None,
+            "candidate_notice_linked_work_id": None,
+            "candidate_notice_relationship": None,
+            "screen_decision": "not_performed",
+            "screen_claim_relevance": None,
+            "screen_possible_relation": None,
+            "screen_missing_facts": [],
+            "screen_version": None,
+            "screen_prompt_sha256": None,
+            "screen_response_sha256": None,
             "claim_match": None,
             "outcome_relation": None,
             "population_relation": None,
             "comparability_decision": None,
             "independent": None,
             "independence_basis": None,
+            "cited_study_cluster_id": None,
+            "candidate_study_cluster_id": None,
+            "study_cluster_basis": None,
+            "study_cluster_uncertain": None,
+            "source_bound_distinct_span": None,
+            "source_bound_distinct_span_sha256": None,
             "directional_contradiction": None,
+            "relation_to_cited_finding": None,
             "cited_direction": None,
             "candidate_direction": None,
             "contradiction_magnitude": None,
@@ -778,19 +975,15 @@ class TemporalAssessorRun:
             "confidence": None,
             "cited_finding_span": None,
             "candidate_contradiction_span": None,
+            "candidate_source_status": None,
+            "candidate_source_missing_facts": [],
+            "candidate_source_packet_sha256": None,
             "discovery_disposition": None,
             "attestation": "none",
             "attestation_source_id": None,
             "attestation_date": None,
             "attestation_replacement_work_id": None,
             "attestation_conclusion_span": None,
-            # ``failed_replication_evidence`` was here, initialised False and never
-            # written or read anywhere in either repo. REMOVED 2026-08-12 rather
-            # than kept: nothing computes it, so a hard False asserted "we looked
-            # for failed-replication evidence and found none" when nothing had
-            # looked. Every sibling field is either genuinely written or None for
-            # unknown. If the signal is wanted it returns with the code that
-            # produces it.
             "path_a_eligible": False,
             "criteria_fired": [],
             "reason": None,
@@ -798,10 +991,98 @@ class TemporalAssessorRun:
             "contradiction_response_sha256": None,
         }
 
+    @staticmethod
+    def _record_candidate_notice(cand: dict, notice: NoticeStatus) -> None:
+        cand["candidate_notice_kind"] = notice.notice_kind
+        cand["candidate_notice_resolution"] = notice.notice_resolution
+        cand["candidate_notice_lookup_status"] = notice.lookup_status
+        cand["candidate_notice_date_status"] = notice.date_status
+        cand["candidate_notice_date"] = notice.date
+        cand["candidate_notice_date_raw"] = notice.date_raw
+        cand["candidate_notice_source_role"] = notice.source_role
+        cand["candidate_notice_linked_work_id"] = notice.linked_notice_work_id
+        cand["candidate_notice_relationship"] = notice.relationship
+
+    @staticmethod
+    def _record_screen_decision(cand: dict, decision, batch) -> None:
+        cand["screen_decision"] = decision.decision
+        cand["screen_claim_relevance"] = decision.claim_relevance
+        cand["screen_possible_relation"] = decision.possible_relation
+        cand["screen_missing_facts"] = list(decision.missing_facts)
+        cand["screen_version"] = batch.version
+        cand["screen_prompt_sha256"] = batch.prompt_sha256
+        cand["screen_response_sha256"] = batch.response_sha256
+
+    def _cost_gate_result(self, *, candidate: CandidateWork, notice: NoticeStatus,
+                          reason: str, cited_work_id: str,
+                          study_cluster_by_work: Optional[dict] = None,
+                          decision=None, batch=None) -> _CandResult:
+        cand = self._new_candidate_assessment(candidate)
+        self._record_candidate_notice(cand, notice)
+        cand["candidate_tier"] = self._candidate_tier(candidate).value
+        cited_cluster = (study_cluster_by_work or {}).get(cited_work_id)
+        candidate_cluster = (study_cluster_by_work or {}).get(candidate.id)
+        if cited_cluster is not None:
+            cand["cited_study_cluster_id"] = cited_cluster.cluster_id
+        if candidate_cluster is not None:
+            cand["candidate_study_cluster_id"] = candidate_cluster.cluster_id
+            cand["study_cluster_basis"] = candidate_cluster.basis
+            cand["study_cluster_uncertain"] = candidate_cluster.cluster_uncertain
+        if decision is not None and batch is not None:
+            self._record_screen_decision(cand, decision, batch)
+        cand["reason"] = reason
+        cand["discovery_disposition"] = "unassessable"
+        return _CandResult(
+            assessment=cand, category=_UNASSESSABLE, candidate=candidate)
+
+    def _same_study_result(self, *, candidate: CandidateWork,
+                           notice: NoticeStatus, cited_work_id: str,
+                           cited_date: str,
+                           study_cluster_by_work: dict) -> _CandResult:
+        """Retain a proven same-study report without spending a deep-call slot."""
+        cand = self._new_candidate_assessment(candidate)
+        self._record_candidate_notice(cand, notice)
+        cand["candidate_tier"] = self._candidate_tier(candidate).value
+        cand["date_gap_years"] = _date_gap_years(cited_date, candidate.pub_date)
+        cited_cluster = study_cluster_by_work[cited_work_id]
+        candidate_cluster = study_cluster_by_work[candidate.id]
+        cand["cited_study_cluster_id"] = cited_cluster.cluster_id
+        cand["candidate_study_cluster_id"] = candidate_cluster.cluster_id
+        cand["study_cluster_basis"] = candidate_cluster.basis
+        cand["study_cluster_uncertain"] = False
+        cand["independent"] = "not_independent"
+        cand["independence_basis"] = "shared_study_cluster"
+        cand["reason"] = "not_independent"
+        cand["discovery_disposition"] = "do_not_surface"
+        return _CandResult(
+            assessment=cand, category=_HARD_NONQUALIFYING,
+            candidate=candidate)
+
+    # -- per-candidate ------------------------------------------------------
+    def _assess_candidate(self, *, claim: str, cited_work_id: str, cited_meta: dict,
+                          cited_date: str, as_of_date: str, cited_source: ComparabilitySource,
+                          cited_tier: EvidenceTier, cited_eoc_caps: bool,
+                          candidate: CandidateWork,
+                          candidate_notice: Optional[NoticeStatus] = None,
+                          study_cluster_by_work: Optional[dict] = None) -> _CandResult:
+        policy = self.policy
+        cand = self._new_candidate_assessment(candidate)
+
         def finish(category: str, reason: str, disposition: str) -> _CandResult:
             cand["reason"] = reason
             cand["discovery_disposition"] = disposition
             return _CandResult(assessment=cand, category=category, candidate=candidate)
+
+        def finish_negative(reason: str) -> _CandResult:
+            # A partial packet can prove a positive when it contains the exact
+            # qualifying evidence, but it cannot prove absence/nonqualification.
+            if _source_incomplete_for_negative(candidate_source):
+                return finish(
+                    _UNASSESSABLE,
+                    "candidate_source_incomplete_for_negative",
+                    "unassessable",
+                )
+            return finish(_HARD_NONQUALIFYING, reason, "do_not_surface")
 
         # Date window: cited_date < candidate_date <= as_of_date (blueprint Sec 5,
         # Sec 9-19). A predating or post-cutoff candidate is a clear negative.
@@ -814,20 +1095,40 @@ class TemporalAssessorRun:
 
         # Candidate formal notice: any notice / non-clear resolution disqualifies
         # it as a replacement and makes it an unjudgeable audit row (Sec 9-12).
-        cand_notice = self.check_notice(candidate.id, as_of_date=as_of_date)
+        cand_notice = candidate_notice or self.check_notice(
+            candidate.id, as_of_date=as_of_date)
         if not isinstance(cand_notice, NoticeStatus):
             raise ValueError("check_formal_notice must return a NoticeStatus")
-        cand["candidate_notice_kind"] = cand_notice.notice_kind
-        cand["candidate_notice_resolution"] = cand_notice.notice_resolution
-        if cand_notice.notice_kind != "none" or cand_notice.notice_resolution != "resolved_clear":
+        self._record_candidate_notice(cand, cand_notice)
+        if (cand_notice.notice_kind != "none"
+                or cand_notice.notice_resolution != "resolved_clear"
+                or cand_notice.lookup_status != "ok"):
             return finish(_UNASSESSABLE, "candidate_flagged_notice", "unassessable")
 
         cand["candidate_tier"] = self._candidate_tier(candidate).value
+        cited_cluster = (study_cluster_by_work or {}).get(cited_work_id)
+        candidate_cluster = (study_cluster_by_work or {}).get(candidate.id)
+        if cited_cluster is not None:
+            cand["cited_study_cluster_id"] = cited_cluster.cluster_id
+        if candidate_cluster is not None:
+            cand["candidate_study_cluster_id"] = candidate_cluster.cluster_id
+            cand["study_cluster_basis"] = candidate_cluster.basis
+            cand["study_cluster_uncertain"] = candidate_cluster.cluster_uncertain
 
         # Contradiction judgment (strict-JSON; malformed -> ValueError quarantine).
         candidate_source = self.fetch_source(candidate.id, as_of_date=as_of_date)
         if not isinstance(candidate_source, ComparabilitySource):
             raise ValueError("fetch_comparability_source must return a ComparabilitySource")
+        if candidate_source.work_id and candidate_source.work_id != candidate.id:
+            raise ValueError(
+                "candidate ComparabilitySource.work_id does not match candidate")
+        cand["candidate_source_status"] = candidate_source.source_status
+        cand["candidate_source_missing_facts"] = list(
+            candidate_source.missing_facts)
+        cand["candidate_source_packet_sha256"] = candidate_source.packet_sha256
+        if _source_has_named_fact_gap(candidate_source):
+            return finish(
+                _UNASSESSABLE, "candidate_source_incomplete", "unassessable")
         raw = self.judge(cited_source, candidate_source, claim)
         judgment = _parse_contradiction(raw)
         cand["contradiction_response"] = raw
@@ -836,6 +1137,7 @@ class TemporalAssessorRun:
         cand["outcome_relation"] = judgment.outcome_relation
         cand["population_relation"] = judgment.population_relation
         cand["directional_contradiction"] = judgment.directional_contradiction
+        cand["relation_to_cited_finding"] = judgment.relation_to_cited_finding
         cand["cited_direction"] = judgment.cited_direction
         cand["candidate_direction"] = judgment.candidate_direction
         cand["contradiction_magnitude"] = judgment.magnitude
@@ -866,17 +1168,64 @@ class TemporalAssessorRun:
 
         # Independence (authorship/cohort; Lock D combinator UNFROZEN -> fail
         # closed at the combinator cell).
-        independence, basis = _assess_independence(cited_meta, candidate)
+        study_relation = _study_relation(cited_meta, candidate, cited_work_id)
+        independence, basis = _assess_independence(
+            cited_meta, candidate, cited_work_id)
+        cited_cluster = (study_cluster_by_work or {}).get(cited_work_id)
+        candidate_cluster = (study_cluster_by_work or {}).get(candidate.id)
+        if (cited_cluster is not None and candidate_cluster is not None
+                and cited_cluster.cluster_id == candidate_cluster.cluster_id
+                and not cited_cluster.cluster_uncertain):
+            independence, basis = "not_independent", "shared_study_cluster"
         cand["independent"] = independence
         cand["independence_basis"] = basis
+        cand["cited_study_cluster_id"] = (
+            cited_cluster.cluster_id if cited_cluster else study_relation.cited_cluster_id)
+        cand["candidate_study_cluster_id"] = (
+            candidate_cluster.cluster_id if candidate_cluster
+            else study_relation.candidate_cluster_id)
+        cand["study_cluster_basis"] = study_relation.basis
+        # Pairwise uncertainty follows the evidence that established this
+        # relation. PMID-fallback cluster labels remain uncertain in the cluster
+        # table, but explicit distinct-data proof makes this pair's independence
+        # decision certain.
+        cand["study_cluster_uncertain"] = study_relation.cluster_uncertain
+
+        if independence == "unknown":
+            source_distinct, distinct_span = source_bound_distinct_data(
+                cited_text, cand_text)
+            if source_distinct and distinct_span:
+                independence, basis = "independent", "source_bound_distinct_data"
+                cand["independent"] = independence
+                cand["independence_basis"] = basis
+                cand["study_cluster_uncertain"] = False
+                cand["source_bound_distinct_span"] = distinct_span
+                cand["source_bound_distinct_span_sha256"] = _sha256_text(
+                    distinct_span)
+
+        if judgment.relation_to_cited_finding == "mixed":
+            return finish(_MIXED, "mixed_finding", "surface")
+        if judgment.relation_to_cited_finding == "uncertain":
+            return finish(_BORDERLINE, "relation_uncertain", "surface")
+        if judgment.relation_to_cited_finding == "confirms":
+            if comparability != "comparable":
+                return finish_negative("confirmation_not_comparable")
+            if _source_incomplete_for_negative(cited_source) or \
+                    _source_incomplete_for_negative(candidate_source):
+                return finish(
+                    _UNASSESSABLE, "confirmation_source_incomplete", "unassessable")
+            return finish(_CONFIRMING, "comparable_confirmation", "surface")
+        if (judgment.relation_to_cited_finding == "opposes"
+                and judgment.directional_contradiction is not True):
+            return finish(_BORDERLINE, "opposition_not_directional", "surface")
 
         # Hard-nonqualifying clear negatives (do_not_surface).
         if judgment.directional_contradiction is not True:
-            return finish(_HARD_NONQUALIFYING, "not_directional_contradiction", "do_not_surface")
+            return finish_negative("not_directional_contradiction")
         if comparability == "not_comparable":
-            return finish(_HARD_NONQUALIFYING, "not_comparable", "do_not_surface")
+            return finish_negative("not_comparable")
         if independence == "not_independent":
-            return finish(_HARD_NONQUALIFYING, "not_independent", "do_not_surface")
+            return finish_negative("not_independent")
         floor = policy.confidence_floor
         if floor is None:
             # Confidence floor is an unfrozen deployment lock -> fail closed.
@@ -888,7 +1237,7 @@ class TemporalAssessorRun:
             # borderline UNJUDGEABLE instead of a confident negative.
             if policy.mode == "deployment":
                 return finish(_BORDERLINE, "below_confidence_floor", "surface")
-            return finish(_HARD_NONQUALIFYING, "below_confidence_floor", "do_not_surface")
+            return finish_negative("below_confidence_floor")
 
         # Ordinary uncertainty (borderline; blocks a confident negative; may surface).
         if comparability == "uncertain":
@@ -982,6 +1331,7 @@ class TemporalAssessorRun:
 
         record: dict = {
             "claim_index": claim_index,
+            "citation_id": self.evidence.get("citation_id"),
             "claim_text": claim,
             "activation": activation.to_dict(),
             "claim_population_text": claim_meta.get("claim_population_text"),
@@ -993,11 +1343,39 @@ class TemporalAssessorRun:
             "cited_tier": None,
             "cited_notice_kind": None,
             "cited_notice_resolution": None,
+            "cited_notice_lookup_status": None,
+            "cited_notice_date_status": None,
+            "cited_notice_date": None,
+            "cited_notice_date_raw": None,
+            "cited_notice_source_role": None,
+            "cited_notice_linked_work_id": None,
+            "cited_notice_relationship": None,
             "cited_eoc_caps": False,
             "retrieval_adequacy": None,
             "retrieval_status": None,
             "retrieval_query_hash": None,
+            "candidate_screen_version": (
+                CANDIDATE_SCREEN_VERSION if self.screen is not None else None),
+            "candidate_screen_status": (
+                "pending" if self.screen is not None else "not_performed"),
+            "deep_comparison_budget": policy.max_deep_comparisons,
+            "budget_exhausted": False,
+            "cost_stage_counts": {
+                "candidates_retrieved": 0,
+                "candidates_structurally_admissible": 0,
+                "abstract_screen_calls": 0,
+                "screen_plausible": 0,
+                "screen_clear_mismatch": 0,
+                "screen_uncertain": 0,
+                "candidates_entering_deep_comparison": 0,
+                "deep_comparison_calls": 0,
+                "candidates_budget_skipped": 0,
+                "candidates_aggregated": 0,
+            },
             "candidate_assessments": [],
+            "study_clusters": [],
+            "study_identity_inputs": [],
+            "cited_study_cluster_id": None,
             "selected_contradiction_work_id": None,
             "selected_replacement_work_id": None,
             "selected_surfaced_candidate_work_id": None,
@@ -1006,6 +1384,9 @@ class TemporalAssessorRun:
             "comparable_population": None,
             "cited_finding_span": None,
             "candidate_contradiction_span": None,
+            "cited_source_status": None,
+            "cited_source_missing_facts": [],
+            "cited_source_packet_sha256": None,
             "confidence": None,
             "path_a_eligible": False,
             "path_a_deployed": False,
@@ -1024,9 +1405,15 @@ class TemporalAssessorRun:
             "verifier_model_version": policy.verifier_model_id,
             "verifier_evidence_hash": None,
             "reportable": F5_REPORTABLE,
+            "controversy_bundle_sha256": None,
+            "evidence_profile": None,
+            "search_complete": False,
+            "controversy_bundle": None,
         }
 
         def finalize(temporal_state: str, reason: str) -> dict:
+            if record.get("candidate_screen_status") == "pending":
+                record["candidate_screen_status"] = "not_reached_early_exit"
             record["temporal_state"] = temporal_state
             record["reason"] = reason
             record["f5_path"] = _derive_f5_path(
@@ -1034,7 +1421,14 @@ class TemporalAssessorRun:
                 path_a_eligible=record["path_a_eligible"],
                 cited_eoc_caps=record["cited_eoc_caps"],
                 deploy_path_a=policy.deploy_path_a,
+                discovery_disposition=record["discovery_disposition"],
             )
+            bundle = build_controversy_bundle(
+                record, citation_id=record.get("citation_id"))
+            record["controversy_bundle_sha256"] = bundle["bundle_sha256"]
+            record["evidence_profile"] = bundle["evidence_profile"]
+            record["search_complete"] = bundle["search_complete"]
+            record["controversy_bundle"] = bundle
             record["record_sha256"] = record_sha256(record)
             return record
 
@@ -1044,6 +1438,17 @@ class TemporalAssessorRun:
             raise ValueError("check_formal_notice must return a NoticeStatus")
         record["cited_notice_kind"] = cited_notice.notice_kind
         record["cited_notice_resolution"] = cited_notice.notice_resolution
+        record["cited_notice_lookup_status"] = cited_notice.lookup_status
+        record["cited_notice_date_status"] = cited_notice.date_status
+        record["cited_notice_date"] = cited_notice.date
+        record["cited_notice_date_raw"] = cited_notice.date_raw
+        record["cited_notice_source_role"] = cited_notice.source_role
+        record["cited_notice_linked_work_id"] = cited_notice.linked_notice_work_id
+        record["cited_notice_relationship"] = cited_notice.relationship
+        if (cited_notice.notice_resolution == "unresolved"
+                or cited_notice.lookup_status != "ok"):
+            record["discovery_disposition"] = "unassessable"
+            return finalize("UNJUDGEABLE", "cited_notice_unresolved")
         if cited_notice.notice_kind == "retraction":
             # An F8 that should have been removed upstream: refuse F5, flag the
             # routing inconsistency, hold. (Data precondition, not an F5/F8 boundary.)
@@ -1073,17 +1478,189 @@ class TemporalAssessorRun:
         record["retrieval_adequacy"] = result.adequacy
         record["retrieval_status"] = result.status
         record["retrieval_query_hash"] = result.query_hash
+        record["cost_stage_counts"]["candidates_retrieved"] = len(
+            result.candidates)
+
+        same_cohort_raw = cited_meta.get("same_cohort_work_ids") or ()
+        if isinstance(same_cohort_raw, (str, bytes)):
+            raise ValueError(
+                "cited_meta['same_cohort_work_ids'] must be an iterable of work ids, "
+                "not a string")
+        try:
+            same_cohort_work_ids = {str(value) for value in same_cohort_raw}
+        except TypeError as exc:
+            raise ValueError(
+                "cited_meta['same_cohort_work_ids'] must be an iterable of work ids"
+            ) from exc
+        legacy_cohort_id = f"legacy-same-cohort:{cited_work_id}"
+        cited_identity_meta = dict(cited_meta)
+        if same_cohort_work_ids:
+            cited_identity_meta["cohort_ids"] = [
+                *(cited_meta.get("cohort_ids") or ()), legacy_cohort_id]
+        cited_identity = identity_from_mapping(
+            cited_identity_meta, work_id=cited_work_id)
+        candidate_identities = []
+        for candidate in result.candidates:
+            if candidate.id == cited_work_id:
+                continue
+            candidate_identity_meta = _candidate_study_mapping(candidate)
+            if candidate.id in same_cohort_work_ids:
+                candidate_identity_meta["cohort_ids"] = [
+                    *candidate_identity_meta.get("cohort_ids", ()), legacy_cohort_id]
+            candidate_identities.append(identity_from_mapping(
+                candidate_identity_meta, work_id=candidate.id))
+        clusters = cluster_studies((cited_identity, *candidate_identities))
+        record["study_identity_inputs"] = [
+            _study_identity_dict(identity)
+            for identity in (cited_identity, *candidate_identities)]
+        study_cluster_by_work = {
+            work_id: cluster for cluster in clusters for work_id in cluster.work_ids}
+        record["study_clusters"] = [{
+            "cluster_id": cluster.cluster_id,
+            "work_ids": list(cluster.work_ids),
+            "identity_evidence_ids": list(cluster.identity_evidence_ids),
+            "basis": cluster.basis,
+            "cluster_uncertain": cluster.cluster_uncertain,
+        } for cluster in clusters]
+        record["cited_study_cluster_id"] = study_cluster_by_work[
+            cited_work_id].cluster_id
 
         cited_source = self.fetch_source(cited_work_id, as_of_date=as_of_date)
         if not isinstance(cited_source, ComparabilitySource):
             raise ValueError("fetch_comparability_source must return a ComparabilitySource")
+        if cited_source.work_id and cited_source.work_id != cited_work_id:
+            raise ValueError("cited ComparabilitySource.work_id does not match cited work")
+        record["cited_source_status"] = cited_source.source_status
+        record["cited_source_missing_facts"] = list(cited_source.missing_facts)
+        record["cited_source_packet_sha256"] = cited_source.packet_sha256
+        if _source_has_named_fact_gap(cited_source):
+            record["discovery_disposition"] = "unassessable"
+            return finalize("UNJUDGEABLE", "cited_source_incomplete")
 
-        cand_results: list[_CandResult] = []
-        for candidate in result.candidates:
-            cand_results.append(self._assess_candidate(
+        # Cheap deterministic terminal checks precede the optional model screen.
+        # The screen sees only later, notice-clear candidates, is ID-keyed, and is
+        # called once for the whole retained batch.
+        cand_results_by_index: dict[int, _CandResult] = {}
+        screenable: list[tuple[int, CandidateWork, NoticeStatus]] = []
+        cited_day = _parse_date(cited_date, "cited_date")
+        cutoff_day = _parse_date(as_of_date, "as_of_date")
+        for candidate_index, candidate in enumerate(result.candidates):
+            candidate_day = _parse_date(candidate.pub_date, "candidate.pub_date")
+            if candidate_day <= cited_day or candidate_day > cutoff_day:
+                cand_results_by_index[candidate_index] = self._assess_candidate(
+                    claim=claim, cited_work_id=cited_work_id, cited_meta=cited_meta,
+                    cited_date=cited_date, as_of_date=as_of_date,
+                    cited_source=cited_source, cited_tier=cited_tier,
+                    cited_eoc_caps=cited_eoc_caps, candidate=candidate,
+                    study_cluster_by_work=study_cluster_by_work)
+                continue
+            candidate_notice = self.check_notice(
+                candidate.id, as_of_date=as_of_date)
+            if not isinstance(candidate_notice, NoticeStatus):
+                raise ValueError("check_formal_notice must return a NoticeStatus")
+            if (candidate_notice.notice_kind != "none"
+                    or candidate_notice.notice_resolution != "resolved_clear"
+                    or candidate_notice.lookup_status != "ok"):
+                cand_results_by_index[candidate_index] = self._assess_candidate(
+                    claim=claim, cited_work_id=cited_work_id, cited_meta=cited_meta,
+                    cited_date=cited_date, as_of_date=as_of_date,
+                    cited_source=cited_source, cited_tier=cited_tier,
+                    cited_eoc_caps=cited_eoc_caps, candidate=candidate,
+                    candidate_notice=candidate_notice,
+                    study_cluster_by_work=study_cluster_by_work)
+                continue
+            cited_cluster = study_cluster_by_work.get(cited_work_id)
+            candidate_cluster = study_cluster_by_work.get(candidate.id)
+            if (cited_cluster is not None and candidate_cluster is not None
+                    and cited_cluster.cluster_id == candidate_cluster.cluster_id
+                    and not cited_cluster.cluster_uncertain
+                    and not candidate_cluster.cluster_uncertain):
+                cand_results_by_index[candidate_index] = self._same_study_result(
+                    candidate=candidate, notice=candidate_notice,
+                    cited_work_id=cited_work_id, cited_date=cited_date,
+                    study_cluster_by_work=study_cluster_by_work)
+                continue
+            screenable.append((candidate_index, candidate, candidate_notice))
+
+        counts = record["cost_stage_counts"]
+        counts["candidates_structurally_admissible"] = len(screenable)
+        screen_batch: Optional[CandidateScreenBatch] = None
+        screen_decisions = {}
+        if self.screen is not None and not screenable:
+            record["candidate_screen_status"] = "not_needed_no_candidates"
+        if self.screen is not None and screenable:
+            counts["abstract_screen_calls"] = 1
+            try:
+                screen_batch = self.screen(
+                    claim=claim,
+                    candidates=tuple(candidate for _, candidate, _ in screenable))
+            except Exception:
+                # A failed optional cost optimization is not clean absence.  Its
+                # output is discarded and every candidate proceeds through the
+                # original source-bound path, preserving the pre-screen behavior.
+                screen_batch = None
+                screen_decisions = {}
+                record["candidate_screen_status"] = "failure_open_to_deep_comparison"
+            else:
+                try:
+                    screen_decisions = validate_candidate_screen_batch(
+                        screen_batch,
+                        [candidate.id for _, candidate, _ in screenable])
+                except (TypeError, ValueError):
+                    screen_batch = None
+                    screen_decisions = {}
+                    record["candidate_screen_status"] = \
+                        "malformed_open_to_deep_comparison"
+                else:
+                    record["candidate_screen_status"] = "complete"
+                    for decision in screen_decisions.values():
+                        counts[f"screen_{decision.decision}"] += 1
+
+        deep_entries = 0
+        deep_comparisons_used = 0
+        budget = policy.max_deep_comparisons
+        for candidate_index, candidate, candidate_notice in screenable:
+            decision = screen_decisions.get(candidate.id)
+            if decision is not None and decision.decision == "clear_mismatch":
+                cand_results_by_index[candidate_index] = self._cost_gate_result(
+                    candidate=candidate, notice=candidate_notice,
+                    cited_work_id=cited_work_id,
+                    study_cluster_by_work=study_cluster_by_work,
+                    reason="abstract_screen_clear_mismatch",
+                    decision=decision, batch=screen_batch)
+                continue
+            if budget is not None and deep_comparisons_used >= budget:
+                record["budget_exhausted"] = True
+                counts["candidates_budget_skipped"] += 1
+                cand_results_by_index[candidate_index] = self._cost_gate_result(
+                    candidate=candidate, notice=candidate_notice,
+                    cited_work_id=cited_work_id,
+                    study_cluster_by_work=study_cluster_by_work,
+                    reason="deep_comparison_budget_exhausted",
+                    decision=decision, batch=screen_batch)
+                continue
+            candidate_result = self._assess_candidate(
                 claim=claim, cited_work_id=cited_work_id, cited_meta=cited_meta,
-                cited_date=cited_date, as_of_date=as_of_date, cited_source=cited_source,
-                cited_tier=cited_tier, cited_eoc_caps=cited_eoc_caps, candidate=candidate))
+                cited_date=cited_date, as_of_date=as_of_date,
+                cited_source=cited_source, cited_tier=cited_tier,
+                cited_eoc_caps=cited_eoc_caps, candidate=candidate,
+                candidate_notice=candidate_notice,
+                study_cluster_by_work=study_cluster_by_work)
+            deep_entries += 1
+            if candidate_result.assessment.get("contradiction_response") is not None:
+                deep_comparisons_used += 1
+            if decision is not None and screen_batch is not None:
+                self._record_screen_decision(
+                    candidate_result.assessment, decision, screen_batch)
+            cand_results_by_index[candidate_index] = candidate_result
+
+        cand_results = [cand_results_by_index[index]
+                        for index in range(len(result.candidates))]
+        counts["candidates_entering_deep_comparison"] = deep_entries
+        counts["deep_comparison_calls"] = sum(
+            cr.assessment.get("contradiction_response") is not None
+            for cr in cand_results)
+        counts["candidates_aggregated"] = len(cand_results)
         record["candidate_assessments"] = [cr.assessment for cr in cand_results]
 
         # Claim-level discovery rollup (Sec 10 rollups): surface if any candidate
@@ -1132,7 +1709,9 @@ class TemporalAssessorRun:
 
         # No qualifying candidate. A confident negative needs an adequate,
         # nonempty, fully judgeable set with every candidate nonqualifying.
-        blocked = any(cr.category in (_UNASSESSABLE, _BORDERLINE) for cr in cand_results)
+        blocked = _source_incomplete_for_negative(cited_source) or any(
+            cr.category in (_UNASSESSABLE, _BORDERLINE, _MIXED)
+            for cr in cand_results)
         confident_negative = (
             result.status == "ok" and result.adequacy == "adequate"
             and bool(cand_results) and not blocked)
@@ -1216,7 +1795,8 @@ class TemporalAssessorRun:
 
 
 def _derive_f5_path(*, temporal_state: str, path_a_eligible: bool,
-                    cited_eoc_caps: bool, deploy_path_a: bool) -> str:
+                    cited_eoc_caps: bool, deploy_path_a: bool,
+                    discovery_disposition: Optional[str] = None) -> str:
     if temporal_state == "QUALIFYING_CONTRADICTION":
         if cited_eoc_caps:
             return "B"
@@ -1229,6 +1809,8 @@ def _derive_f5_path(*, temporal_state: str, path_a_eligible: bool,
         return "B"
     if temporal_state == "NO_QUALIFYING_CONTRADICTION":
         return "not_F5"
+    if temporal_state == "UNJUDGEABLE" and discovery_disposition == "surface":
+        return "B"
     return "unknown"
 
 
@@ -1304,6 +1886,7 @@ def make_temporal_assessor(
     judge_contradiction: CallJudgeContradiction,
     evidence: dict,
     policy: F5Policy,
+    screen_candidates: Optional[Callable] = None,
 ) -> TemporalAssessorRun:
     """Build a fail-closed F5 temporal assessor for one citation. Configuration
     defects raise BEFORE any seam call; every I/O seam is injected (no network /
@@ -1320,6 +1903,11 @@ def make_temporal_assessor(
     ):
         if not callable(fn):
             raise ValueError(f"{name} must be callable")
+    if screen_candidates is not None and not callable(screen_candidates):
+        raise ValueError("screen_candidates must be callable or None")
+    if policy.candidate_screen_enabled != (screen_candidates is not None):
+        raise ValueError(
+            "policy.candidate_screen_enabled must match screen_candidates wiring")
     return TemporalAssessorRun(
         retrieve_superseding_candidates=retrieve_superseding_candidates,
         fetch_comparability_source=fetch_comparability_source,
@@ -1327,6 +1915,7 @@ def make_temporal_assessor(
         classify_evidence_tier=classify_evidence_tier,
         find_supersession_attestation=find_supersession_attestation,
         judge_contradiction=judge_contradiction,
+        screen_candidates=screen_candidates,
         evidence=evidence,
         policy=policy,
     )
@@ -1344,6 +1933,7 @@ def decide_f5(
     find_supersession_attestation: Callable,
     judge_contradiction: CallJudgeContradiction,
     policy: F5Policy,
+    screen_candidates: Optional[Callable] = None,
 ) -> tuple[TemporalAssessment, tuple[dict, ...]]:
     """Run the F5 detector over the SUPPORTED claims and return the single frozen
     ``TemporalAssessment`` for ``decide_judgment`` plus the per-claim ``F5Record``
@@ -1356,6 +1946,7 @@ def decide_f5(
         classify_evidence_tier=classify_evidence_tier,
         find_supersession_attestation=find_supersession_attestation,
         judge_contradiction=judge_contradiction,
+        screen_candidates=screen_candidates,
         evidence=evidence,
         policy=policy,
     )
@@ -1368,7 +1959,9 @@ def decide_f5(
 # comparability decision + engine booleans + f5_path from stored facts + policy
 # and raises on ANY drift.
 # --------------------------------------------------------------------------
-def validate_f5_record(record: dict, policy: F5Policy) -> None:
+def validate_f5_record(
+        record: dict, policy: F5Policy,
+        source_packets_by_hash: Optional[dict] = None) -> None:
     if not isinstance(record, dict):
         raise ValueError("record must be a dict")
     if record.get("assessed") is False:
@@ -1395,18 +1988,506 @@ def validate_f5_record(record: dict, policy: F5Policy) -> None:
     if record.get("comparability_policy_version") != policy.comparability_policy_version:
         raise ValueError(
             "record comparability_policy_version does not match the supplied policy")
+    if record.get("deep_comparison_budget") != policy.max_deep_comparisons:
+        raise ValueError(
+            "record deep-comparison budget does not match the supplied policy")
+    if record_sha256(record) != record["record_sha256"]:
+        raise ValueError("record_sha256 mismatch (tampered)")
     # Development-mode invariant: reportable=True requires a confirmed verifier.
     if record["reportable"] and record.get("verifier_result") != "confirmed":
         raise ValueError("reportable=True requires verifier_result=confirmed")
-    # Re-derive each candidate's comparability decision from its stored axes.
+    verified_early_claim_reason = None
+    if (record.get("cited_notice_resolution") == "unresolved"
+            or record.get("cited_notice_lookup_status") != "ok"):
+        verified_early_claim_reason = "cited_notice_unresolved"
+    elif record.get("cited_notice_kind") == "retraction":
+        verified_early_claim_reason = \
+            "cited_retracted_upstream_f8_inconsistency"
+    else:
+        cited_missing_facts = record.get("cited_source_missing_facts") or []
+        if (record.get("cited_source_status") == "failure"
+                or any(fact != FACT_ASSESSMENT_NOT_PERFORMED
+                       for fact in cited_missing_facts)):
+            verified_early_claim_reason = "cited_source_incomplete"
+    if verified_early_claim_reason is not None:
+        if (record.get("reason") != verified_early_claim_reason
+                or record.get("temporal_state") != "UNJUDGEABLE"
+                or record.get("discovery_disposition") != "unassessable"
+                or record.get("candidate_assessments")):
+            raise ValueError(
+                "early claim state conflicts with cited notice/source facts")
+    identity_inputs = record.get("study_identity_inputs") or []
+    if not isinstance(identity_inputs, list):
+        raise ValueError("study_identity_inputs must be a list")
+    identity_by_work = {}
+    if identity_inputs:
+        for row in identity_inputs:
+            if not isinstance(row, dict) or not isinstance(row.get("work_id"), str):
+                raise ValueError("study_identity_inputs entries require work_id")
+            identity = identity_from_mapping(row, work_id=row["work_id"])
+            if identity.work_id in identity_by_work:
+                raise ValueError("study_identity_inputs contains duplicate work_id")
+            identity_by_work[identity.work_id] = identity
+        replayed_clusters = cluster_studies(tuple(identity_by_work.values()))
+        expected_cluster_rows = [{
+            "cluster_id": cluster.cluster_id,
+            "work_ids": list(cluster.work_ids),
+            "identity_evidence_ids": list(cluster.identity_evidence_ids),
+            "basis": cluster.basis,
+            "cluster_uncertain": cluster.cluster_uncertain,
+        } for cluster in replayed_clusters]
+        if record.get("study_clusters") != expected_cluster_rows:
+            raise ValueError("study_clusters drifted from study_identity_inputs")
+
+    cluster_by_work: dict[str, dict] = {}
+    for cluster in record.get("study_clusters") or []:
+        if not isinstance(cluster, dict):
+            raise ValueError("study_clusters entries must be dicts")
+        cluster_id = cluster.get("cluster_id")
+        work_ids = cluster.get("work_ids")
+        if not isinstance(cluster_id, str) or not cluster_id:
+            raise ValueError("study cluster_id must be nonblank")
+        if (not isinstance(work_ids, list) or not work_ids
+                or any(not isinstance(value, str) or not value for value in work_ids)):
+            raise ValueError("study cluster work_ids must be nonblank strings")
+        if len(work_ids) != len(set(work_ids)):
+            raise ValueError("study cluster contains duplicate work_ids")
+        for work_id in work_ids:
+            if work_id in cluster_by_work:
+                raise ValueError("a work_id appears in more than one study cluster")
+            cluster_by_work[work_id] = cluster
+    cited_work_id = record.get("cited_work_id")
+    if cited_work_id in cluster_by_work and record.get(
+            "cited_study_cluster_id") != cluster_by_work[cited_work_id]["cluster_id"]:
+        raise ValueError("cited study cluster assignment drifted")
+
+    # Re-derive each candidate's parsed judgment and comparability decision from
+    # stored source facts. A fresh outer hash is not permission to rewrite the
+    # model response into a qualifying answer.
+    candidate_ids = [
+        cand.get("candidate_work_id") for cand in record["candidate_assessments"]]
+    if (any(not isinstance(value, str) or not value for value in candidate_ids)
+            or len(candidate_ids) != len(set(candidate_ids))):
+        raise ValueError("candidate_assessments require unique nonblank work IDs")
+    if (identity_by_work
+            and verified_early_claim_reason != "cited_source_incomplete"):
+        expected_candidate_ids = set(identity_by_work) - {str(cited_work_id)}
+        if set(candidate_ids) != expected_candidate_ids:
+            raise ValueError(
+                "candidate_assessments drifted from stored study identity inputs")
+    replayed_candidate_categories: list[str] = []
     for cand in record["candidate_assessments"]:
+        candidate_id = cand.get("candidate_work_id")
+        if candidate_id in cluster_by_work and cand.get(
+                "candidate_study_cluster_id") != cluster_by_work[
+                    candidate_id]["cluster_id"]:
+            raise ValueError("candidate study cluster assignment drifted")
+        raw_response = cand.get("contradiction_response")
+        judged_fields_present = any(
+            cand.get(key) is not None for key in (
+                "claim_match", "outcome_relation", "population_relation",
+                "relation_to_cited_finding", "directional_contradiction"))
+        if judged_fields_present and raw_response is None:
+            raise ValueError("judged candidate is missing contradiction_response")
+        if raw_response is not None:
+            if (not isinstance(raw_response, str)
+                    or cand.get("contradiction_response_sha256")
+                    != _sha256_text(raw_response)):
+                raise ValueError("candidate contradiction response hash drifted")
+            parsed = _parse_contradiction(raw_response)
+            parsed_fields = {
+                "claim_match": parsed.claim_match,
+                "outcome_relation": parsed.outcome_relation,
+                "population_relation": parsed.population_relation,
+                "directional_contradiction": parsed.directional_contradiction,
+                "relation_to_cited_finding": parsed.relation_to_cited_finding,
+                "cited_direction": parsed.cited_direction,
+                "candidate_direction": parsed.candidate_direction,
+                "contradiction_magnitude": parsed.magnitude,
+                "confidence": parsed.confidence,
+                "cited_finding_span": parsed.cited_finding_span,
+                "candidate_contradiction_span": parsed.candidate_contradiction_span,
+                "scope_mismatch_axis": parsed.scope_mismatch_axis,
+            }
+            if any(cand.get(key) != value for key, value in parsed_fields.items()):
+                raise ValueError(
+                    "candidate stored judgment drifted from contradiction_response")
+            if (cand.get("reason") == "comparable_confirmation"
+                    and parsed.relation_to_cited_finding != "confirms"):
+                raise ValueError(
+                    "candidate confirmation reason conflicts with parsed relation")
+            if (cand.get("reason") == "mixed_finding"
+                    and parsed.relation_to_cited_finding != "mixed"):
+                raise ValueError(
+                    "candidate mixed reason conflicts with parsed relation")
         cm, orl, prl = cand.get("claim_match"), cand.get("outcome_relation"), cand.get("population_relation")
         if cm is None and orl is None and prl is None:
+            short_reason = cand.get("reason")
+            short_expected = {
+                "candidate_predates_cited": (_HARD_NONQUALIFYING, "do_not_surface"),
+                "candidate_after_as_of_date": (_HARD_NONQUALIFYING, "do_not_surface"),
+                "candidate_flagged_notice": (_UNASSESSABLE, "unassessable"),
+                "candidate_source_incomplete": (_UNASSESSABLE, "unassessable"),
+                "not_independent": (_HARD_NONQUALIFYING, "do_not_surface"),
+                "abstract_screen_clear_mismatch": (
+                    _UNASSESSABLE, "unassessable"),
+                "deep_comparison_budget_exhausted": (
+                    _UNASSESSABLE, "unassessable"),
+            }.get(short_reason)
+            if short_expected is None:
+                raise ValueError(
+                    "unjuged candidate has an unsupported terminal reason")
+            category, expected_disposition = short_expected
+            if short_reason == "abstract_screen_clear_mismatch":
+                if (cand.get("screen_decision") != "clear_mismatch"
+                        or cand.get("screen_claim_relevance") != "mismatch"
+                        or cand.get("screen_possible_relation") != "neutral"
+                        or cand.get("screen_missing_facts") != []
+                        or cand.get("screen_version") != CANDIDATE_SCREEN_VERSION
+                        or not isinstance(cand.get("screen_prompt_sha256"), str)
+                        or re.fullmatch(
+                            r"[0-9a-f]{64}", cand["screen_prompt_sha256"]) is None
+                        or not isinstance(cand.get("screen_response_sha256"), str)
+                        or re.fullmatch(
+                            r"[0-9a-f]{64}", cand["screen_response_sha256"]) is None):
+                    raise ValueError(
+                        "screen-excluded candidate lacks a bound clear mismatch")
+            if short_reason == "deep_comparison_budget_exhausted":
+                if (record.get("budget_exhausted") is not True
+                        or policy.max_deep_comparisons is None):
+                    raise ValueError(
+                        "budget-skipped candidate lacks an exhausted configured budget")
+            if short_reason == "not_independent":
+                cited_cluster_id = cand.get("cited_study_cluster_id")
+                candidate_cluster_id = cand.get("candidate_study_cluster_id")
+                if (cand.get("independent") != "not_independent"
+                        or cand.get("independence_basis") != "shared_study_cluster"
+                        or not isinstance(cited_cluster_id, str)
+                        or cited_cluster_id != candidate_cluster_id
+                        or cand.get("study_cluster_uncertain") is not False):
+                    raise ValueError(
+                        "structural same-study exclusion lacks certain shared cluster")
+            if cand.get("discovery_disposition") != expected_disposition:
+                raise ValueError(
+                    "candidate disposition drifted from its terminal reason")
+            replayed_candidate_categories.append(category)
             continue  # candidate short-circuited before the contradiction judgment
         expected = derive_comparability_decision(cm, orl, prl)
         if cand.get("comparability_decision") != expected:
             raise ValueError(
                 "candidate comparability_decision drifted from its stored axes")
+        cited_identity_for_candidate = identity_by_work.get(str(cited_work_id))
+        candidate_identity_for_candidate = identity_by_work.get(str(candidate_id))
+        if cited_identity_for_candidate and candidate_identity_for_candidate:
+            replayed_study_relation = compare_studies(
+                cited_identity_for_candidate, candidate_identity_for_candidate)
+            stored_independence = cand.get("independent")
+            stored_basis = cand.get("independence_basis")
+            if stored_independence == "independent":
+                if stored_basis == "explicit_distinct_data":
+                    if (replayed_study_relation.independence != "independent"
+                            or replayed_study_relation.basis
+                            != "explicit_distinct_data"):
+                        raise ValueError(
+                            "candidate explicit independence lacks bound distinct-data "
+                            "evidence in identity inputs")
+                elif stored_basis != "source_bound_distinct_data":
+                    raise ValueError("candidate has unsupported independent basis")
+            elif (stored_independence == "unknown"
+                  and replayed_study_relation.independence == "not_independent"):
+                raise ValueError(
+                    "candidate unknown independence ignores established identity")
+
+        candidate_source_incomplete = (
+            cand.get("candidate_source_status") != "complete"
+            or bool(cand.get("candidate_source_missing_facts")))
+        cited_source_incomplete = (
+            record.get("cited_source_status") != "complete"
+            or bool(record.get("cited_source_missing_facts")))
+
+        def expected_negative(reason):
+            if candidate_source_incomplete:
+                return "candidate_source_incomplete_for_negative", "unassessable"
+            return reason, "do_not_surface"
+
+        relation = cand.get("relation_to_cited_finding")
+        if (not isinstance(cand.get("cited_finding_span"), str)
+                or not cand["cited_finding_span"].strip()
+                or not isinstance(cand.get("candidate_contradiction_span"), str)
+                or not cand["candidate_contradiction_span"].strip()):
+            expected_reason, expected_disposition = \
+                "span_unverifiable", "unassessable"
+        elif relation == "mixed":
+            expected_reason, expected_disposition = "mixed_finding", "surface"
+        elif relation == "uncertain":
+            expected_reason, expected_disposition = "relation_uncertain", "surface"
+        elif relation == "confirms":
+            if expected != "comparable":
+                expected_reason, expected_disposition = expected_negative(
+                    "confirmation_not_comparable")
+            elif cited_source_incomplete or candidate_source_incomplete:
+                expected_reason, expected_disposition = \
+                    "confirmation_source_incomplete", "unassessable"
+            else:
+                expected_reason, expected_disposition = \
+                    "comparable_confirmation", "surface"
+        elif relation == "opposes" and cand.get(
+                "directional_contradiction") is not True:
+            expected_reason, expected_disposition = \
+                "opposition_not_directional", "surface"
+        elif cand.get("directional_contradiction") is not True:
+            expected_reason, expected_disposition = expected_negative(
+                "not_directional_contradiction")
+        elif expected == "not_comparable":
+            expected_reason, expected_disposition = expected_negative(
+                "not_comparable")
+        elif cand.get("independent") == "not_independent":
+            expected_reason, expected_disposition = expected_negative(
+                "not_independent")
+        elif policy.confidence_floor is None:
+            expected_reason, expected_disposition = \
+                "confidence_floor_unfrozen", "surface"
+        elif cand.get("confidence") < policy.confidence_floor:
+            if policy.mode == "deployment":
+                expected_reason, expected_disposition = \
+                    "below_confidence_floor", "surface"
+            else:
+                expected_reason, expected_disposition = expected_negative(
+                    "below_confidence_floor")
+        elif expected == "uncertain":
+            expected_reason, expected_disposition = \
+                "comparability_uncertain", "surface"
+        elif cand.get("independent") == "unknown":
+            expected_reason, expected_disposition = \
+                "independence_unknown", "surface"
+        else:
+            expected_reason, expected_disposition = \
+                "qualifying_contradiction", "surface"
+        if (cand.get("reason") != expected_reason
+                or cand.get("discovery_disposition") != expected_disposition):
+            raise ValueError(
+                "candidate reason/disposition drifted from stored decision facts")
+        if expected_reason == "qualifying_contradiction":
+            replayed_candidate_categories.append(_QUALIFYING)
+        elif expected_reason == "comparable_confirmation":
+            replayed_candidate_categories.append(_CONFIRMING)
+        elif expected_reason == "mixed_finding":
+            replayed_candidate_categories.append(_MIXED)
+        elif expected_disposition == "unassessable":
+            replayed_candidate_categories.append(_UNASSESSABLE)
+        elif expected_disposition == "surface":
+            replayed_candidate_categories.append(_BORDERLINE)
+        else:
+            replayed_candidate_categories.append(_HARD_NONQUALIFYING)
+
+    assessments = record["candidate_assessments"]
+    structural_terminal_reasons = {
+        "candidate_predates_cited", "candidate_after_as_of_date",
+        "candidate_flagged_notice",
+    }
+    def is_structural_terminal(cand: dict) -> bool:
+        return (cand.get("reason") in structural_terminal_reasons
+                or (cand.get("reason") == "not_independent"
+                    and cand.get("contradiction_response") is None))
+
+    replayed_counts = {
+        "candidates_retrieved": len(assessments),
+        "candidates_structurally_admissible": sum(
+            not is_structural_terminal(cand)
+            for cand in assessments),
+        "abstract_screen_calls": (
+            1 if record.get("candidate_screen_status") in {
+                "complete", "malformed_open_to_deep_comparison",
+                "failure_open_to_deep_comparison"} else 0),
+        "screen_plausible": sum(
+            cand.get("screen_decision") == "plausible" for cand in assessments),
+        "screen_clear_mismatch": sum(
+            cand.get("screen_decision") == "clear_mismatch" for cand in assessments),
+        "screen_uncertain": sum(
+            cand.get("screen_decision") == "uncertain" for cand in assessments),
+        "candidates_entering_deep_comparison": sum(
+            not is_structural_terminal(cand)
+            and cand.get("reason") not in {
+                "abstract_screen_clear_mismatch",
+                "deep_comparison_budget_exhausted",
+            } for cand in assessments),
+        "deep_comparison_calls": sum(
+            cand.get("contradiction_response") is not None for cand in assessments),
+        "candidates_budget_skipped": sum(
+            cand.get("reason") == "deep_comparison_budget_exhausted"
+            for cand in assessments),
+        "candidates_aggregated": len(assessments),
+    }
+    screen_status = record.get("candidate_screen_status")
+    allowed_screen_statuses = {
+        "not_performed", "not_reached_early_exit", "not_needed_no_candidates",
+        "complete", "malformed_open_to_deep_comparison",
+        "failure_open_to_deep_comparison",
+    }
+    if screen_status not in allowed_screen_statuses:
+        raise ValueError("candidate screen status is impossible")
+    if not policy.candidate_screen_enabled and screen_status != "not_performed":
+        raise ValueError("record claims a screen while policy disabled it")
+    if policy.candidate_screen_enabled and screen_status == "not_performed":
+        raise ValueError("record omits the policy-enabled candidate screen")
+    if screen_status == "not_performed":
+        if record.get("candidate_screen_version") is not None:
+            raise ValueError("unperformed candidate screen claims a version")
+    elif record.get("candidate_screen_version") != CANDIDATE_SCREEN_VERSION:
+        raise ValueError("candidate screen status/version are inconsistent")
+    screened_rows = [
+        cand for cand in assessments
+        if cand.get("screen_decision") in {
+            "plausible", "clear_mismatch", "uncertain"}]
+    admissible_rows = [
+        cand for cand in assessments
+        if not is_structural_terminal(cand)]
+    if screened_rows:
+        if (screen_status != "complete"
+                or len(screened_rows) != len(admissible_rows)
+                or record.get("candidate_screen_version")
+                != CANDIDATE_SCREEN_VERSION):
+            raise ValueError(
+                "candidate screen status/version drifted from screened candidates")
+        prompt_hashes = {cand.get("screen_prompt_sha256") for cand in screened_rows}
+        response_hashes = {
+            cand.get("screen_response_sha256") for cand in screened_rows}
+        if (len(prompt_hashes) != 1 or len(response_hashes) != 1
+                or any(not isinstance(value, str)
+                       or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                       for value in prompt_hashes | response_hashes)
+                or any(cand.get("screen_version") != CANDIDATE_SCREEN_VERSION
+                       for cand in screened_rows)):
+            raise ValueError("candidate screen batch hashes/version drifted")
+        for cand in screened_rows:
+            missing_facts = cand.get("screen_missing_facts")
+            if not isinstance(missing_facts, list):
+                raise ValueError("candidate screen missing facts are malformed")
+            try:
+                CandidateScreenDecision(
+                    candidate_work_id=cand.get("candidate_work_id"),
+                    decision=cand.get("screen_decision"),
+                    claim_relevance=cand.get("screen_claim_relevance"),
+                    possible_relation=cand.get("screen_possible_relation"),
+                    missing_facts=tuple(missing_facts),
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("candidate screen decision is malformed") from exc
+            if cand.get("screen_decision") == "clear_mismatch":
+                if (cand.get("reason") != "abstract_screen_clear_mismatch"
+                        or cand.get("contradiction_response") is not None):
+                    raise ValueError(
+                        "clear-mismatch screen row reached deep comparison")
+            elif cand.get("reason") == "abstract_screen_clear_mismatch":
+                raise ValueError(
+                    "non-mismatch screen row claims a clear-mismatch exclusion")
+    elif screen_status == "complete":
+        raise ValueError("complete candidate screen has no bound decisions")
+    if (screen_status in {"not_needed_no_candidates", "not_reached_early_exit"}
+            and replayed_counts["abstract_screen_calls"] != 0):
+        raise ValueError("candidate screen status conflicts with call count")
+    if screen_status == "not_needed_no_candidates" and admissible_rows:
+        raise ValueError("candidate screen said no candidates but candidates were admissible")
+    if screen_status == "not_reached_early_exit" and (
+            verified_early_claim_reason is None or assessments):
+        raise ValueError("candidate screen early-exit status lacks a verified early exit")
+    if (verified_early_claim_reason is None
+            and record.get("cost_stage_counts") != replayed_counts):
+        raise ValueError("F5 cost-stage counts drifted from candidate outcomes")
+    if (verified_early_claim_reason is None
+            and (record.get("budget_exhausted") is True) != bool(
+                replayed_counts["candidates_budget_skipped"])):
+        raise ValueError("F5 budget exhaustion flag drifted from candidate outcomes")
+    if verified_early_claim_reason is None and policy.max_deep_comparisons is not None:
+        completed_comparisons = 0
+        budget_skip_seen = False
+        for cand in assessments:
+            if cand.get("reason") == "deep_comparison_budget_exhausted":
+                if completed_comparisons < policy.max_deep_comparisons:
+                    raise ValueError(
+                        "candidate was budget-skipped before the budget was spent")
+                budget_skip_seen = True
+            elif cand.get("contradiction_response") is not None:
+                if budget_skip_seen:
+                    raise ValueError(
+                        "deep comparison appears after budget exhaustion")
+                completed_comparisons += 1
+
+    # Recompute the claim-level state from the replayed candidate outcomes.
+    # Otherwise a caller can keep a valid mixed/opposing row while rewriting the
+    # outer state to a confident negative, suppressing evidence without changing
+    # the bound judgment response.
+    if verified_early_claim_reason is None:
+        surfaced = [
+            cand for cand in assessments
+            if cand.get("discovery_disposition") == "surface"]
+        retrieval_fully_adequate = (
+            record.get("retrieval_status") == "ok"
+            and record.get("retrieval_adequacy") == "adequate"
+            and bool(assessments))
+        if surfaced:
+            expected_claim_disposition = "surface"
+            expected_surfaced = min(
+                surfaced,
+                key=lambda cand: (-(cand.get("confidence") or 0.0),
+                                  cand["candidate_work_id"]))
+            if (record.get("selected_surfaced_candidate_work_id")
+                    != expected_surfaced["candidate_work_id"]
+                    or record.get("discovery_confidence")
+                    != expected_surfaced.get("confidence")):
+                raise ValueError(
+                    "claim surfaced-candidate selection drifted from candidates")
+        elif (not retrieval_fully_adequate) or any(
+                cand.get("discovery_disposition") == "unassessable"
+                for cand in assessments):
+            expected_claim_disposition = "unassessable"
+            if (record.get("selected_surfaced_candidate_work_id") is not None
+                    or record.get("discovery_confidence") is not None):
+                raise ValueError(
+                    "non-surfaced claim stores a surfaced candidate")
+        else:
+            expected_claim_disposition = "do_not_surface"
+            if (record.get("selected_surfaced_candidate_work_id") is not None
+                    or record.get("discovery_confidence") is not None):
+                raise ValueError(
+                    "non-surfaced claim stores a surfaced candidate")
+        if record.get("discovery_disposition") != expected_claim_disposition:
+            raise ValueError(
+                "claim discovery disposition drifted from candidate outcomes")
+
+        if _QUALIFYING in replayed_candidate_categories:
+            expected_temporal_state = "QUALIFYING_CONTRADICTION"
+            expected_claim_reason = "qualifying_contradiction"
+        else:
+            cited_incomplete = (
+                record.get("cited_source_status") != "complete"
+                or bool(record.get("cited_source_missing_facts")))
+            blocked = cited_incomplete or any(
+                category in (_UNASSESSABLE, _BORDERLINE, _MIXED)
+                for category in replayed_candidate_categories)
+            confident_negative = retrieval_fully_adequate and not blocked
+            if confident_negative:
+                expected_temporal_state = "NO_QUALIFYING_CONTRADICTION"
+                expected_claim_reason = "all_candidates_nonqualifying"
+            else:
+                expected_temporal_state = "UNJUDGEABLE"
+                if record.get("retrieval_status") == "failure":
+                    expected_claim_reason = "retrieval_failure"
+                elif record.get("retrieval_status") == "partial":
+                    expected_claim_reason = "retrieval_partial"
+                elif (record.get("retrieval_adequacy") == "empty"
+                      or not assessments):
+                    expected_claim_reason = "retrieval_empty"
+                elif record.get("retrieval_adequacy") == "inadequate":
+                    expected_claim_reason = "retrieval_inadequate"
+                elif blocked:
+                    expected_claim_reason = "candidate_set_not_fully_judgeable"
+                else:
+                    expected_claim_reason = "held"
+        if (record.get("temporal_state") != expected_temporal_state
+                or record.get("reason") != expected_claim_reason):
+            raise ValueError(
+                "claim temporal state/reason drifted from candidate outcomes")
     # Re-derive the frozen-engine booleans from the SELECTED contradiction's
     # stored axes: on a QUALIFYING record they must both be definitively positive
     # and match what was stored (a tamper that flips them past record_sha256 is
@@ -1419,6 +2500,104 @@ def validate_f5_record(record: dict, policy: F5Policy) -> None:
         if selected is None:
             raise ValueError(
                 "selected_contradiction_work_id is absent from candidate_assessments")
+        if (record.get("reason") != "qualifying_contradiction"
+                or selected.get("reason") != "qualifying_contradiction"
+                or selected.get("discovery_disposition") != "surface"):
+            raise ValueError("QUALIFYING record lacks a qualifying surfaced candidate")
+        if (selected.get("relation_to_cited_finding") != "opposes"
+                or selected.get("directional_contradiction") is not True):
+            raise ValueError("QUALIFYING selected candidate is not directional opposition")
+        if selected.get("comparability_decision") != "comparable":
+            raise ValueError("QUALIFYING selected candidate is not comparable")
+        independence_basis = selected.get("independence_basis")
+        if (selected.get("independent") != "independent"
+                or independence_basis not in {
+                    "explicit_distinct_data", "source_bound_distinct_data"}):
+            raise ValueError("QUALIFYING selected candidate is not proven independent")
+        cited_identity = identity_by_work.get(str(cited_work_id))
+        candidate_identity = identity_by_work.get(str(selected_id))
+        if cited_identity is None or candidate_identity is None:
+            raise ValueError("QUALIFYING independence lacks stored identity inputs")
+        replayed_relation = compare_studies(cited_identity, candidate_identity)
+        if independence_basis == "explicit_distinct_data":
+            if (replayed_relation.independence != "independent"
+                    or replayed_relation.basis != "explicit_distinct_data"):
+                raise ValueError(
+                    "QUALIFYING explicit independence lacks bound distinct-data evidence")
+        else:
+            span = selected.get("source_bound_distinct_span")
+            if (replayed_relation.independence != "unknown"
+                    or not isinstance(span, str) or not span.strip()
+                    or selected.get("source_bound_distinct_span_sha256")
+                    != _sha256_text(span)):
+                raise ValueError(
+                    "QUALIFYING source-bound independence evidence is inconsistent")
+            if not isinstance(source_packets_by_hash, dict):
+                raise ValueError(
+                    "QUALIFYING source-bound independence requires source packets "
+                    "for replay")
+            cited_packet_hash = record.get("cited_source_packet_sha256")
+            candidate_packet_hash = selected.get("candidate_source_packet_sha256")
+            cited_packet_raw = source_packets_by_hash.get(cited_packet_hash)
+            candidate_packet_raw = source_packets_by_hash.get(candidate_packet_hash)
+            if cited_packet_raw is None or candidate_packet_raw is None:
+                raise ValueError(
+                    "QUALIFYING source-bound independence packet is unavailable")
+            cited_packet = source_packet_from_dict(cited_packet_raw)
+            candidate_packet = source_packet_from_dict(candidate_packet_raw)
+            if (cited_packet.packet_sha256 != cited_packet_hash
+                    or candidate_packet.packet_sha256 != candidate_packet_hash):
+                raise ValueError(
+                    "QUALIFYING source-bound independence packet hash drifted")
+            cited_packet_text = "\n".join(
+                value for value in (
+                    cited_packet.abstract, cited_packet.methods,
+                    cited_packet.results, cited_packet.other_sections,
+                    cited_packet.protocol, cited_packet.registry_record)
+                if isinstance(value, str) and value)
+            candidate_packet_text = "\n".join(
+                value for value in (
+                    candidate_packet.abstract, candidate_packet.methods,
+                    candidate_packet.results, candidate_packet.other_sections,
+                    candidate_packet.protocol, candidate_packet.registry_record)
+                if isinstance(value, str) and value)
+            replayed_distinct, replayed_span = source_bound_distinct_data(
+                cited_packet_text, candidate_packet_text)
+            if not replayed_distinct or replayed_span != span:
+                raise ValueError(
+                    "QUALIFYING source-bound independence is not in bound packets")
+        if (selected.get("candidate_notice_kind") != "none"
+                or selected.get("candidate_notice_resolution") != "resolved_clear"
+                or selected.get("candidate_notice_lookup_status") != "ok"):
+            raise ValueError("QUALIFYING selected candidate notice is not clear")
+        if (record.get("cited_notice_kind") == "retraction"
+                or record.get("cited_notice_resolution") == "unresolved"
+                or record.get("cited_notice_lookup_status") != "ok"):
+            raise ValueError("QUALIFYING record has unusable cited notice status")
+        cited_cluster_id = selected.get("cited_study_cluster_id")
+        candidate_cluster_id = selected.get("candidate_study_cluster_id")
+        if (not isinstance(cited_cluster_id, str) or not cited_cluster_id
+                or not isinstance(candidate_cluster_id, str)
+                or not candidate_cluster_id
+                or cited_cluster_id == candidate_cluster_id):
+            raise ValueError("QUALIFYING selected candidate is in the cited cluster")
+        if (not isinstance(selected.get("cited_finding_span"), str)
+                or not selected["cited_finding_span"].strip()
+                or not isinstance(selected.get("candidate_contradiction_span"), str)
+                or not selected["candidate_contradiction_span"].strip()):
+            raise ValueError("QUALIFYING selected candidate lacks verified spans")
+        confidence = selected.get("confidence")
+        if (not isinstance(confidence, (int, float)) or isinstance(confidence, bool)
+                or not 0.0 <= confidence <= 1.0
+                or policy.confidence_floor is None
+                or confidence < policy.confidence_floor):
+            raise ValueError("QUALIFYING selected candidate fails confidence policy")
+        required_criteria = {
+            "directional_contradiction", "comparable", "independent",
+            "spans_verbatim", "confidence_ok", "notice_clear",
+        }
+        if not required_criteria <= set(selected.get("criteria_fired") or ()):
+            raise ValueError("QUALIFYING selected candidate lacks required criteria")
         expected_same = (selected.get("claim_match") == "match"
                          and selected.get("outcome_relation") == "same")
         expected_pop = selected.get("population_relation") in _POPULATION_COMPARABLE
@@ -1435,6 +2614,7 @@ def validate_f5_record(record: dict, policy: F5Policy) -> None:
         path_a_eligible=record["path_a_eligible"],
         cited_eoc_caps=record["cited_eoc_caps"],
         deploy_path_a=policy.deploy_path_a,
+        discovery_disposition=record.get("discovery_disposition"),
     )
     if record["f5_path"] != expected_path:
         raise ValueError("record f5_path drifted from its stored facts + policy")
@@ -1443,5 +2623,17 @@ def validate_f5_record(record: dict, policy: F5Policy) -> None:
         raise ValueError("path_a_deployed=True while deploy_path_a=False")
     if record["f5_path"] == "A" and not policy.deploy_path_a:
         raise ValueError("f5_path=A while deploy_path_a=False")
+    stored_bundle = record.get("controversy_bundle")
+    expected_bundle = build_controversy_bundle(
+        record, citation_id=record.get("citation_id"))
+    if stored_bundle != expected_bundle:
+        raise ValueError("controversy_bundle drifted from the F5 record")
+    if (record.get("controversy_bundle_sha256")
+            != expected_bundle["bundle_sha256"]
+            or record.get("evidence_profile")
+            != expected_bundle["evidence_profile"]
+            or record.get("search_complete")
+            != expected_bundle["search_complete"]):
+        raise ValueError("controversy bundle summary drifted")
     if record_sha256(record) != record["record_sha256"]:
         raise ValueError("record_sha256 mismatch (tampered)")

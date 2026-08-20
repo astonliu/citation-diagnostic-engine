@@ -13,7 +13,8 @@ from cre.f1.judgment_engine import ClaimSupport, SupportState, TemporalState
 CLAIM = "Drug X reduces disease Y"
 EVIDENCE = {
     "cited_work_id": "W1",
-    "cited_meta": {"authors": ["Smith"], "cited_tier": "rct"},
+    "cited_meta": {"authors": ["Smith"], "cited_tier": "rct",
+                   "registry_ids": ["NCT-W1"]},
     "cited_date": "2020-01-01",
     "as_of_date": "2024-02-29",
 }
@@ -24,11 +25,12 @@ CANDIDATE = f5.ComparabilitySource(abstract="Drug X did not reduce disease Y in 
 def _contradiction():
     return json.dumps({
         "directional_contradiction": True,
+        "relation_to_cited_finding": "opposes",
         "claim_match": "match",
         "outcome_relation": "same",
         "population_relation": "equivalent",
-        "cited_direction": "down",
-        "candidate_direction": "no effect",
+        "cited_direction": "decrease",
+        "candidate_direction": "no_effect",
         "magnitude": "reversal",
         "cited_finding_span": "Drug X reduced disease Y",
         "candidate_contradiction_span": "Drug X did not reduce disease Y",
@@ -53,7 +55,8 @@ def _seams(candidates):
 
     def notice(*_args, **_kwargs):
         calls["notice"] += 1
-        return f5.NoticeStatus()
+        return f5.NoticeStatus(
+            lookup_status="ok", source_role="no_notice_type")
 
     def tier(meta):
         calls["tier"] += 1
@@ -102,11 +105,17 @@ def test_f5_contradiction_parser_rejects_malformed_or_wrapped_output(raw):
 
 def test_qualifying_version_chain_selection_is_input_order_independent():
     candidates = (
-        f5.CandidateWork("W4", pub_date="2023-01-01", authors=("Jones",), tier_hint="rct"),
+        f5.CandidateWork("W4", pub_date="2023-01-01", authors=("Jones",),
+                         tier_hint="rct", registry_ids=("NCT-W4",),
+                         demonstrably_distinct_from=("W1",)),
         f5.CandidateWork("W3", pub_date="2023-06-01", authors=("Jones",),
-                         tier_hint="systematic_review_or_meta_analysis"),
+                         tier_hint="systematic_review_or_meta_analysis",
+                         registry_ids=("NCT-W3",),
+                         demonstrably_distinct_from=("W1",)),
         f5.CandidateWork("W2", pub_date="2023-06-01", authors=("Jones",),
-                         tier_hint="systematic_review_or_meta_analysis"),
+                         tier_hint="systematic_review_or_meta_analysis",
+                         registry_ids=("NCT-W2",),
+                         demonstrably_distinct_from=("W1",)),
     )
     for order in itertools.permutations(candidates):
         temporal, records, calls = _run(order)
@@ -138,7 +147,8 @@ def test_identical_version_chain_replays_byte_identically():
 def test_date_window_boundaries_short_circuit_deterministically(
         candidate_date, expected_state, judge_calls):
     candidate = f5.CandidateWork(
-        "W2", pub_date=candidate_date, authors=("Jones",), tier_hint="rct")
+        "W2", pub_date=candidate_date, authors=("Jones",), tier_hint="rct",
+        registry_ids=("NCT-W2",), demonstrably_distinct_from=("W1",))
     temporal, _records, calls = _run((candidate,))
     assert temporal.state is expected_state
     assert calls["judge"] == judge_calls

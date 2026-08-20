@@ -61,7 +61,10 @@ RESPONSE_PARSER_VERSION = F5_RESPONSE_PARSER_VERSION
 #: The ``ComparabilitySource`` fields that carry evidence text, in the order
 #: ``f5_supersession._source_text`` concatenates them -- so what the judge is shown
 #: and what the verbatim check reads are the same text in the same order.
-SOURCE_LABELS = ("abstract", "methods", "results", "protocol", "registry_record")
+SOURCE_LABELS = (
+    "abstract", "methods", "results", "other_sections", "protocol",
+    "registry_record",
+)
 
 SPAN_SOURCE_SELECTED = "selected"      # the judge named ids; we read them out
 SPAN_SOURCE_ALIGNED = "aligned"        # the judge quoted prose; we matched it
@@ -213,6 +216,19 @@ A later paper that is merely different, larger, better, or more recent does NOT
 contradict. A later paper that refines a magnitude without reversing a direction does
 NOT contradict.
 
+Also classify the broader relation to the cited finding:
+
+  opposes    comparable evidence points against the cited direction
+  confirms   comparable evidence supports the same primary outcome and direction
+  mixed      the candidate itself reports credible results on both sides
+  neutral    comparable evidence is neither opposing nor confirming
+  uncertain  the sources do not settle the relation
+
+Do not call every non-contradiction a confirmation. Confirmation requires the same
+claim, the same primary/main outcome, a comparable population, and compatible result
+directions. ``mixed`` is not a clean directional contradiction. If the relation is
+confirms, mixed, neutral, or uncertain, directional_contradiction MUST be false.
+
 ABSTAINING IS A FIRST-CLASS ANSWER, and it is measurably worth using. Where the
 evidence does not settle it, use "uncertain" for claim_match and outcome_relation,
 and "unclear" for population_relation and scope_mismatch_axis. Do not force a
@@ -237,6 +253,8 @@ THE CITED FINDING UNDER ASSESSMENT:
 Return ONLY one JSON object with exactly these keys and no others:
 
   directional_contradiction   true | false   (a real JSON boolean)
+
+  relation_to_cited_finding   opposes | confirms | mixed | neutral | uncertain
 
   claim_match      match      the two papers are asserting about the SAME claim
                    mismatch   they are asserting about different claims

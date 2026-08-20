@@ -258,6 +258,53 @@ def _parse_pubmed_xml(xml_text: str) -> dict[str, dict]:
             article.findall(".//Article/PublicationTypeList/PublicationType")
             if _text(node)
         ]
+        comments_corrections = []
+        for node in article.findall(
+                ".//MedlineCitation/CommentsCorrectionsList/CommentsCorrections"):
+            ref_type = str(node.get("RefType") or "").strip()
+            linked_pmid = (node.findtext("PMID") or "").strip()
+            if ref_type:
+                comments_corrections.append({
+                    "ref_type": ref_type,
+                    "pmid": linked_pmid,
+                    "note": _text(node.find("Note")),
+                })
+        doi = ""
+        for node in article.findall(".//PubmedData/ArticleIdList/ArticleId"):
+            if str(node.get("IdType") or "").strip().casefold() == "doi":
+                doi = _text(node)
+                break
+        registry_ids, dataset_ids = [], []
+        for bank in article.findall(".//MedlineCitation/DataBankList/DataBank"):
+            bank_name = str(bank.findtext("DataBankName") or "").casefold()
+            is_registry = any(token in bank_name for token in (
+                "clinicaltrials", "isrctn", "eudract", "chictr", "trial",
+            ))
+            target = registry_ids if is_registry else dataset_ids
+            namespace = re.sub(r"[^a-z0-9]", "", bank_name)
+            for node in bank.findall(".//AccessionNumber"):
+                value = _text(node)
+                if value:
+                    target.append(
+                        f"{namespace}:{value}" if is_registry and namespace
+                        else value)
+        for node in article.findall(".//MedlineCitation/OtherID"):
+            source = str(node.get("Source") or "").casefold()
+            value = _text(node)
+            if value and any(token in source for token in (
+                    "clinicaltrials", "isrctn", "eudract", "trial")):
+                namespace = re.sub(r"[^a-z0-9]", "", source)
+                registry_ids.append(
+                    f"{namespace}:{value}" if namespace else value)
+        version_relations = {
+            "republishedin", "republishedfrom", "updatein", "updateof",
+            "correctedandrepublishedin", "correctedandrepublishedfrom",
+            "preprintof", "haspreprint"}
+        version_work_ids = [
+            row["pmid"] for row in comments_corrections
+            if re.sub(r"[^a-z]", "", row["ref_type"].casefold())
+            in version_relations
+        ]
         out[pmid] = {
             "id": pmid,
             "title": title,
@@ -272,6 +319,13 @@ def _parse_pubmed_xml(xml_text: str) -> dict[str, dict]:
             "mesh_terms": mesh_terms,
             "mesh_major_terms": mesh_major,
             "publication_types": publication_types,
+            "comments_corrections": comments_corrections,
+            "doi": doi,
+            "registry_ids": sorted(set(registry_ids)),
+            "version_work_ids": sorted(set(version_work_ids)),
+            "cohort_ids": [],
+            "dataset_ids": sorted(set(dataset_ids)),
+            "demonstrably_distinct_from": [],
         }
     return out
 
@@ -289,6 +343,24 @@ def _valid_metadata_record(record, pmid: str) -> bool:
     for key in ("authors", "mesh_terms", "publication_types"):
         value = record.get(key)
         if not isinstance(value, list) or any(not isinstance(x, str) for x in value):
+            return False
+    if not isinstance(record.get("doi"), str):
+        return False
+    for key in (
+            "registry_ids", "version_work_ids", "cohort_ids", "dataset_ids",
+            "demonstrably_distinct_from"):
+        value = record.get(key)
+        if not isinstance(value, list) or any(not isinstance(x, str) for x in value):
+            return False
+    links = record.get("comments_corrections")
+    if not isinstance(links, list):
+        return False
+    for link in links:
+        if (not isinstance(link, dict)
+                or set(link) != {"ref_type", "pmid", "note"}
+                or not isinstance(link["ref_type"], str)
+                or not isinstance(link["pmid"], str)
+                or not isinstance(link["note"], str)):
             return False
     return True
 

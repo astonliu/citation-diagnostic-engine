@@ -87,6 +87,8 @@ def make_completer(model: str, api_key: str = "", *, max_tokens: int = 400,
                 raise NonRetryableProviderError(str(exc)) from exc
             return _extract_text(msg)
         return ""
+    complete.model_id = model
+    complete.model_settings = {"max_tokens": max_tokens}
     return complete
 
 
