@@ -53,12 +53,14 @@ leaf and is unaffected by concurrent edits to ``band_prompts``.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .judgment_engine import (
     ProvenanceAssessment,
     ProvenanceState,
+    SupportState,
 )
 
 # Seam type aliases (documentation only).
@@ -290,6 +292,16 @@ def _abstract_present(text: object) -> bool:
     )
 
 
+def _fill_prompt(template: str, replacements: dict[str, str]) -> str:
+    """Fill trusted template tokens once; tokens in untrusted values stay inert."""
+    if not replacements:
+        return template
+    pattern = re.compile("|".join(
+        re.escape(token) for token in sorted(replacements, key=len, reverse=True)
+    ))
+    return pattern.sub(lambda match: replacements[match.group(0)], template)
+
+
 def _assemble_candidates(reflist_result: object) -> list[dict]:
     """Normalize a fetch_reflist return into V3 candidates.
 
@@ -305,6 +317,8 @@ def _assemble_candidates(reflist_result: object) -> list[dict]:
         return []
     raw, _available = reflist_result
     if not raw:
+        return []
+    if not isinstance(raw, (list, tuple)):
         return []
     out: list[dict] = []
     for entry in raw:
@@ -402,30 +416,27 @@ def make_provenance_assessor(
     )
 
     def _v2(claim: str, cited_abstract: str) -> tuple[str, str, str]:
-        prompt = (
-            F3_V2_ORIGIN_PROMPT
-            .replace("<<PUBTYPE>>", pubtype_ctx)
-            .replace("<<CLAIM>>", claim)
-            .replace("<<ABSTRACT>>", cited_abstract)
-        )
+        prompt = _fill_prompt(F3_V2_ORIGIN_PROMPT, {
+            "<<PUBTYPE>>": pubtype_ctx,
+            "<<CLAIM>>": claim,
+            "<<ABSTRACT>>": cited_abstract,
+        })
         return _parse_v2(call_llm(prompt))
 
     def _v3(claim: str, restatement_span: str,
             candidates: list[dict]) -> tuple[Optional[int], str]:
-        prompt = (
-            F3_V3_SELECT_PROMPT
-            .replace("<<CLAIM>>", claim)
-            .replace("<<RESTATEMENT_SPAN>>", restatement_span)
-            .replace("<<CANDIDATES>>", _render_candidates(candidates))
-        )
+        prompt = _fill_prompt(F3_V3_SELECT_PROMPT, {
+            "<<CLAIM>>": claim,
+            "<<RESTATEMENT_SPAN>>": restatement_span,
+            "<<CANDIDATES>>": _render_candidates(candidates),
+        })
         return _parse_v3(call_llm(prompt), len(candidates))
 
     def _v4(claim: str, primary_abstract: str) -> tuple[bool, str, str]:
-        prompt = (
-            F3_V4_LOOPCLOSE_PROMPT
-            .replace("<<CLAIM>>", claim)
-            .replace("<<ABSTRACT>>", primary_abstract)
-        )
+        prompt = _fill_prompt(F3_V4_LOOPCLOSE_PROMPT, {
+            "<<CLAIM>>": claim,
+            "<<ABSTRACT>>": primary_abstract,
+        })
         return _parse_v4(call_llm(prompt))
 
     def _trace_one_claim(
@@ -460,6 +471,8 @@ def make_provenance_assessor(
         contains, origin_span, _v4_reason = _v4(claim, primary_abstract)
         if not contains or not origin_span:
             return None
+        if origin_span not in primary_abstract:
+            return None
         # Terminal rule: V2=restatement AND rightful primary identified within the
         # hop budget AND V4 confirms it contains the finding. Real reflist-sourced
         # ids + real spans; the contract enforces non-empty tuples.
@@ -483,6 +496,19 @@ def make_provenance_assessor(
         # Engine invokes this only under full support; be robust regardless.
         if not claims:
             return _unjudgeable(policy, "no atomic claims to assess for provenance")
+        if (
+            not isinstance(support, tuple)
+            or len(support) != len(claims)
+            or any(
+                getattr(row, "claim_index", None) != index
+                or getattr(row, "state", None) is not SupportState.SUPPORTED
+                for index, row in enumerate(support)
+            )
+        ):
+            return _unjudgeable(
+                policy,
+                "provenance requires complete, index-aligned SUPPORTED claims",
+            )
 
         cited_fetch_id = (
             str(cited_pmid).strip() if cited_pmid and str(cited_pmid).strip()
@@ -528,6 +554,10 @@ def make_provenance_assessor(
                 # No restatement span to anchor the origin chain -> cannot
                 # confirm without fabricating a span -> hold.
                 held_reasons.append("restatement without an anchoring span")
+                continue
+            if span not in cited_abstract:
+                held_reasons.append(
+                    "restatement span is not verbatim in the cited abstract")
                 continue
             confirmed = _trace_one_claim(claim, span)
             if confirmed is not None:

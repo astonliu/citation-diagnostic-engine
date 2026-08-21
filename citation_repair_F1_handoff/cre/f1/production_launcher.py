@@ -584,6 +584,7 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
            judge_model: str = "", preregistration_amendment: str = "",
            preregistration_scope_ruling=None,
            temperature=None, assistant_prefill=None,
+           f5_seams=None, f5_evidence_builder=None, f5_policy=None,
            f7_seams=None, f7_evidence_builder=None, f7_policy=None,
            **run_kwargs) -> dict:
     """Verify every precondition, run in production mode, verify the receipt.
@@ -601,6 +602,23 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
     if model not in allowed:
         raise LaunchRefused(
             f"model {model!r} is not in the DECISION-backed allowlist {allowed}")
+
+    # Formal F5 detection is useful without autonomous replacement, but only
+    # with the concrete PubMed evidence path and an independent positive gate.
+    f5_parts = (f5_seams, f5_evidence_builder, f5_policy)
+    if any(part is not None for part in f5_parts):
+        if not all(part is not None for part in f5_parts):
+            raise LaunchRefused(
+                "production F5 requires seams, evidence builder, and locked "
+                "policy together; otherwise leave all three explicitly unwired")
+        from .f5_seams import validate_production_f5_configuration
+        try:
+            validate_production_f5_configuration(
+                seams=f5_seams, evidence_builder=f5_evidence_builder,
+                policy=f5_policy, run_model=model)
+        except (TypeError, ValueError) as exc:
+            raise LaunchRefused(
+                f"production F5 configuration invalid: {exc}") from exc
 
     # F7 is either explicitly unwired (all three absent) or fully production
     # wired.  Validate before tree inspection and, critically, before the run
@@ -650,6 +668,8 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         corpus_manifest_path=corpus_manifest_path,
         code_commit=tree["code_commit"], model=model,
         temperature=resolved_temperature,
+        f5_seams=f5_seams, f5_evidence_builder=f5_evidence_builder,
+        f5_policy=f5_policy,
         f7_seams=f7_seams, f7_evidence_builder=f7_evidence_builder,
         f7_policy=f7_policy,
         **({"assistant_prefill": resolved_prefill}

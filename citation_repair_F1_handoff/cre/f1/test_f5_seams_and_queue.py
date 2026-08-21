@@ -13,6 +13,55 @@ from cre.f1 import f5_seams as s
 from cre.f1 import f5_supersession as f5
 
 
+def _production_bundle():
+    def fetch_meta(work_id):
+        return {
+            "id": str(work_id), "pmid": str(work_id),
+            "pub_date": "2010-01-01", "pub_date_latest": "2010-01-01",
+            "abstract": "abstract", "publication_types": [
+                "Randomized Controlled Trial"],
+        }
+
+    generator = lambda _prompt: "{}"
+    verifier = lambda _prompt: "{}"
+    seams = s.build_f5_seams(
+        fetch_meta=fetch_meta, fetch_abstract=lambda _wid: "abstract",
+        search_candidates=lambda *_a, **_k: [], complete=generator,
+        verifier_complete=verifier, judgment_model_id="model",
+        verifier_model_id="model")
+    builder = s.make_f5_evidence_builder(
+        fetch_meta, as_of_date="2024-01-01")
+    policy = f5.F5Policy(
+        mode="deployment", generator_model_id="model",
+        verifier_model_id="model")
+    return seams, builder, policy
+
+
+def test_production_bundle_is_explicitly_validated():
+    seams, builder, policy = _production_bundle()
+    s.validate_production_f5_configuration(
+        seams=seams, evidence_builder=builder, policy=policy,
+        run_model="model")
+
+
+def test_production_bundle_rejects_missing_verifier():
+    seams, builder, policy = _production_bundle()
+    seams["verify_contradiction"] = None
+    with pytest.raises(ValueError, match="generator and verifier"):
+        s.validate_production_f5_configuration(
+            seams=seams, evidence_builder=builder, policy=policy,
+            run_model="model")
+
+
+def test_builder_rejects_reused_generator_as_verifier_transport():
+    transport = lambda _prompt: "{}"
+    with pytest.raises(ValueError, match="transports must be distinct"):
+        s.build_f5_seams(
+            fetch_meta=lambda _wid: {}, fetch_abstract=lambda _wid: "",
+            search_candidates=lambda *_a, **_k: [], complete=transport,
+            verifier_complete=transport)
+
+
 # ==========================================================================
 # 3b -- classify_evidence_tier: deterministic, TOTAL, no model call
 # ==========================================================================

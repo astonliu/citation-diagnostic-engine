@@ -15,7 +15,8 @@ FIELD_CONFIDENCE = {
         "field-level confidence"),
 }
 HUMAN_REVIEW_REASON = (
-    "F5 remains non-reportable; review the full controversy evidence")
+    "Path B requires human review of the full controversy evidence; no "
+    "autonomous replacement is authorized")
 
 _CATEGORY_KEYS = (
     "qualifying_contradictions", "plausible_or_uncertain",

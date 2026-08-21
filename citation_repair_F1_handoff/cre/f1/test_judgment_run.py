@@ -32,7 +32,10 @@ def make_ref(cid, *, citance="Drug X reduces outcome Y [1].", pmid="111",
     )
 
 
-ABSTRACT = "Drug X reduced outcome Y in a controlled study."
+ABSTRACT = (
+    "Drug X reduced outcome Y in a controlled study, as reported previously; "
+    "the primary trial reduced outcome Y."
+)
 
 
 def abstract_ok(_pmid):
@@ -313,7 +316,7 @@ def test_f5_wired_through_runner_emits_temporal_finding(tmp_path, monkeypatch):
     F5 records on the emitted record (fail-closed to UNJUDGEABLE when unwired)."""
     from .f5_supersession import (
         CandidateWork, ComparabilitySource, EvidenceTier, NoticeStatus,
-        RetrievalResult,
+        RetrievalResult, F5Policy,
     )
     from .f5_evidence_store import build_source_packet
 
@@ -374,6 +377,16 @@ def test_f5_wired_through_runner_emits_temporal_finding(tmp_path, monkeypatch):
             "candidate_contradiction_span": "Drug X did NOT reduce outcome Y in adults",
             "confidence": 0.9, "scope_mismatch_axis": "none"})
 
+    def f5_verify(_prompt):
+        return json.dumps({
+            "same_claim_or_outcome": True,
+            "comparable_population": True,
+            "opposite_directions": True,
+            "cited_span_supports_claim": True,
+            "candidate_span_contradicts_claim": True,
+            "rationale": "confirmed",
+        })
+
     f5_seams = dict(
         retrieve_superseding_candidates=f5_retrieve,
         fetch_comparability_source=f5_fetch,
@@ -381,6 +394,7 @@ def test_f5_wired_through_runner_emits_temporal_finding(tmp_path, monkeypatch):
         classify_evidence_tier=f5_tier,
         find_supersession_attestation=f5_attest,
         judge_contradiction=f5_judge,
+        verify_contradiction=f5_verify,
     )
 
     (tmp_path / "PMC1.xml").write_text("<x/>", encoding="utf-8")
@@ -393,6 +407,9 @@ def test_f5_wired_through_runner_emits_temporal_finding(tmp_path, monkeypatch):
         fetch_abstract=abstract_ok,
         preband_disposition=CLEARED, model="test-model",
         f5_seams=f5_seams,
+        f5_policy=F5Policy(
+            mode="deployment", generator_model_id="test-model",
+            verifier_model_id="test-model"),
         f5_evidence_builder=lambda item: {
             "cited_work_id": "111",
             "cited_meta": {"authors": ["Smith"], "cited_tier": "rct",
@@ -405,11 +422,15 @@ def test_f5_wired_through_runner_emits_temporal_finding(tmp_path, monkeypatch):
     assert "F5" in row["findings"]
     assert row["f5_records"][0]["temporal_state"] == "QUALIFYING_CONTRADICTION"
     assert row["f5_records"][0]["f5_path"] == "B"
+    assert row["f5_records"][0]["verifier_result"] == "confirmed"
+    assert row["f5_records"][0]["reportable"] is True
     assert row["f5_records"][0]["response_parser_version"] == \
         manifest["f5"]["response_parser_version"]
     assert manifest["f5"]["attestation_lookup_performed"] is True
     assert manifest["f5"]["attestation_calls"] == 1
     assert manifest["f5"]["contradiction_judge_calls"] == 1
+    assert manifest["f5"]["verifier_calls"] == 1
+    assert manifest["f5"]["reportable"] is True
     packet_path = out_dir / "f5_evidence_packets.jsonl"
     bundle_path = out_dir / "f5_controversy_bundles.jsonl"
     assert manifest["f5"]["source_packet_artifact_rows"] == 2
@@ -432,8 +453,8 @@ def test_f5_wired_through_runner_emits_temporal_finding(tmp_path, monkeypatch):
     assert "retrieval_protocol" not in manifest["f5"]
     assert "exposed no executed-protocol" in manifest["f5"]["retrieval_protocol_note"]
     assert manifest["reportability"]["reportable"] is False
-    assert any("F5_reportable" in failure
-               for failure in manifest["reportability"]["failures"])
+    assert not any("F5_reportable" in failure
+                   for failure in manifest["reportability"]["failures"])
 
 
 def test_f5_seams_and_evidence_builder_are_an_xor_guard(tmp_path, monkeypatch):

@@ -1,24 +1,15 @@
-> # ⚠️ VOID — DO NOT USE
+> # STATUS — ACTIVE, NONBINDING REFERENCE
 >
-> **Voided 2026-08-16 by ZD (DEC-080). Every rule in this document is outdated.**
+> **Restored 2026-08-18 by ZD (DEC-082).** Use this document's definitions, collision tests,
+> and examples as an annotator-facing reference, not as the definitive source of governance.
 >
-> Nothing below is authoritative. Do not apply any decision rule, boundary note, calibration
-> note, worked example, or architecture-table row from this file to annotation, adjudication,
-> prompt work, or code.
+> **Authority order:** `DECISIONS.md` in the `cre-brain` vault is binding, followed by the
+> applicable taxonomy amendments and `TAXONOMY.md`. If any of those disagree with this file,
+> the higher-authority source wins.
 >
-> **Known-wrong example (the one that triggered the void):** "Pair 1" says *zero atomic claims
-> supported → F3*. That is backwards. Per **DEC-017**, F3 is **provenance-only** — right claims,
-> wrong source — and it requires **full** atomic-claim coverage; any unestablished claim routes
-> to **F6**. The engine gates F3 at FULL support, matching DEC-017, not this file.
->
-> This is an illustration, not an erratum list. **The rest of the file has not been audited and
-> is assumed wrong.**
->
-> **Where authority actually lives:** `DECISIONS.md` in the vault (`cre-brain`) is binding, then
-> `TAXONOMY_AMENDMENT_2026-08-07_FINAL.md`, then `TAXONOMY.md`. If any of those disagree with
-> this file, they win.
->
-> Retained only as history — to show what the annotator-facing rules used to say.
+> The known F3/F6 inversion that caused the earlier void has been corrected below: F3 is
+> provenance-only and requires full atomic-claim coverage; any unestablished atomic claim routes
+> to F6 when the evidence retrieval is complete. Incomplete retrieval remains held.
 
 ---
 
@@ -32,20 +23,26 @@ Use alongside the full per-category definitions (1 paragraph + 2 positive + 2 ne
 
 ## Pair 1 — F3 (Misattribution) vs. F6 (Partial support)
 
-**Why they collide.** For any multi-clause biomedical sentence, "the paper doesn't make the claimed finding" (F3) and "the paper supports part but not all of the claim" (F6) can describe the same abstract depending on how the annotator frames "the claim."
+**Why they collide.** Both can look like a citation-source problem at first glance. F3 is a
+provenance error after full coverage is established; F6 is a coverage error whenever at least one
+atomic claim is unestablished after complete retrieval.
 
-**Decision rule (count over atomic claims — deterministic given the atomic-claim labels the pipeline produces):**
+**Decision rule (coverage first, provenance second — deterministic given the atomic-claim labels the pipeline produces):**
 
 1. Decompose the sentence into atomic claims (pipeline already does this).
 2. For each atomic claim, label whether the cited paper supports it (yes/no).
 3. Apply:
-   - **Zero atomic claims supported → F3 (Misattribution).** The paper supports none of what was claimed.
-   - **At least one supported AND at least one unsupported → F6 (Partial support).**
-   - (All supported → not an error in this dimension; the citation is accurate for coverage.)
+   - **Any unestablished atomic claim → F6 (Partial support),** provided the evidence retrieval is complete.
+     This includes both partial coverage and zero coverage.
+   - **All atomic claims established + wrong provenance/origin → F3 (Misattribution).** The cited
+     paper accurately restates the claims but is not the source that originated them.
+   - **All atomic claims established + correct provenance → not an error in this dimension.**
+   - **Incomplete retrieval → HELD / unjudgeable,** not F3 or F6.
 
-**Boundary note.** If the sentence has only one atomic claim and the paper doesn't support it, that is F3, not F6 — F6 requires a genuine split.
+**Boundary note.** If the sentence has only one atomic claim and the completely retrieved paper does
+not establish it, that is F6, not F3. F3 is never inferred from lack of support.
 
-**Calibration note — "indirect support" edge case.** If the cited paper supports the general mechanism but the claim asserts a specific experimental context the paper doesn't confirm (e.g., claim says "ApoE-deficient mice" but abstract only discusses mice generally), this is F6 — the general claim is supported, the specific context is not addressed. Do NOT assign F3 unless zero atomic claims are supported. See Example 1 (claims_test.jsonl index 1) as a worked calibration case.
+**Calibration note — "indirect support" edge case.** If the cited paper supports the general mechanism but the claim asserts a specific experimental context the complete evidence does not establish (e.g., claim says "ApoE-deficient mice" but the paper only discusses mice generally), this is F6 — the general claim is supported, the specific context is not addressed. Assign F3 only when all atomic claims are established and the cited work is the wrong provenance/origin. See Example 1 (claims_test.jsonl index 1) as a worked calibration case.
 
 ---
 
@@ -57,10 +54,10 @@ Use alongside the full per-category definitions (1 paragraph + 2 positive + 2 ne
 
 1. Identify whether the cited paper *addresses* the claim's subject at all.
    - If it addresses the subject but at a **weaker strength/modality** → **F4 (Overstatement).** This is a mismatch on *how strongly*: correlation cited as causation; "associated with" cited as "causes"; "may reduce" cited as "reduces"; observational cited as interventional.
-   - If it **fully supports some atomic claims and is silent on / does not address others** → **F6 (Partial support).** This is a mismatch on *how many*.
-2. Tie-breaker: F4 is about a single claim the paper *does* engage, at the wrong strength. F6 is about *multiple* claims where the paper covers a subset completely.
+   - If complete evidence leaves **one or more atomic claims unestablished** → **F6 (Partial support).** This is a mismatch in coverage, including zero-coverage cases.
+2. Tie-breaker: F4 is about a claim the paper *does* engage, at the wrong strength. F6 is about at least one claim or load-bearing specific that the complete evidence does not establish.
 
-**One-line test.** "Wrong strength on a claim it addresses" = F4. "Right strength but only on some of the claims" = F6.
+**One-line test.** "Wrong strength on a claim it addresses" = F4. "One or more claims not established" = F6.
 
 **F4 boundary — paper-level vs. literature-level uncertainty.** F4 requires the *cited paper itself* to make a weaker claim than what is being asserted. If the cited paper reports a finding as true while acknowledging uncertainty in the *broader literature* (e.g., "one study found X but other studies show variable results"), the citation is ACCURATE — the paper's own finding is being cited correctly. F4 is triggered only when the paper's own language is hedged relative to the claim (e.g., paper says "may be associated with," claim says "causes"). See Example 4 (claims_test.jsonl index 4) as a calibration case: Prevotella/meat-diet association labeled ACCURATE because the paper reports the finding as real despite noting broader uncertainty.
 
@@ -140,7 +137,7 @@ Check the following against the contradicting paper. Each criterion is sufficien
 
 **Decision rule.** Check whether the claim adds specificity that the paper doesn't actually establish.
 
-- **Claim adds a specific experimental context the abstract doesn't confirm → F6.** Example: claim says "in ApoE-deficient mice," abstract only discusses "mice" generally. The general finding is supported; the specific model is not confirmed.
+- **Claim adds a specific experimental context the complete evidence doesn't establish → F6.** Example: claim says "in ApoE-deficient mice," the completely retrieved paper only discusses "mice" generally. The general finding is supported; the specific model is not confirmed. If retrieval is incomplete, hold instead.
 - **Claim stays at the same level of specificity as the paper → ACCURATE.**
 
 **Key principle.** "Accurate on the topic" ≠ "accurate on the claim." Read the claim at the level of its specific assertions, not its general subject. One word of unconfirmed specificity is enough to push a citation from ACCURATE to F6.
@@ -154,10 +151,10 @@ Check the following against the contradicting paper. Each criterion is sufficien
 | F1 Fabricated | DOI/PMID/metadata fails to resolve | Existence check (pre-classifier) |
 | F2 Wrong reference | Metadata mismatch after fuzzy match | Existence check (pre-classifier) |
 | F8 Retracted | Retraction flag lookup + post-retraction timing gate (≥31d) | Existence check (pre-classifier) |
-| F3 Misattribution | Atomic-claim count (zero supported) | F3–F7 judgment band |
+| F3 Misattribution | Full claim coverage + wrong provenance/origin | F3–F7 judgment band |
 | F4 Overstatement | Strength/modality mismatch | F3–F7 judgment band |
 | F5 Stale | Contradiction detection + supersession criteria → Path A (autonomous repair) or Path B (escalation flag) | F3–F7 judgment band |
-| F6 Partial support | Atomic-claim count (some supported) | F3–F7 judgment band |
+| F6 Partial support | Any unestablished atomic claim after complete retrieval | F3–F7 judgment band |
 | F7 Wrong entity | Entity mismatch (drug/gene/disease) | F3–F7 judgment band |
 
 Human/LLM judgment is confined to F3–F7. F1, F2, F8 are database-resolvable.

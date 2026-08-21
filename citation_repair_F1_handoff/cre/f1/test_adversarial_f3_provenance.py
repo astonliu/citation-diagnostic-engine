@@ -67,21 +67,18 @@ def _trace_assessor(call_llm, fetch_reflist=None):
         cited_pmid="1", cited_pmcid="PMC1")
 
 
-@pytest.mark.xfail(strict=True, reason="V2 evidence_span is never bound to the cited abstract")
 def test_restatement_span_must_be_verbatim_in_cited_abstract():
     assessor = _trace_assessor(_scripted_trace(v2_span="hallucinated attribution"))
     result = assessor(("claim",), (ClaimSupport(0, SupportState.SUPPORTED),))
     assert result.state is ProvenanceState.UNJUDGEABLE
 
 
-@pytest.mark.xfail(strict=True, reason="V4 evidence_span is never bound to the primary abstract")
 def test_origin_span_must_be_verbatim_in_primary_abstract():
     assessor = _trace_assessor(_scripted_trace(v4_span="hallucinated finding"))
     result = assessor(("claim",), (ClaimSupport(0, SupportState.SUPPORTED),))
     assert result.state is ProvenanceState.UNJUDGEABLE
 
 
-@pytest.mark.xfail(strict=True, reason="F3 prompt construction uses chained replacement")
 def test_f3_claim_placeholder_text_remains_inert():
     prompts = []
     def call_llm(prompt):
@@ -95,7 +92,6 @@ def test_f3_claim_placeholder_text_remains_inert():
     assert claim in prompts[0]
 
 
-@pytest.mark.xfail(strict=True, reason="malformed truthy reflist payload is iterated directly")
 def test_malformed_reflist_payload_holds_instead_of_crashing():
     assessor = _trace_assessor(
         _scripted_trace(), fetch_reflist=lambda _: (123, True))
@@ -103,7 +99,6 @@ def test_malformed_reflist_payload_holds_instead_of_crashing():
     assert result.state is ProvenanceState.UNJUDGEABLE
 
 
-@pytest.mark.xfail(strict=True, reason="F3 assessor ignores its support argument")
 def test_f3_cannot_emit_proper_origin_for_unestablished_claim():
     assessor = f3.make_provenance_assessor(
         call_llm=lambda _: _v2(), fetch_reflist=lambda _: ([], False),

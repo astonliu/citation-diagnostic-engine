@@ -28,8 +28,14 @@ from .judgment_engine import (
 
 CLAIM = "Protein P binds receptor R"
 CLAIMS = (CLAIM,)
-CITED_ABSTRACT = "The cited work's abstract text."
-PRIMARY_ABSTRACT = "The primary work's abstract text."
+CITED_ABSTRACT = (
+    "The cited work's abstract text; as first shown by [1] and as first shown "
+    "by [2]."
+)
+PRIMARY_ABSTRACT = (
+    "The primary work's abstract text; here we demonstrate P binds R and here "
+    "we demonstrate P activates Q."
+)
 
 # A reflist result shaped exactly like ncbi_meta.ncbi_pmc_reflist's return:
 # (provenance_candidates, review_fulltext_available).

@@ -615,10 +615,42 @@ def make_judge_contradiction(
     return judge_contradiction
 
 
+def make_verify_contradiction(complete, *, model_id: "str | None" = None):
+    """Wrap the independent positive-only F5 verifier transport.
+
+    The core renders and strictly parses the versioned verifier prompt because
+    its source-bound evidence hashes are part of the replay contract.  This
+    wrapper records only execution metadata and never repairs model output.
+    """
+    if not callable(complete):
+        raise ValueError("F5 verifier complete must be callable")
+    resolved_model_id = str(
+        model_id or getattr(complete, "model_id", "") or "").strip()
+
+    def verify_contradiction(prompt: str) -> str:
+        verify_contradiction.calls += 1
+        verify_contradiction.model_calls += 1
+        return complete(prompt)
+
+    verify_contradiction.calls = 0
+    verify_contradiction.model_calls = 0
+    verify_contradiction.model_id = resolved_model_id
+    verify_contradiction.thread_safe = (
+        getattr(complete, "thread_safe", False) is True)
+    return verify_contradiction
+
+
 # --------------------------------------------------------------------------
 # The bundle the runner passes to decide_f5.
 # --------------------------------------------------------------------------
+class F5SeamBundle(dict):
+    """Typed F5 runtime bundle; mutable caches keep Phase 2 serial."""
+
+    thread_safe = False
+
+
 def build_f5_seams(*, fetch_meta, fetch_abstract, search_candidates, complete,
+                   verifier_complete=None,
                    fetch_fulltext=None, cap: int = CANDIDATE_CAP,
                    screen_candidates=None,
                    assess_missing_facts=None, fact_assessor_version="none",
@@ -626,6 +658,7 @@ def build_f5_seams(*, fetch_meta, fetch_abstract, search_candidates, complete,
                    thin_source_log=None, span_miss_log=None,
                    protocol_log=None, judgment_cache=None,
                    judgment_model_id: "str | None" = None,
+                   verifier_model_id: "str | None" = None,
                    judgment_model_settings=None) -> dict:
     """All F5 seams, ready for ``decide_f5(..., f5_seams=...)``.
 
@@ -634,6 +667,8 @@ def build_f5_seams(*, fetch_meta, fetch_abstract, search_candidates, complete,
     """
     if screen_candidates is not None and not callable(screen_candidates):
         raise ValueError("screen_candidates must be callable or None")
+    if verifier_complete is complete and verifier_complete is not None:
+        raise ValueError("F5 generator and verifier transports must be distinct")
     notice_resolver = make_check_formal_notice(fetch_meta)
 
     def packet_notice(work_id: str, *, as_of_date: str) -> dict:
@@ -657,7 +692,7 @@ def build_f5_seams(*, fetch_meta, fetch_abstract, search_candidates, complete,
             cited_meta, claim, candidate_id, as_of_date=as_of_date)
     observed_attestation.calls = 0
 
-    return {
+    return F5SeamBundle({
         "check_formal_notice": notice_resolver,
         "classify_evidence_tier": classify_evidence_tier,
         "fetch_comparability_source": make_fetch_comparability_source(
@@ -674,8 +709,12 @@ def build_f5_seams(*, fetch_meta, fetch_abstract, search_candidates, complete,
             complete, span_miss_log=span_miss_log,
             judgment_cache=judgment_cache, model_id=judgment_model_id,
             model_settings=judgment_model_settings),
+        "verify_contradiction": (
+            make_verify_contradiction(
+                verifier_complete, model_id=verifier_model_id)
+            if verifier_complete is not None else None),
         "screen_candidates": screen_candidates,
-    }
+    })
 
 
 def make_f5_evidence_builder(fetch_meta, *, as_of_date: str):
@@ -753,10 +792,51 @@ def make_f5_evidence_builder(fetch_meta, *, as_of_date: str):
             evidence["claim_meta"] = copied
         return evidence
 
+    build.production_f5_evidence_builder = True
+    build.builder_version = "f5_pubmed_evidence_v1"
     return build
 
 
+def validate_production_f5_configuration(*, seams, evidence_builder,
+                                         policy, run_model: str) -> None:
+    """Reject incomplete or falsely attributed formal F5 wiring pre-output."""
+    from .f5_supersession import F5Policy, validate_f5_policy
+
+    if not isinstance(seams, F5SeamBundle):
+        raise ValueError("production F5 seams must be an F5SeamBundle")
+    expected = {
+        "check_formal_notice", "classify_evidence_tier",
+        "fetch_comparability_source", "retrieve_superseding_candidates",
+        "find_supersession_attestation", "judge_contradiction",
+        "verify_contradiction", "screen_candidates",
+    }
+    if set(seams) != expected:
+        raise ValueError("production F5 seam bundle is incomplete")
+    if not callable(evidence_builder) or getattr(
+            evidence_builder, "production_f5_evidence_builder", False) is not True:
+        raise ValueError("production F5 requires the PubMed evidence builder")
+    if not isinstance(policy, F5Policy):
+        raise ValueError("production F5 requires an explicit F5Policy")
+    validate_f5_policy(policy)
+    if policy.mode != "deployment" or policy.deploy_path_a is not False:
+        raise ValueError(
+            "production F5 requires deployment detection with Path A disabled")
+    generator = seams.get("judge_contradiction")
+    verifier = seams.get("verify_contradiction")
+    if not callable(generator) or not callable(verifier):
+        raise ValueError("production F5 requires generator and verifier callables")
+    if generator is verifier:
+        raise ValueError("production F5 generator and verifier must be distinct")
+    if getattr(generator, "model_id", "") != policy.generator_model_id:
+        raise ValueError("production F5 generator model does not match policy")
+    if getattr(verifier, "model_id", "") != policy.verifier_model_id:
+        raise ValueError("production F5 verifier model does not match policy")
+    if policy.generator_model_id != str(run_model or "").strip():
+        raise ValueError("production F5 generator model must equal the run model")
+
+
 def build_pubmed_f5_runtime(*, complete, as_of_date: str, api_key: str = "",
+                            verifier_complete=None,
                             email: "str | None" = None, session=None,
                             cache_dir: "str | None" = None,
                             timeout: float = 30.0, max_retries: int = 4,
@@ -768,6 +848,7 @@ def build_pubmed_f5_runtime(*, complete, as_of_date: str, api_key: str = "",
                             thin_source_log=None, span_miss_log=None,
                             protocol_log=None, judgment_cache=None,
                             judgment_model_id: "str | None" = None,
+                            verifier_model_id: "str | None" = None,
                             judgment_model_settings=None) -> dict:
     """Return both live F5 arguments accepted by ``run_natural_judgment``.
 
@@ -798,6 +879,7 @@ def build_pubmed_f5_runtime(*, complete, as_of_date: str, api_key: str = "",
     seams = build_f5_seams(
         fetch_meta=fetch_meta, fetch_abstract=fetch_abstract,
         search_candidates=finder.search_candidates, complete=complete,
+        verifier_complete=verifier_complete,
         fetch_fulltext=fetch_fulltext, cap=cap,
         screen_candidates=screen_candidates,
         assess_missing_facts=assess_missing_facts,
@@ -806,6 +888,7 @@ def build_pubmed_f5_runtime(*, complete, as_of_date: str, api_key: str = "",
         thin_source_log=thin_source_log, span_miss_log=span_miss_log,
         protocol_log=protocol_log, judgment_cache=judgment_cache,
         judgment_model_id=judgment_model_id,
+        verifier_model_id=verifier_model_id,
         judgment_model_settings=judgment_model_settings)
     return {
         "f5_seams": seams,

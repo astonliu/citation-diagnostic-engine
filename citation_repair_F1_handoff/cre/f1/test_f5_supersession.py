@@ -17,7 +17,9 @@ import json
 
 import pytest
 
+from . import judgment_run as jr
 from .f5_candidate_screen import CandidateScreenBatch, CandidateScreenDecision
+from .f5_evidence_store import build_source_packet
 from .f5_supersession import (
     Attestation,
     CandidateWork,
@@ -53,9 +55,34 @@ CITED_SRC = ComparabilitySource(
 CAND_SRC = ComparabilitySource(
     abstract="In a larger randomized trial, Drug X did NOT reduce disease Y and "
     "increased harm in adults.")
-
 CITED_FINDING_SPAN = "Drug X reduced disease Y risk in adults"
 CAND_CONTRA_SPAN = "Drug X did NOT reduce disease Y"
+
+
+def _formal_packet(work_id, date, abstract):
+    return build_source_packet(
+        {"id": work_id, "title": f"Work {work_id}", "pub_date": date,
+         "pub_date_latest": date, "pub_date_precision": "day",
+         "authors": ["Author"],
+         "publication_types": ["Randomized Controlled Trial"]},
+        as_of_date="2024-01-01",
+        retrieved_at="2024-01-01T00:00:00+00:00",
+        evidence_tier="rct", evidence_tier_basis="test",
+        abstract=abstract, historical_content_verified=True)
+
+
+FORMAL_CITED_PACKET = _formal_packet("111", "2010-01-01", CITED_SRC.abstract)
+FORMAL_CAND_PACKET = _formal_packet("222", "2020-01-01", CAND_SRC.abstract)
+FORMAL_CITED_SRC = ComparabilitySource(
+    abstract=FORMAL_CITED_PACKET.abstract,
+    packet_sha256=FORMAL_CITED_PACKET.packet_sha256)
+FORMAL_CAND_SRC = ComparabilitySource(
+    abstract=FORMAL_CAND_PACKET.abstract,
+    packet_sha256=FORMAL_CAND_PACKET.packet_sha256)
+FORMAL_PACKET_MAP = {
+    FORMAL_CITED_PACKET.packet_sha256: FORMAL_CITED_PACKET.to_dict(),
+    FORMAL_CAND_PACKET.packet_sha256: FORMAL_CAND_PACKET.to_dict(),
+}
 
 EVIDENCE = {
     "cited_work_id": "W1",
@@ -108,6 +135,19 @@ def contradiction_json(
     })
 
 
+def verifier_json(**overrides):
+    payload = {
+        "same_claim_or_outcome": True,
+        "comparable_population": True,
+        "opposite_directions": True,
+        "cited_span_supports_claim": True,
+        "candidate_span_contradicts_claim": True,
+        "rationale": "independently confirmed",
+    }
+    payload.update(overrides)
+    return json.dumps(payload)
+
+
 def candidate(work_id="W2", *, pub_date="2020-01-01", authors=("Jones",),
               tier_hint="rct", registry_ids=None,
               demonstrably_distinct_from=None):
@@ -127,6 +167,7 @@ def make_seams(
     adequacy="adequate",
     status="ok",
     contradiction=None,
+    verifier=None,
     cited_notice=None,
     candidate_notices=None,
     tier_map=None,
@@ -179,6 +220,10 @@ def make_seams(
             return contradiction(cited_src, cand_src, claim)
         return contradiction
 
+    def verify(prompt):
+        calls["verifier"] = calls.get("verifier", 0) + 1
+        return verifier if verifier is not None else verifier_json()
+
     return dict(
         retrieve_superseding_candidates=retrieve,
         fetch_comparability_source=fetch,
@@ -186,6 +231,7 @@ def make_seams(
         classify_evidence_tier=tier,
         find_supersession_attestation=attest,
         judge_contradiction=judge,
+        verify_contradiction=(verify if verifier is not None else None),
     ), calls
 
 
@@ -1237,8 +1283,10 @@ def test_multi_claim_f6_and_f5_engine_order():
 # Deployment-mode / unfrozen-lock fail-closed behavior.
 # --------------------------------------------------------------------------
 def test_unfrozen_confidence_floor_fails_closed():
-    policy = F5Policy(mode="deployment", confidence_floor=None)
-    temporal, records, _ = run(policy=policy)
+    policy = F5Policy(
+        mode="deployment", confidence_floor=None,
+        generator_model_id="model", verifier_model_id="model")
+    temporal, records, _ = run(policy=policy, verifier=verifier_json())
     assert temporal.state is TemporalState.UNJUDGEABLE
     assert records[0]["candidate_assessments"][0]["reason"] == "confidence_floor_unfrozen"
 
@@ -1246,9 +1294,14 @@ def test_unfrozen_confidence_floor_fails_closed():
 def test_deployment_below_floor_holds_not_confident_negative():
     # Sec 9-22: in deployment mode low confidence HOLDS (UNJUDGEABLE), it is not a
     # confident negative (that would be the discovery-mode override, Sec 8a).
-    policy = F5Policy(mode="deployment", confidence_floor=0.25)
+    policy = F5Policy(
+        mode="deployment", confidence_floor=0.25,
+        generator_model_id="model", verifier_model_id="model")
     temporal, records, _ = run(policy=policy,
-                               contradiction=contradiction_json(confidence=0.05))
+                               contradiction=contradiction_json(confidence=0.05),
+                               verifier=verifier_json(),
+                               cited_source=FORMAL_CITED_SRC,
+                               candidate_source=FORMAL_CAND_SRC)
     assert temporal.state is TemporalState.UNJUDGEABLE
     assert records[0]["candidate_assessments"][0]["reason"] == "below_confidence_floor"
 
@@ -1305,14 +1358,86 @@ def test_make_temporal_assessor_rejects_noncallable_seam():
 
 
 # --------------------------------------------------------------------------
-# No reportable output is ever produced in this development-mode build.
+# Formal Path-B detection is reportable only after positive verification.
 # --------------------------------------------------------------------------
-def test_records_are_never_reportable():
-    for policy in (F5Policy(), F5Policy(mode="deployment", confidence_floor=0.25)):
-        _temporal, records, _ = run(policy=policy,
-                                    attestation=lambda wid: _attest_for(wid))
-        assert records[0]["reportable"] is False
-        assert records[0]["verifier_result"] == "not_run"
+def test_discovery_record_remains_nonreportable():
+    _temporal, records, _ = run(
+        policy=F5Policy(), attestation=lambda wid: _attest_for(wid))
+    assert records[0]["reportable"] is False
+    assert records[0]["verifier_result"] == "not_run"
+
+
+def test_deployment_positive_is_reportable_after_verifier_confirmation():
+    policy = F5Policy(
+        mode="deployment", generator_model_id="model",
+        verifier_model_id="model")
+    temporal, records, calls = run(
+        policy=policy, verifier=verifier_json(),
+        attestation=lambda wid: _attest_for(wid),
+        cited_source=FORMAL_CITED_SRC,
+        candidate_source=FORMAL_CAND_SRC)
+    assert temporal.state is TemporalState.QUALIFYING_CONTRADICTION
+    assert calls["verifier"] == 1
+    assert records[0]["verifier_result"] == "confirmed"
+    assert records[0]["reportable"] is True
+    validate_f5_record(records[0], policy, FORMAL_PACKET_MAP)
+    block = jr._f5_manifest_block(policy, records, {
+        "_verifier_wired": True,
+        "verifier_calls": 1,
+        "retrieval_protocols": [],
+    })
+    assert block["reportable"] is True
+    assert block["verifier_wired"] is True
+    assert block["production_evidence_builder"] is True
+
+
+def test_deployment_verifier_disagreement_holds_without_f5():
+    policy = F5Policy(
+        mode="deployment", generator_model_id="model",
+        verifier_model_id="model")
+    temporal, records, calls = run(
+        policy=policy,
+        verifier=verifier_json(candidate_span_contradicts_claim=False),
+        cited_source=FORMAL_CITED_SRC,
+        candidate_source=FORMAL_CAND_SRC)
+    assert temporal.state is TemporalState.UNJUDGEABLE
+    assert calls["verifier"] == 1
+    assert records[0]["verifier_result"] == "rejected"
+    assert records[0]["temporal_state"] == "UNJUDGEABLE"
+    assert records[0]["reportable"] is True
+    validate_f5_record(records[0], policy)
+
+
+def test_deployment_unbound_source_packets_hold_before_verifier_call():
+    policy = F5Policy(
+        mode="deployment", generator_model_id="model",
+        verifier_model_id="model")
+    temporal, records, calls = run(
+        policy=policy, verifier=verifier_json())
+    assert temporal.state is TemporalState.UNJUDGEABLE
+    assert calls.get("verifier", 0) == 0
+    assert records[0]["candidate_assessments"][0]["reason"] == \
+        "verifier_source_unbound"
+
+
+def test_deployment_malformed_verifier_output_is_loud_parse_failure():
+    policy = F5Policy(
+        mode="deployment", generator_model_id="model",
+        verifier_model_id="model")
+    with pytest.raises(ValueError, match="F5 verifier keys mismatch"):
+        run(policy=policy, verifier='{"same_claim_or_outcome": true}',
+            cited_source=FORMAL_CITED_SRC,
+            candidate_source=FORMAL_CAND_SRC)
+
+
+def test_deployment_rejects_unwired_verifier_before_seam_calls():
+    policy = F5Policy(
+        mode="deployment", generator_model_id="model",
+        verifier_model_id="model")
+    seams, calls = make_seams()
+    with pytest.raises(ValueError, match="independent verify_contradiction"):
+        decide_f5(CLAIMS, SUPPORTED, EVIDENCE, policy=policy, **seams)
+    assert calls["judge"] == 0
 
 
 def test_policy_rejects_any_sufficient_path_a_rule():

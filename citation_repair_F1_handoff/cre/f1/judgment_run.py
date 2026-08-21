@@ -656,7 +656,9 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
     supplied, ``decide_f5`` produces the ``TemporalAssessment`` and the per-claim
     F5 records; otherwise the temporal seam holds ``UNJUDGEABLE`` (unevaluated,
     an honest hold -- never a fabricated confident negative). ``f5_policy`` runs
-    development-mode (``deploy_path_a=False``, non-reportable) by default.
+    discovery-mode (non-reportable) by default. A deployment-mode F5Policy with
+    a distinct positive verifier makes Path-B detection reportable; autonomous
+    Path A remains disabled.
 
     F7 (wrong entity) is wired the same way: when BOTH ``f7_seams`` (a dict of the
     five ``make_entity_assessor`` seam callables) and ``f7_evidence_builder``
@@ -771,10 +773,28 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
     temporal = TemporalAssessment(TemporalState.UNJUDGEABLE)
     if f5_seams is not None and f5_evidence_builder is not None:
         f5_evidence = f5_evidence_builder(item)
+        effective_f5_policy = (
+            f5_policy if f5_policy is not None else F5Policy())
         temporal, f5_records = decide_f5(
             claims, support, f5_evidence,
-            policy=f5_policy if f5_policy is not None else F5Policy(),
+            policy=effective_f5_policy,
             **f5_seams)
+        if effective_f5_policy.mode == "deployment":
+            from .f5_evidence_store import source_packet_from_dict
+            from .f5_supersession import validate_f5_record
+            packet_rows = getattr(
+                f5_seams.get("fetch_comparability_source"),
+                "source_packet_log", None)
+            if not isinstance(packet_rows, list):
+                raise ValueError(
+                    "deployment F5 requires a source-packet replay log")
+            packet_map = {}
+            for packet_row in packet_rows:
+                packet = source_packet_from_dict(packet_row)
+                packet_map[packet.packet_sha256] = packet_row
+            for f5_record in f5_records:
+                validate_f5_record(
+                    f5_record, effective_f5_policy, packet_map)
         rec["f5_records"] = list(f5_records)
 
     # F7 (wrong entity): wired through injected seams like F3/F5. Deliberately NOT
@@ -1225,7 +1245,8 @@ def _instrument_f5_seams(seams: dict) -> tuple[dict, dict]:
     """
     observed = {"retrieval_calls": 0, "attestation_calls": 0,
                 "judge_calls": 0, "judge_model_calls": 0,
-                "judge_cache_hits": 0, "retrieval_protocols": []}
+                "judge_cache_hits": 0, "verifier_calls": 0,
+                "retrieval_protocols": []}
     evidence_store = getattr(
         seams.get("fetch_comparability_source"), "evidence_store", None)
     observed["evidence_store_counters"] = (
@@ -1236,6 +1257,7 @@ def _instrument_f5_seams(seams: dict) -> tuple[dict, dict]:
         seams.get("retrieve_superseding_candidates"),
         "candidate_cap", "not_collected")
     observed["_judge_counter_source"] = seams.get("judge_contradiction")
+    observed["_verifier_wired"] = callable(seams.get("verify_contradiction"))
     wrapped = dict(seams)
     observation_lock = threading.Lock()
 
@@ -1252,6 +1274,9 @@ def _instrument_f5_seams(seams: dict) -> tuple[dict, dict]:
                     protocols = list(getattr(fn, "executed_protocols", ()))
                     observed["retrieval_protocols"].extend(protocols[before:])
             return result
+        for attribute in ("model_id", "model_settings", "thread_safe"):
+            if hasattr(fn, attribute):
+                setattr(call, attribute, getattr(fn, attribute))
         return call
 
     wrapped["retrieve_superseding_candidates"] = observe(
@@ -1260,6 +1285,9 @@ def _instrument_f5_seams(seams: dict) -> tuple[dict, dict]:
         "find_supersession_attestation", "attestation_calls")
     wrapped["judge_contradiction"] = observe(
         "judge_contradiction", "judge_calls")
+    if callable(seams.get("verify_contradiction")):
+        wrapped["verify_contradiction"] = observe(
+            "verify_contradiction", "verifier_calls")
     return wrapped, observed
 
 
@@ -1276,7 +1304,9 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
     and never as "no superseding paper exists" -- SciFact-Open measured that 34.3%
     (251/732) of pooled candidates assumed to hold no evidence actually held it."""
     from .f5_seams import CANDIDATE_CAP, RERANKER
-    from .f5_supersession import F5Policy
+    from .f5_supersession import (
+        F5Policy, F5_REPORTABLE, F5_VERIFIER_PROMPT,
+    )
     from .f5_activation import ACTIVATION_SCHEMA_VERSION
     from .f5_evidence_store import SOURCE_PACKET_SCHEMA_VERSION
     from .f5_notice import NOTICE_RESOLVER_VERSION
@@ -1396,6 +1426,18 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
         cluster["cluster_id"] for cluster in run_study_clusters}
 
     policy = f5_policy if f5_policy is not None else F5Policy()
+    effective_records = [
+        record for record in (f5_records or [])
+        if isinstance(record, dict) and "reportable" in record
+    ]
+    formal_reportable = bool(
+        F5_REPORTABLE
+        and policy.mode == "deployment"
+        and (f5_runtime or {}).get("_verifier_wired") is True
+        and effective_records
+        and all(record.get("reportable") is True
+                for record in effective_records)
+    )
     protocols = list((f5_runtime or {}).get("retrieval_protocols") or [])
     attestation_calls = int((f5_runtime or {}).get("attestation_calls") or 0)
     judge_source = (f5_runtime or {}).get("_judge_counter_source")
@@ -1430,9 +1472,15 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
     block = {
         "mode": policy.mode,
         "deploy_path_a": policy.deploy_path_a,
-        "reportable": F5_REPORTABLE,
+        "reportable": formal_reportable,
         "contradiction_prompt_version": policy.contradiction_prompt_version,
         "response_parser_version": RESPONSE_PARSER_VERSION,
+        "verifier_prompt_version": policy.verifier_prompt_version,
+        "verifier_prompt_sha256": _sha256_text(F5_VERIFIER_PROMPT),
+        "generator_model_id": policy.generator_model_id,
+        "verifier_model_id": policy.verifier_model_id,
+        "verifier_wired": (f5_runtime or {}).get("_verifier_wired") is True,
+        "verifier_calls": int((f5_runtime or {}).get("verifier_calls") or 0),
         "activation_schema_version": ACTIVATION_SCHEMA_VERSION,
         "candidate_screen_version": CANDIDATE_SCREEN_VERSION,
         "candidate_screen_enabled": policy.candidate_screen_enabled,
@@ -1524,12 +1572,13 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
             "output_tokens": "not_collected",
             "cost_usd": "not_collected",
         },
-        "production_evidence_builder": False,
+        "production_evidence_builder": True,
         "real_data_runs_completed": 0,
-        "audit_convergence": "not_converged_one_round_only",
+        "audit_convergence": "formal_positive_requires_independent_verifier",
         "note": (
-            "F5 has not run on real data in this package. The shipped seam bundle "
-            "has no production caller; zero findings are not a measured absence."
+            "F5 has a concrete PubMed production runtime and evidence builder. "
+            "real_data_runs_completed remains zero until an actual governed run "
+            "is executed; this code-path test does not invent that measurement."
         ),
     }
     if protocols:
@@ -1728,8 +1777,16 @@ def run_natural_judgment(
         raise ValueError(
             "f7_seams and f7_evidence_builder must be supplied together; a "
             "half-wired F7 path cannot publish coherent provenance")
+    if f5_seams is not None and not isinstance(f5_seams, dict):
+        raise ValueError("f5_seams must be a dict")
+    if (production and f5_seams is not None
+            and f5_seams.get("verify_contradiction") is f5_seams.get(
+                "judge_contradiction")):
+        raise ValueError(
+            "production F5 generator and verifier must be distinct")
     f5_runtime = {"retrieval_calls": 0, "attestation_calls": 0,
-                  "judge_calls": 0, "retrieval_protocols": []}
+                  "judge_calls": 0, "verifier_calls": 0,
+                  "retrieval_protocols": []}
     if f5_seams is not None:
         f5_seams, f5_runtime = _instrument_f5_seams(f5_seams)
 
@@ -1748,7 +1805,32 @@ def run_natural_judgment(
     # per-pair quarantine). Only when F5 is actually wired.
     if f5_seams is not None:
         from .f5_supersession import validate_f5_policy
-        validate_f5_policy(f5_policy if f5_policy is not None else F5Policy())
+        effective_f5_policy = f5_policy if f5_policy is not None else F5Policy()
+        validate_f5_policy(effective_f5_policy)
+        if production:
+            if effective_f5_policy.mode != "deployment":
+                raise ValueError(
+                    "production F5 requires F5Policy(mode='deployment')")
+            if not callable(f5_seams.get("verify_contradiction")):
+                raise ValueError(
+                    "production F5 requires an independent verifier seam")
+            if f5_seams.get("verify_contradiction") is f5_seams.get(
+                    "judge_contradiction"):
+                raise ValueError(
+                    "production F5 generator and verifier must be distinct")
+            if effective_f5_policy.generator_model_id != model:
+                raise ValueError(
+                    "production F5 generator_model_id must equal the run model")
+            generator_model = str(getattr(
+                f5_seams.get("judge_contradiction"), "model_id", "") or "")
+            verifier_model = str(getattr(
+                f5_seams.get("verify_contradiction"), "model_id", "") or "")
+            if generator_model != effective_f5_policy.generator_model_id:
+                raise ValueError(
+                    "production F5 generator seam model_id does not match policy")
+            if verifier_model != effective_f5_policy.verifier_model_id:
+                raise ValueError(
+                    "production F5 verifier seam model_id does not match policy")
     # F7 config validated up front for the same reason, and against a sharper
     # failure: F7's DEFAULT policy is one under which F7 cannot fire at all.
     # ``authorities_json`` defaults to ``"{}"`` -- valid JSON, a legal empty

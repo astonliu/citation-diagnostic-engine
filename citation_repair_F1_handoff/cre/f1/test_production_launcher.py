@@ -8,6 +8,8 @@ from __future__ import annotations
 import pytest
 
 from . import production_launcher as pl
+from .f5_seams import build_f5_seams, make_f5_evidence_builder
+from .f5_supersession import F5Policy
 from .production_launcher import LaunchRefused
 
 
@@ -36,6 +38,28 @@ def base(**over):
     return kw
 
 
+def production_f5_bundle(model="claude-sonnet-4-5"):
+    def fetch_meta(work_id):
+        return {
+            "id": str(work_id), "pmid": str(work_id),
+            "pub_date": "2010-01-01", "pub_date_latest": "2010-01-01",
+            "abstract": "abstract",
+            "publication_types": ["Randomized Controlled Trial"],
+        }
+
+    seams = build_f5_seams(
+        fetch_meta=fetch_meta, fetch_abstract=lambda _wid: "abstract",
+        search_candidates=lambda *_a, **_k: [], complete=lambda _p: "{}",
+        verifier_complete=lambda _p: "{}", judgment_model_id=model,
+        verifier_model_id=model)
+    builder = make_f5_evidence_builder(
+        fetch_meta, as_of_date="2024-01-01")
+    policy = F5Policy(
+        mode="deployment", generator_model_id=model,
+        verifier_model_id=model)
+    return seams, builder, policy
+
+
 # ----------------------------------------------- model authorization (DEC-065)
 
 def test_no_authorized_models_refuses():
@@ -46,6 +70,21 @@ def test_no_authorized_models_refuses():
 def test_an_unauthorized_model_refuses():
     with pytest.raises(LaunchRefused, match="not in the DECISION-backed allowlist"):
         pl.launch(**base(model="claude-opus-4-7"))
+
+
+def test_partial_production_f5_configuration_refuses_before_tree_check():
+    _seams, builder, policy = production_f5_bundle()
+    with pytest.raises(LaunchRefused, match="requires seams, evidence builder"):
+        pl.launch(**base(
+            f5_seams=None, f5_evidence_builder=builder, f5_policy=policy))
+
+
+def test_complete_production_f5_configuration_passes_its_preflight():
+    seams, builder, policy = production_f5_bundle()
+    with pytest.raises(LaunchRefused) as exc:
+        pl.launch(**base(
+            f5_seams=seams, f5_evidence_builder=builder, f5_policy=policy))
+    assert "production F5 configuration invalid" not in str(exc.value)
 
 
 # ------------------------------------------------- the temperature pin (046B)
