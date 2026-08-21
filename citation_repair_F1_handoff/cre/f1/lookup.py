@@ -15,6 +15,7 @@ Set NCBI_API_KEY in config for ~10 req/s; EFetch shares the NCBI rate budget
 with the ESearch/ESummary calls in confirm.py via the shared limiter.
 """
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor
 import re
 
 import requests
@@ -24,12 +25,18 @@ from .schema import (Reference, RetrievedRecord, FETCH_NOT_ATTEMPTED,
                      FETCH_ANSWERED_RECORD, FETCH_ANSWERED_ABSENT,
                      FETCH_RESOLVER_ERROR, fetch_answered)
 from .ratelimit import NCBI, request_with_retry
-from .biblio_match import (match_score, flag_verdict, retrieve_candidates,
-                           best_match, VERDICT_SAME_WORK_VARIANT)
+from .biblio_match import (match_score, flag_verdict, best_match,
+                           VERDICT_SAME_WORK_VARIANT,
+                           _crossref_candidates, _openalex_candidates,
+                           normalize_title)
 from .unscoreable import classify_unscoreable
 from .textnorm import fold_bibliographic_text
+from .doi_lookup import (lookup_exact_doi, DOI_ANSWERED_ABSENT, DOI_CONFLICT,
+                         DOI_FOUND)
+from .work_identity import doi_equivalent
 
 EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+_REQUESTS_SESSION_TYPE = requests.sessions.Session
 
 
 def _normalize(t: str) -> str:
@@ -293,13 +300,44 @@ def _maybe_rerank(claimed, candidates, accept, bm):
     return reranked if reranked is not None else bm
 
 
+def _parallel_noid_candidates(claimed, session, n=5):
+    """Crossref + OpenAlex no-PMID candidates, overlapped and stably merged."""
+    transport = requests if isinstance(session, _REQUESTS_SESSION_TYPE) else session
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        crossref = pool.submit(_crossref_candidates, claimed, n, transport)
+        openalex = pool.submit(_openalex_candidates, claimed, n, transport)
+        candidates = crossref.result() + openalex.result()
+
+    deduped = []
+    seen_doi, seen_title = set(), set()
+    for candidate in candidates:
+        if not (candidate.title or candidate.doi):
+            continue
+        if candidate.doi and candidate.doi in seen_doi:
+            continue
+        title = normalize_title(candidate.title)
+        if title and title in seen_title:
+            continue
+        if candidate.doi:
+            seen_doi.add(candidate.doi)
+        if title:
+            seen_title.add(title)
+        deduped.append(candidate)
+    return deduped
+
+
+def retrieve_candidates(claimed, n=5, session=None):
+    """Injectable no-PMID retrieval seam; production overlaps providers."""
+    return _parallel_noid_candidates(claimed, session, n=n)
+
+
 def fuzzy_biblio_lookup(ref: Reference, threshold: float = 85.0,
                         session: requests.Session | None = None
                         ) -> RetrievedRecord:
     """Structured bibliographic lookup for references with no claimed PMID.
 
-    Retrieves candidates from Crossref bibliographic search + OpenAlex title
-    search (:func:`biblio_match.retrieve_candidates`) and picks the best with the
+    Retrieves candidates concurrently from Crossref bibliographic search +
+    OpenAlex title search and picks the best with the
     structured matcher (:func:`biblio_match.best_match`): normalized title
     similarity plus author/year/journal/volume/pages agreement. When the top two
     candidates are within ``margin`` the optional Stage-2 cross-encoder re-ranks
@@ -310,7 +348,7 @@ def fuzzy_biblio_lookup(ref: Reference, threshold: float = 85.0,
     margin over the runner-up); otherwise ``resolved=False``. ``.pmid`` is always
     empty (there is none on this path).
 
-    If both databases errored or returned nothing, ``retrieve_candidates`` yields
+    If both databases errored or returned nothing, candidate retrieval yields
     an empty list and this returns ``resolved=False`` -- a network failure is NOT
     treated as "found nothing"; the caller escalates such cases through the
     confirmation path (its own all-errored guard), never straight to F1. Uses the
@@ -439,7 +477,34 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
             log.unscoreable_reason = bucket
             log.notes = f"UNSCOREABLE ({bucket}): {reason}"
             return False                   # decide() -> UNSCOREABLE (dropped)
-        retrieved = fuzzy_biblio_lookup(ref, threshold=threshold, session=session)
+        # A printed DOI is the cheapest and strongest no-PMID identity seam.
+        # Check that exact string first across DOI authorities; never mutate or
+        # guess a neighbouring DOI.  When it exists, its authoritative metadata
+        # enters the established F2 matcher below.  Otherwise retain the existing
+        # title/name lookup, which is also required before an absent DOI may
+        # support F1.
+        if ref.claimed.claimed_doi:
+            doi_result = lookup_exact_doi(ref.claimed.claimed_doi,
+                                          s=session or requests)
+            log.doi_lookup_status = doi_result.status
+            log.doi_lookup_normalized = doi_result.normalized_doi
+            log.doi_provider_statuses = dict(doi_result.providers)
+            log.doi_metadata_source = doi_result.source
+        else:
+            doi_result = None
+        retrieved = (doi_result.record
+                     if doi_result is not None
+                     and doi_result.status == DOI_FOUND
+                     and doi_result.record is not None
+                     else fuzzy_biblio_lookup(ref, threshold=threshold,
+                                              session=session))
+        if (doi_result is not None
+                and doi_result.status == DOI_ANSWERED_ABSENT
+                and retrieved.resolved
+                and doi_equivalent(doi_result.normalized_doi, retrieved.doi)):
+            # An exact endpoint sweep and a bibliographic search disagree about
+            # the same DOI. Neither result may win silently.
+            log.doi_lookup_status = DOI_CONFLICT
         ref.retrieved = retrieved
         log.pmid_present = False            # stays False; downstream = no-ID path
         log.noid_lookup_attempted = True
@@ -486,6 +551,17 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
             # auto-clearing a year-mismatched pair on one path and flagging it on
             # the other.
             if not _flag_decision(m, accept, author_tripwire=author_tripwire):
+                if doi_result is not None and log.doi_lookup_status != DOI_FOUND:
+                    # The title/name search found a plausible work, but the
+                    # printed DOI itself is absent/incomplete/conflicting.  Do
+                    # not silently clear the identifier error; the deterministic
+                    # DOI route in decide() will send a confirmed work to F2 or
+                    # hold incomplete evidence.
+                    log.mismatch_flagged = True
+                    log.notes = ("No PMID; bibliographic metadata matched, but "
+                                 f"the exact DOI check was "
+                                 f"{log.doi_lookup_status}.")
+                    return True
                 # Reference exists and points to the right work as far as we can
                 # tell -> cleared (was_flagged=False in decide()).
                 log.mismatch_flagged = False

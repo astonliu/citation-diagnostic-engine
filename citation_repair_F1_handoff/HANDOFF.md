@@ -4,9 +4,11 @@ This package is the F1 (fabricated citation) detection stage of the Citation Rep
 
 ## Context you need
 
-**What F1 means (locked design rule).** F1 is a *conjunction*, not a single test:
+**What F1 means (locked design rule).** F1 is a *conjunction*, not a single failed lookup. The original PMID route remains:
 `(claimed-PMID metadata mismatch OR dead PMID) AND survives the LLM formatting filter AND claimed content not found in PubMed/Crossref/OpenAlex`.
-A reference with no claimed PMID is `unverifiable` and must **never** be labeled F1. Required by the base-rate math — raw "couldn't find it" is precision-poor.
+The exact-DOI route covers references with no PMID but a printed DOI:
+`DOI Foundation resolver + Crossref + DataCite + OpenAlex all answer that the exact DOI is absent AND PubMed + Crossref + OpenAlex all answer that the claimed title/work is absent`.
+No DOI guessing or typo correction is allowed. A provider outage can never help establish absence; conflict, an incomplete negative sweep, or a no-PMID reference with no DOI holds. A positive exact authority response still proves existence even if another provider is unavailable. Raw "couldn't find it" remains insufficient.
 
 **Pipeline order (cost matters).** Cheap path on every reference: parse → EFetch claimed PMID → title-similarity compare. Only *flagged* mismatches go down the expensive path: LLM filter → three-database confirmation → decide. Do not reorder so expensive calls run on everything.
 
@@ -18,11 +20,22 @@ A reference with no claimed PMID is `unverifiable` and must **never** be labeled
 - `schema.py` — three record types (`GoldRecord`, `PredictionRecord`, `EvalRecord`), the F6 invariant, label spaces, the detector working object (`Reference`)
 - `parser.py` — PMC OA XML → structured references
 - `lookup.py` — EFetch + cheap mismatch flag (candidate filter)
+- `doi_lookup.py` — concurrent exact-DOI existence and authoritative metadata lookup
 - `llm_filter.py` — Opus triage of flagged mismatches
 - `confirm.py` — PubMed/Crossref/OpenAlex confirmation search
 - `decide.py` — pure decision logic over accumulated evidence
 - `run.py` — orchestration + Anthropic completer; writes prediction JSONL + per-reference log JSONL
 - `test_schema.py`, `test_pipeline.py` — passing offline tests; protect them
+
+## Full production launch
+
+Use `cre.f1.production_launcher.launch_full` for a real F1-F8 run. It executes
+the current Band-1 code over the frozen XML corpus, builds the canonical
+disposition from the lossless log, and immediately consumes it in Band 2. It
+refuses before output if F3, full-text F4/F6, production F5, production F7, or
+F8 cannot run. The older `production_launcher.launch` remains the replay and
+advanced path for an already-frozen disposition; calling it does not establish
+that the current F1/F2 implementation ran.
 
 ## Schema rules you must not break
 - **Label space:** dataset `label` ∈ `{accurate, F1..F8}`. Pipeline states never appear there.

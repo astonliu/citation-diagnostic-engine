@@ -260,7 +260,10 @@ def test_production_launcher_passes_locked_f7_bundle_to_run(
 
     def fake_run(*args, **kwargs):
         captured.update(kwargs)
-        return {"predictions_path": str(tmp_path / "predictions.jsonl")}
+        return {
+            "predictions_path": str(tmp_path / "predictions.jsonl"),
+            "manifest_path": str(tmp_path / "manifest.json"),
+        }
 
     monkeypatch.setattr(pl, "run_natural_judgment", fake_run)
     monkeypatch.setattr(pl.pc, "assert_reportable_run", lambda *a, **k: None)

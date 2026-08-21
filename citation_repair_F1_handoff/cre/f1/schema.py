@@ -386,6 +386,15 @@ class StageLog:
     # No-ID branch (references with no claimed PMID).
     noid_lookup_attempted: bool = False      # ran the structured biblio lookup
     noid_not_found: bool = False             # biblio lookup found no confident match
+    # Exact-DOI scope for references without a PMID.  ``answered_absent`` is a
+    # signal of absence only when every configured DOI provider answered;
+    # ``incomplete``/``conflict`` never support F1.  The exact normalized string
+    # and per-provider states make the decision replayable without guessing what
+    # was queried.
+    doi_lookup_status: str = ""
+    doi_lookup_normalized: str = ""
+    doi_provider_statuses: dict[str, str] = field(default_factory=dict)
+    doi_metadata_source: str = ""
     # F8 -- retracted source (RESEARCH_PLAN_v2.2 §4.3). TRI-STATE, never a bare
     # bool:
     #   True  -- the resolved record's PubMed publication types include
@@ -398,6 +407,11 @@ class StageLog:
     # F3-F7 full-text path: an absence of signal must stay distinguishable from a
     # signal of absence. An unknown state is never an F8 (precision-first).
     retracted: Optional[bool] = None
+    f8_timing_status: str = ""
+    f8_notice_date: str = ""
+    f8_citing_date_earliest: str = ""
+    f8_timing_gap_days: Optional[int] = None
+    f8_timing_version: str = ""
     # The §5.6 reason code carried by an F8 row; "" on every other row. Set by
     # decide() at the point the row takes the F8 route, so it names the ROUTE
     # taken rather than merely restating ``retracted`` (a retracted row that the
@@ -522,6 +536,10 @@ class Reference:
                 "volume_match": self.log.volume_match,
                 "pages_match": self.log.pages_match,
                 "doi_match": self.log.doi_match,
+                "doi_lookup_status": self.log.doi_lookup_status,
+                "doi_lookup_normalized": self.log.doi_lookup_normalized,
+                "doi_provider_statuses": self.log.doi_provider_statuses,
+                "doi_metadata_source": self.log.doi_metadata_source,
                 "same_work_reason": self.log.same_work_reason,
                 "identity_signals": self.log.identity_signals,
                 "identity_disposition": self.log.identity_disposition,
@@ -535,6 +553,11 @@ class Reference:
                 "author_tripwire": self.log.author_tripwire,
                 "unscoreable_reason": self.log.unscoreable_reason,
                 "retracted": self.log.retracted,
+                "f8_timing_status": self.log.f8_timing_status,
+                "f8_notice_date": self.log.f8_notice_date,
+                "f8_citing_date_earliest": self.log.f8_citing_date_earliest,
+                "f8_timing_gap_days": self.log.f8_timing_gap_days,
+                "f8_timing_version": self.log.f8_timing_version,
                 "retraction_reason": self.log.retraction_reason,
                 "llm_verdict": self.log.llm_verdict,
                 "db_hits": self.log.db_hits,

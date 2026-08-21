@@ -25,6 +25,10 @@ from __future__ import annotations
 from .schema import (Reference, F1, F2, F8, CLEARED, UNVERIFIABLE, HUMAN_REVIEW,
                      UNSCOREABLE, V_FORMATTING, V_UNCERTAIN, fetch_answered)
 from .confirm import found_anywhere, all_errored, fully_answered, unanswered
+from .doi_lookup import (DOI_FOUND, DOI_FOUND_NO_METADATA,
+                         DOI_ANSWERED_ABSENT, DOI_INCOMPLETE, DOI_CONFLICT,
+                         DOI_NOT_ATTEMPTED)
+from .f8_retraction import F8_TIMING_INDETERMINATE, F8_UNRESOLVED
 
 
 def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
@@ -47,6 +51,22 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
         log.decided_by = "unscoreable"
         return ref
 
+    if log.f8_timing_status == F8_TIMING_INDETERMINATE:
+        ref.label, ref.confidence = UNSCOREABLE, "HIGH"
+        ref.rationale = (
+            "The cited work was retracted, but the earliest defensible citing "
+            f"date is only {log.f8_timing_gap_days} days after the notice; the "
+            "registered 31-day F8 inclusion floor is not met.")
+        log.decided_by = "f8_timing_indeterminate_excluded"
+        return ref
+    if log.f8_timing_status == F8_UNRESOLVED:
+        ref.label, ref.confidence = HUMAN_REVIEW, "LOW"
+        ref.rationale = (
+            "F8 retraction timing could not be resolved safely; held rather "
+            "than treated as a clean or post-retraction citation.")
+        log.decided_by = "f8_timing_unresolved_hold"
+        return ref
+
     # F8: the citation points at a RETRACTED source (RESEARCH_PLAN_v2.2 §4.3 --
     # "F8 is deterministic (retraction flag from PubMed / Retraction Watch) and is
     # routed through the existence-check layer with F1/F2, never reaching the human
@@ -64,12 +84,23 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
     # means "we never learned" (no resolved PMID, or the lookup failed) and is NOT
     # an accusation -- precision-first, an unknown falls through to the normal path.
     if log.retracted is True:
-        log.retraction_reason = "retracted_publication"
         ref.label, ref.confidence = F8, "HIGH"
-        ref.rationale = ("Resolved record carries the PubMed publication type "
-                         "'Retracted Publication': the cited source has been "
-                         "retracted.")
-        log.decided_by = "retracted_publication_pubtype"
+        if log.f8_timing_status:
+            log.retraction_reason = "retracted_before_citation_31_day_floor_met"
+            ref.rationale = (
+                "The resolved work was formally retracted before citation and "
+                f"the conservative publication-date gap is "
+                f"{log.f8_timing_gap_days} days, meeting the registered 31-day "
+                "F8 floor.")
+            log.decided_by = "f8_retracted_before_citation_timing_met"
+        else:
+            # Legacy/development path retained for byte-compatible direct calls.
+            # production_launcher.launch_full always supplies the timing seam.
+            log.retraction_reason = "retracted_publication"
+            ref.rationale = (
+                "Resolved record carries the PubMed publication type "
+                "'Retracted Publication': the cited source has been retracted.")
+            log.decided_by = "retracted_publication_pubtype"
         return ref
 
     # A deterministic identity rule found evidence of a translation, correction,
@@ -113,6 +144,71 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
                          f"review rather than reported as a finding.")
         log.decided_by = "pmid_fetch_no_answer"
         return ref
+
+    # Exact DOI route for the newly in-scope no-PMID population.  This is kept
+    # entirely outside the measured PMID/F2 path: the printed DOI is checked
+    # without fuzzy mutation, and its returned metadata enters the established
+    # matcher before this function is called.
+    if not log.pmid_present and ref.claimed.claimed_doi:
+        doi_status = log.doi_lookup_status
+        if doi_status == DOI_FOUND:
+            # compare_and_flag found a material mismatch between the printed
+            # citation and the work identified by that exact DOI. Same-work
+            # variants have already taken the higher quarantine branch above.
+            if was_flagged:
+                ref.label, ref.confidence = F2, "MED"
+                ref.rationale = (
+                    "The exact claimed DOI exists, but its authoritative "
+                    "metadata does not identify the paper described by the "
+                    "printed reference: wrong reference metadata.")
+                log.decided_by = "exact_doi_metadata_mismatch_f2"
+                return ref
+        elif doi_status == DOI_FOUND_NO_METADATA:
+            ref.label, ref.confidence = HUMAN_REVIEW, "MED"
+            ref.rationale = (
+                "The exact claimed DOI exists in the DOI system, but no usable "
+                "authority metadata was available for an F2 comparison.")
+            log.decided_by = "exact_doi_found_metadata_unavailable_hold"
+            return ref
+        elif doi_status in (DOI_INCOMPLETE, DOI_CONFLICT, DOI_NOT_ATTEMPTED, ""):
+            ref.label, ref.confidence = HUMAN_REVIEW, "LOW"
+            ref.rationale = (
+                f"The exact claimed DOI check was {doi_status or 'not run'}; "
+                "its existence cannot be determined safely.")
+            log.decided_by = "exact_doi_incomplete_hold"
+            return ref
+        elif doi_status == DOI_ANSWERED_ABSENT:
+            if db_hits is None:
+                ref.label, ref.confidence = HUMAN_REVIEW, "LOW"
+                ref.rationale = (
+                    "The exact claimed DOI was absent, but the independent "
+                    "title/name confirmation sweep was not completed.")
+                log.decided_by = "exact_doi_no_confirm"
+                return ref
+            if found_anywhere(db_hits, match_threshold):
+                ref.label, ref.confidence = F2, "MED"
+                ref.rationale = (
+                    "The exact claimed DOI is absent, while the paper described "
+                    "by the printed title was found independently: wrong "
+                    "reference metadata.")
+                log.decided_by = "exact_doi_absent_title_found_f2"
+                return ref
+            if not fully_answered(db_hits):
+                missing = unanswered(db_hits)
+                ref.label, ref.confidence = HUMAN_REVIEW, "LOW"
+                ref.rationale = (
+                    "The exact claimed DOI was absent, but the title/name sweep "
+                    f"was incomplete ({', '.join(missing)} did not answer).")
+                log.decided_by = "exact_doi_confirm_incomplete"
+                return ref
+            ref.label, ref.confidence = F1, "HIGH"
+            ref.rationale = (
+                "The exact claimed DOI was absent from the DOI system, Crossref, "
+                "DataCite, and OpenAlex, and the claimed work was not found by "
+                "the complete independent PubMed, Crossref, and OpenAlex title "
+                "sweep.")
+            log.decided_by = "exact_doi_absent_confirm_not_found_f1"
+            return ref
 
     # No claimed PMID.
     if not log.pmid_present:

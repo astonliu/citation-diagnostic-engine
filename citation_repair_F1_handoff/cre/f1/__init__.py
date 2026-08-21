@@ -3,9 +3,12 @@
 Faithful reimplementation of the Topaz et al. (Lancet 2026) verification
 pipeline, with an Opus-class LLM filter in place of their Haiku step.
 
-F1 is a conjunction: (claimed-PMID mismatch OR dead PMID) AND survives the LLM
-formatting filter AND claimed content not found in PubMed/Crossref/OpenAlex.
-References without a claimed PMID are 'unverifiable', never F1.
+F1 is a conjunction. The original PMID route requires a claimed-PMID mismatch
+or dead PMID, survival of the formatting filter, and a complete negative
+PubMed/Crossref/OpenAlex search. A no-PMID reference with a printed DOI also
+enters scope when that exact DOI is absent from DOI Foundation, Crossref,
+DataCite, and OpenAlex and a complete independent title search finds no work.
+No identifier guessing is performed and incomplete transport evidence holds.
 """
 from .schema import (
     # taxonomy + states

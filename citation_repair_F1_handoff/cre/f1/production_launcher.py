@@ -54,15 +54,26 @@ not read as proof.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
+from datetime import date
 
 from . import preband_contract as pc
 from .judgment_run import run_natural_judgment
 
 #: Modules whose bytes govern a published number. Verified against the commit.
 GOVERNING_MODULES = (
+    # Band 1 defines which references Band 2 is allowed to judge.  The full
+    # launcher executes these bytes itself, so they are just as load-bearing as
+    # the judgment modules below.
+    "production_launcher.py", "run.py", "lookup.py", "confirm.py",
+    "decide.py", "doi_lookup.py", "biblio_match.py", "resolve_a.py",
+    "work_identity.py", "llm_filter.py", "preband_disposition.py",
+    "ratelimit.py", "ncbi_meta.py", "textnorm.py", "unscoreable.py",
+    "journal_identity.py", "f2_samework_rule.py", "f2_thresholds.py",
+    "eval_report.py", "f8_retraction.py", "reason_registry.py",
     "judgment_run.py", "judgment_band.py", "judgment_engine.py",
     "band_prompts.py", "parser.py", "schema.py", "f3_provenance.py",
     "f4_strength.py", "f7_entity.py", "preband_contract.py",
@@ -78,6 +89,13 @@ GOVERNING_MODULES = (
 
 class LaunchRefused(RuntimeError):
     """The launch preconditions are not met. No run is started."""
+
+
+FULL_LAUNCH_REQUIRED_SEAMS = (
+    "extractor", "coverage_judge", "coverage_judge_v3", "fetch_abstract",
+    "fetch_fulltext", "discriminator_call_llm", "f3_fetch_reflist",
+    "f3_resolve_pmcid", "pubtypes_lookup",
+)
 
 
 def _git(repo_dir: str, *args: str) -> str:
@@ -578,6 +596,257 @@ def verify_receipt(receipt, *, model: str, temperature) -> dict:
     return {"calls": len(calls), "models": [model], "temperature": temperature}
 
 
+def _read_jsonl(path: str) -> list[dict]:
+    rows: list[dict] = []
+    with open(path, encoding="utf-8") as fh:
+        for lineno, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise LaunchRefused(
+                    f"Band-1 log {path}:{lineno} is not JSON: {exc}") from exc
+            if not isinstance(row, dict):
+                raise LaunchRefused(
+                    f"Band-1 log {path}:{lineno} is not an object")
+            rows.append(row)
+    return rows
+
+
+def _persist_finished_manifest(manifest: dict) -> None:
+    """Atomically persist launcher-added provenance into the durable manifest."""
+    path = manifest.get("manifest_path")
+    if not isinstance(path, str) or not path.strip():
+        raise LaunchRefused(
+            "finished run returned no manifest_path; launcher provenance cannot "
+            "be made durable")
+    tmp = path + ".launcher.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def _band1_attestations(log_path: str, *, snapshot_date: str) -> dict:
+    """Build honest F1/F2/F8 execution tallies from the lossless Band-1 log."""
+    try:
+        date.fromisoformat(snapshot_date)
+    except (TypeError, ValueError) as exc:
+        raise LaunchRefused(
+            "band1_snapshot_date must be ISO YYYY-MM-DD") from exc
+    rows = _read_jsonl(log_path)
+    if not rows:
+        raise LaunchRefused("Band 1 emitted an empty lossless log")
+
+    quarantined = sum(
+        1 for row in rows
+        if ((row.get("log") or {}).get("decided_by") == "quarantine_exception"))
+    labels = [str(row.get("label") or "") for row in rows]
+    f8_statuses = [str((row.get("log") or {}).get("f8_timing_status") or "")
+                   for row in rows]
+    f8_attempted = sum(bool(status) for status in f8_statuses)
+    f8_answered = sum(status in {
+        "qualified", "clear", "timing_indeterminate", "not_applicable"}
+        for status in f8_statuses)
+    common = {
+        "performed": True,
+        "snapshot_date": snapshot_date,
+        "attempted": len(rows),
+        "answered": len(rows) - quarantined,
+        "transport_failed": quarantined,
+    }
+    return {
+        "F1": {
+            **common,
+            "source": (
+                "cre.f1.run exact identity pipeline: PubMed, DOI Foundation, "
+                "Crossref, DataCite, OpenAlex"),
+            "fired": labels.count("F1"),
+            "reason": "full Band-1 pipeline executed over the frozen corpus",
+        },
+        "F2": {
+            **common,
+            "source": (
+                "cre.f1.run work-identity pipeline: PubMed, DOI Foundation, "
+                "Crossref, DataCite, OpenAlex"),
+            "fired": labels.count("F2"),
+            "reason": "full Band-1 pipeline executed over the frozen corpus",
+        },
+        "F8": {
+            "performed": True,
+            "source": (
+                "PubMed retraction relationship and notice-date lookup with "
+                "conservative citing-date interval and 31-day inclusion floor"),
+            "snapshot_date": snapshot_date,
+            "attempted": f8_attempted,
+            "answered": f8_answered,
+            "transport_failed": max(0, f8_attempted - f8_answered),
+            "fired": labels.count("F8"),
+            "reason": (
+                "source-bound F8 timing gate executed; unresolved and sub-31-day "
+                "cases never become F8"),
+        },
+    }
+
+
+def _require_full_launch_wiring(*, out_dir: str, run_kwargs: dict,
+                                f5_seams, f5_evidence_builder, f5_policy,
+                                f7_seams, f7_evidence_builder, f7_policy) -> None:
+    """Reject a nominal full launch when any taxonomy seam cannot fire."""
+    missing = [name for name in FULL_LAUNCH_REQUIRED_SEAMS
+               if not callable(run_kwargs.get(name))]
+    if missing:
+        raise LaunchRefused(
+            "full F1-F8 launch is missing required callable seam(s): "
+            f"{missing}")
+    if any(part is None for part in (f5_seams, f5_evidence_builder, f5_policy)):
+        raise LaunchRefused(
+            "full F1-F8 launch requires production F5 seams, evidence builder, "
+            "and policy")
+    if any(part is None for part in (f7_seams, f7_evidence_builder, f7_policy)):
+        raise LaunchRefused(
+            "full F1-F8 launch requires production F7 seams, evidence builder, "
+            "and policy")
+    if run_kwargs.get("max_docs") is not None:
+        raise LaunchRefused("full F1-F8 launch cannot set max_docs")
+    if str(run_kwargs.get("chain_genesis") or "").strip():
+        raise LaunchRefused("full F1-F8 launch cannot resume a prior segment")
+    if os.path.exists(out_dir):
+        raise LaunchRefused(
+            f"full launch output root already exists: {out_dir}; use a fresh path")
+
+
+def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
+                corpus_manifest_path: str, model: str, authorized_models,
+                adapter_receipt, band1_snapshot_date: str,
+                judge_model: str = "", preregistration_amendment: str = "",
+                preregistration_scope_ruling=None,
+                temperature=None, assistant_prefill=None,
+                anthropic_key: str = "", ncbi_key: str = "",
+                crossref_mailto: str = "", openalex_mailto: str = "",
+                f1_complete=None,
+                f5_seams=None, f5_evidence_builder=None, f5_policy=None,
+                f7_seams=None, f7_evidence_builder=None, f7_policy=None,
+                **run_kwargs) -> dict:
+    """The strict end-to-end F1-F8 production entrypoint.
+
+    Unlike :func:`launch`, this function does not accept an externally prepared
+    pre-band artifact.  It runs the exact current Band-1 code over ``xml_dir``,
+    builds the canonical disposition from its lossless log, and immediately
+    consumes that artifact in the production judgment run.
+    """
+    if "preband_disposition" in run_kwargs:
+        raise LaunchRefused(
+            "launch_full builds its own Band-1 disposition; an injected "
+            "preband_disposition would bypass the current F1/F2/F8 code")
+    _require_full_launch_wiring(
+        out_dir=out_dir, run_kwargs=run_kwargs,
+        f5_seams=f5_seams, f5_evidence_builder=f5_evidence_builder,
+        f5_policy=f5_policy, f7_seams=f7_seams,
+        f7_evidence_builder=f7_evidence_builder, f7_policy=f7_policy)
+
+    # Validate everything the ordinary launcher can know before Band 1 creates
+    # even its first file. launch() repeats these checks immediately before Band
+    # 2, so a mid-run tree/config change is also caught.
+    allowed = list(authorized_models or [])
+    if not allowed or model not in allowed:
+        raise LaunchRefused(
+            f"model {model!r} is not in a nonempty DECISION-backed allowlist")
+    resolved_temperature = verify_temperature_governance(
+        model=model, temperature=temperature)["recorded_value"]
+    verify_prefill_governance(
+        model=model, assistant_prefill=assistant_prefill)
+    assert_receipt_shape(adapter_receipt)
+    if not callable(getattr(adapter_receipt, "record", None)):
+        raise LaunchRefused(
+            "launch_full requires an adapter receipt with record() so Band-1 "
+            "model calls cannot disappear from the launch receipt")
+    verify_judge_governance(
+        model=model, judge_model=judge_model,
+        preregistration_amendment=preregistration_amendment,
+        preregistration_scope_ruling=preregistration_scope_ruling)
+    tree = verify_tree(repo_dir, pkg_dir)
+    try:
+        with open(corpus_manifest_path, encoding="utf-8") as fh:
+            corpus_manifest = json.load(fh)
+        pc.verify_corpus_contents(
+            xml_dir, pc.corpus_inventory(corpus_manifest))
+    except (OSError, json.JSONDecodeError, pc.PrebandContractError) as exc:
+        raise LaunchRefused(f"frozen corpus preflight failed: {exc}") from exc
+
+    # Validate production F5/F7 bundles before Band-1 work or output.
+    from .f5_seams import validate_production_f5_configuration
+    from .f7_seams import validate_production_f7_configuration
+    try:
+        validate_production_f5_configuration(
+            seams=f5_seams, evidence_builder=f5_evidence_builder,
+            policy=f5_policy, run_model=model)
+        validate_production_f7_configuration(
+            seams=f7_seams, evidence_builder=f7_evidence_builder,
+            policy=f7_policy, adapter_receipt=adapter_receipt)
+    except (TypeError, ValueError) as exc:
+        raise LaunchRefused(
+            f"full-launch discriminator configuration invalid: {exc}") from exc
+
+    band1_dir = os.path.join(out_dir, "band1")
+    judgment_dir = os.path.join(out_dir, "judgment")
+    os.makedirs(band1_dir)
+    dataset_path = os.path.join(band1_dir, "band1_predictions.jsonl")
+    log_path = os.path.join(band1_dir, "band1_lossless_log.jsonl")
+    disposition_path = os.path.join(
+        band1_dir, "preband_disposition_v1.jsonl")
+
+    from .run import make_completer, run as run_band1
+    from .preband_disposition import write_disposition
+    complete = f1_complete or make_completer(model, anthropic_key)
+
+    def recorded_band1_complete(prompt):
+        adapter_receipt.record(seam="f1_llm_filter")
+        return complete(prompt)
+
+    run_band1(
+        xml_dir, dataset_path, log_path, model=model,
+        anthropic_key=anthropic_key, ncbi_key=ncbi_key,
+        crossref_mailto=crossref_mailto,
+        openalex_mailto=openalex_mailto,
+        complete=recorded_band1_complete, f8_timing=True)
+    attestations = _band1_attestations(
+        log_path, snapshot_date=band1_snapshot_date)
+    tree_commit = tree["code_commit"]
+    disposition_manifest = write_disposition(
+        log_path, disposition_path, f2_commit=tree_commit,
+        corpus_manifest_path=corpus_manifest_path,
+        generated_by="production_launcher.launch_full",
+        generated_at=band1_snapshot_date,
+        check_attestations=attestations)
+
+    manifest = launch(
+        repo_dir=repo_dir, pkg_dir=pkg_dir, xml_dir=xml_dir,
+        out_dir=judgment_dir, preband_disposition=disposition_path,
+        corpus_manifest_path=corpus_manifest_path, model=model,
+        authorized_models=allowed, adapter_receipt=adapter_receipt,
+        judge_model=judge_model,
+        preregistration_amendment=preregistration_amendment,
+        preregistration_scope_ruling=preregistration_scope_ruling,
+        temperature=resolved_temperature, assistant_prefill=assistant_prefill,
+        f5_seams=f5_seams, f5_evidence_builder=f5_evidence_builder,
+        f5_policy=f5_policy, f7_seams=f7_seams,
+        f7_evidence_builder=f7_evidence_builder, f7_policy=f7_policy,
+        **run_kwargs)
+    manifest["full_launch"] = {
+        "entrypoint": "production_launcher.launch_full",
+        "band1_predictions_path": dataset_path,
+        "band1_lossless_log_path": log_path,
+        "preband_disposition_path": disposition_path,
+        "preband_manifest_path": disposition_manifest["manifest_path"],
+        "band1_label_counts": disposition_manifest["label_counts"],
+        "band1_check_attestations": attestations,
+        "all_taxonomies_wired": True,
+    }
+    _persist_finished_manifest(manifest)
+    return manifest
+
+
 def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
            preband_disposition: str, corpus_manifest_path: str,
            model: str, authorized_models, adapter_receipt,
@@ -698,4 +967,5 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         ),
     }
     pc.assert_reportable_run(manifest, manifest["predictions_path"])
+    _persist_finished_manifest(manifest)
     return manifest

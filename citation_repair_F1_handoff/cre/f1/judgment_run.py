@@ -2671,11 +2671,11 @@ def run_natural_judgment(
                 "wired": bool(((disp_obj.check_attestations if disp_obj is not None else {})
                                .get("F8") or {}).get("performed")),
                 "gate": "canonical pre-band F8 attestation",
-                "implemented_in_this_package": False,
+                "implemented_in_this_package": True,
                 "note": (
-                    "F8 is not implemented in this package. This entry reports "
-                    "only the upstream disposition's attestation; it does not "
-                    "invent a detector or the unratified timing gate."
+                    "F8 is produced upstream by the source-bound PubMed "
+                    "retraction-notice timing gate and consumed here through "
+                    "the canonical pre-band attestation."
                 ),
             },
             "F6": {"wired": True, "fired": emitted_labels.get("F6", 0),
@@ -2704,14 +2704,14 @@ def run_natural_judgment(
             "other."
         ),
         "f8": {
-            "implemented_in_this_package": False,
+            "implemented_in_this_package": True,
             "attestation": dict(
                 ((disp_obj.check_attestations if disp_obj is not None else {})
                  .get("F8") or {})),
             "note": (
-                "F8 is a pre-band decision. This package consumes and verifies "
-                "its attestation only; it contains no F8 detector and no "
-                "31-day timing rule."
+                "F8 is a pre-band decision produced by cre.f1.run using linked "
+                "PubMed retraction notices, the earliest defensible citing "
+                "publication date, and the registered 31-day inclusion floor."
             ),
         },
         "docs_processed": docs_processed,

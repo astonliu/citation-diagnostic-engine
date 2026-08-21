@@ -69,6 +69,8 @@ def test_route_mapping_is_total_and_correct():
     assert rr.route_for("physical_location_same_work") == "review_same_work_variant"
     assert rr.route_for("resolved_preprint_target") == "review_wrong_paper"
     assert rr.route_for("retracted_publication") == "f8_retracted"
+    assert rr.route_for("retracted_before_citation_31_day_floor_met") == \
+        "f8_retracted"
     assert rr.route_for("single_word_title") == "unscoreable"
     assert rr.is_registered("near_identical_title")
     assert not rr.is_registered("not_a_real_reason")

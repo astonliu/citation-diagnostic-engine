@@ -18,7 +18,7 @@ introduced them; renaming is a breaking change to the artifact contract.
 """
 from __future__ import annotations
 
-REASON_REGISTRY_VERSION = "5.6"
+REASON_REGISTRY_VERSION = "5.7"
 
 # --- §5.6 A.1: same-work reasons -> route review_same_work_variant ------------
 # Rev 5.5 activates strict-prefix review and adds the three corporate/DOI routes
@@ -88,6 +88,7 @@ WRONG_PAPER_REASONS = frozenset({
 RETRACTION_REASONS = frozenset({
     # decide.py
     "retracted_publication",
+    "retracted_before_citation_31_day_floor_met",
 })
 
 # --- §5.6 A.3: unscoreable buckets -> route unscoreable -----------------------

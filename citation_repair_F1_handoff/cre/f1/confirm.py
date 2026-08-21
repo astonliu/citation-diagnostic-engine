@@ -23,6 +23,7 @@ scaled run respects NCBI / Crossref / OpenAlex budgets and survives transient
 429/5xx.
 """
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor
 import requests
 from rapidfuzz import fuzz
 
@@ -34,6 +35,7 @@ PUBMED_ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_ESUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 CROSSREF_URL = "https://api.crossref.org/works"
 OPENALEX_URL = "https://api.openalex.org/works"
+_REQUESTS_SESSION_TYPE = requests.sessions.Session
 
 
 def _score(claimed_title: str, cand_title: str) -> float:
@@ -189,11 +191,22 @@ def confirm(ref: Reference, api_key="", crossref_mailto="", openalex_mailto="",
     found_anywhere(); confirm() only gathers raw best-match scores.
     """
     title = ref.claimed.title
-    hits = {
-        "pubmed": search_pubmed(title, api_key, s),
-        "crossref": search_crossref(title, crossref_mailto, s),
-        "openalex": search_openalex(title, openalex_mailto, s),
+    # Independent providers have independent rate limiters and can overlap.  Do
+    # not share a live requests.Session between worker threads; the module-level
+    # transport creates independent requests. Injectable test transports remain
+    # supported.
+    transport = requests if isinstance(s, _REQUESTS_SESSION_TYPE) else s
+    calls = {
+        "pubmed": (search_pubmed, (title, api_key, transport)),
+        "crossref": (search_crossref,
+                     (title, crossref_mailto, transport)),
+        "openalex": (search_openalex,
+                     (title, openalex_mailto, transport)),
     }
+    with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+        futures = {name: pool.submit(fn, *args)
+                   for name, (fn, args) in calls.items()}
+        hits = {name: futures[name].result() for name in calls}
     ref.log.db_hits = hits
     return hits
 

@@ -24,6 +24,9 @@ from .confirm import confirm
 from .decide import decide
 from .ncbi_meta import ncbi_pubtypes, is_retracted
 from .ratelimit import configure_ncbi
+from .doi_lookup import DOI_FOUND
+from .f8_retraction import (F8_CLEAR, F8_NOT_APPLICABLE, F8_QUALIFIED,
+                            F8_TIMING_VERSION, assess_f8_timing)
 from . import eval_report
 
 # Anthropic API errors worth retrying (transient); everything else fails fast.
@@ -132,7 +135,8 @@ def process_reference(ref: Reference, complete, *, ncbi_key="",
                       crossref_mailto="", openalex_mailto="",
                       sim_threshold=85.0, match_threshold=85.0,
                       author_tripwire=True, session=None,
-                      retraction_cache: dict | None = None) -> Reference:
+                      retraction_cache: dict | None = None,
+                      f8_fetch_meta=None) -> Reference:
     # cheap path. With a claimed PMID: EFetch + metadata compare. Without one:
     # compare_and_flag runs the structured no-ID bibliographic lookup itself.
     if ref.claimed.claimed_pmid:
@@ -143,8 +147,21 @@ def process_reference(ref: Reference, complete, *, ncbi_key="",
     # which branch decide() ends up taking. The no-ID path never reaches here with
     # a PMID (fuzzy_biblio_lookup's record always has ``.pmid == ""``), so it
     # honestly records "unknown" rather than a lookup it could not perform.
-    ref.log.retracted = retraction_state(ref, ncbi_key=ncbi_key, session=session,
-                                         cache=retraction_cache)
+    if f8_fetch_meta is not None:
+        cited_pmid = (ref.retrieved.pmid or ref.claimed.claimed_pmid or "").strip()
+        assessment = assess_f8_timing(
+            cited_pmid, ref.source_pmid, fetch_meta=f8_fetch_meta)
+        ref.log.f8_timing_status = assessment.status
+        ref.log.f8_notice_date = assessment.notice_date
+        ref.log.f8_citing_date_earliest = assessment.citing_date_earliest
+        ref.log.f8_timing_gap_days = assessment.timing_gap_days
+        ref.log.f8_timing_version = F8_TIMING_VERSION
+        ref.log.retracted = (True if assessment.status == F8_QUALIFIED else
+                             False if assessment.status in {
+                                 F8_CLEAR, F8_NOT_APPLICABLE} else None)
+    else:
+        ref.log.retracted = retraction_state(
+            ref, ncbi_key=ncbi_key, session=session, cache=retraction_cache)
     flagged = compare_and_flag(ref, sim_threshold,
                                author_tripwire=author_tripwire, session=session)
 
@@ -173,6 +190,18 @@ def process_reference(ref: Reference, complete, *, ncbi_key="",
     if ref.log.pmid_present and not fetch_answered(ref.log.pmid_transport_status):
         return decide(ref, flagged, None, None, match_threshold)
 
+    # No-PMID references carrying a printed DOI are deterministic identity
+    # cases.  An exact positive feeds the existing metadata matcher and can
+    # produce F2; an exact negative must be paired with the independent title
+    # sweep before F1 is reachable.  Neither case needs an LLM opinion about
+    # whether the identifier exists.
+    if not ref.log.pmid_present and ref.claimed.claimed_doi:
+        hits = None
+        if ref.log.doi_lookup_status != DOI_FOUND:
+            hits = confirm(ref, ncbi_key, crossref_mailto, openalex_mailto,
+                           match_threshold, s=session or requests)
+        return decide(ref, flagged, None, hits, match_threshold)
+
     # expensive path (flagged survivors only -- PMID candidates and no-ID
     # references whose cheap lookup found a poor match or nothing)
     verdict = llm_filter(ref, complete)
@@ -188,10 +217,33 @@ def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
         model: str, anthropic_key="", ncbi_key="",
         crossref_mailto="", openalex_mailto="",
         sim_threshold=85.0, match_threshold=85.0, author_tripwire=True,
-        refs: Iterable[Reference] | None = None) -> dict:
-    complete = make_completer(model, anthropic_key)
+        refs: Iterable[Reference] | None = None,
+        complete: Callable[[str], str] | None = None,
+        f8_timing: bool = False, f8_fetch_meta=None) -> dict:
+    """Run Band 1 over the exact corpus.
+
+    ``complete`` is an injectable production seam so the full-system launcher
+    can bind Band-1 model calls to the same adapter receipt as Band 2.  Direct
+    callers retain the historical behaviour: when it is omitted, this function
+    constructs the Anthropic transport itself.
+    """
+    complete = complete or make_completer(model, anthropic_key)
     configure_ncbi(bool(ncbi_key))            # bump NCBI rate when a key is present
     session = requests.Session()
+    if f8_timing and f8_fetch_meta is None:
+        from .f5_candidate_finder import PubMedCandidateFinder
+        from .ncbi_meta import DEFAULT_EMAIL
+        finder = PubMedCandidateFinder(
+            api_key=ncbi_key, email=openalex_mailto or DEFAULT_EMAIL,
+            session=session)
+        f8_memory: dict[str, dict | None] = {}
+
+        def f8_fetch_meta(work_id):
+            key = str(work_id or "").strip()
+            if key not in f8_memory:
+                f8_memory[key] = finder.fetch_metadata(key)
+            value = f8_memory[key]
+            return dict(value) if isinstance(value, dict) else None
     stream = refs if refs is not None else iter_pmc_dir(pmc_dir)
 
     prediction_records, log_records = [], []
@@ -210,7 +262,8 @@ def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
                               sim_threshold=sim_threshold,
                               match_threshold=match_threshold,
                               author_tripwire=author_tripwire, session=session,
-                              retraction_cache=retraction_cache)
+                              retraction_cache=retraction_cache,
+                              f8_fetch_meta=f8_fetch_meta if f8_timing else None)
         except NonRetryableProviderError:
             raise
         except Exception as e:                # noqa: BLE001 - quarantine, never abort
