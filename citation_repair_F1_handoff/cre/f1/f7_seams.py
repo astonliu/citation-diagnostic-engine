@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
+import sqlite3
+import tempfile
 import threading
 from dataclasses import dataclass
 from datetime import date
@@ -21,6 +25,7 @@ from .f7_evidence_builder import ProductionF7EvidenceBuilder
 
 
 AUTHORITY_SNAPSHOT_SCHEMA = "f7_authority_snapshot_v1"
+AUTHORITY_SQLITE_INDEX_SCHEMA = "f7_authority_sqlite_index_v1"
 RELATION_COMPARATOR_VERSION = "f7_relation_v1"
 SUPPORTED_AUTHORITIES = {
     "gene": "HGNC",
@@ -38,6 +43,14 @@ _COMPONENTS = frozenset({"match", "mismatch", "unknown"})
 
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _sha256_file(path, chunk_size: int = 8 * 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _sha256_text(text: str) -> str:
@@ -100,6 +113,22 @@ class AuthoritySnapshotSource:
 
 
 @dataclass(frozen=True)
+class AuthoritySQLiteIndexSource:
+    """SHA-256-pinned read-only index derived from one authority snapshot."""
+
+    entity_type: str
+    path: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if self.entity_type not in SUPPORTED_AUTHORITIES:
+            raise ValueError(f"unsupported F7 entity type {self.entity_type!r}")
+        if (not isinstance(self.sha256, str) or len(self.sha256) != 64
+                or any(c not in "0123456789abcdef" for c in self.sha256)):
+            raise ValueError("authority SQLite index sha256 must be 64 lowercase hex")
+
+
+@dataclass(frozen=True)
 class _Mapping:
     entity_id: str
     canonical_label: str
@@ -119,6 +148,14 @@ class _Snapshot:
     records: dict
     lookup: dict
     relations: dict
+
+
+@dataclass(frozen=True)
+class _SQLiteSnapshot:
+    source: AuthoritySnapshotSource
+    index: AuthoritySQLiteIndexSource
+    release_date: str
+    digest: str
 
 
 def _mapping_valid(mapping: _Mapping, lookup_date: str) -> bool:
@@ -357,6 +394,482 @@ class FrozenAuthorityNormalizer:
                 relation, reason = "provably_distinct", "distinct_authority_ids"
             # RxNorm and MONDO have granularity/hierarchy.  Absence of an
             # explicit relationship is not proof of sibling distinctness.
+        return {
+            "relation": relation,
+            "authority": snapshot.source.authority,
+            "version": snapshot.source.version,
+            "lookup_date": snapshot.source.lookup_date,
+            "evidence": {"reason": reason, "snapshot_sha256": snapshot.digest},
+        }
+
+
+class _RejectingDict(dict):
+    """Mapping used by the streaming parser to retain strict-JSON semantics."""
+
+    def __setitem__(self, key, value):
+        if key in self:
+            raise ValueError(f"duplicate JSON key: {key}")
+        super().__setitem__(key, value)
+
+
+class _HashingReader:
+    """File wrapper that hashes exactly the bytes consumed by ijson."""
+
+    def __init__(self, handle):
+        self._handle = handle
+        self.digest = hashlib.sha256()
+
+    def read(self, size=-1):
+        data = self._handle.read(size)
+        self.digest.update(data)
+        return data
+
+    def readinto(self, buffer):
+        count = self._handle.readinto(buffer)
+        if count:
+            self.digest.update(memoryview(buffer)[:count])
+        return count
+
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
+
+
+def _sqlite_schema(connection) -> None:
+    connection.executescript("""
+        PRAGMA journal_mode=OFF;
+        PRAGMA synchronous=OFF;
+        PRAGMA temp_store=FILE;
+        CREATE TABLE metadata (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        ) WITHOUT ROWID;
+        CREATE TABLE record (
+          entity_id TEXT PRIMARY KEY,
+          canonical_label TEXT NOT NULL,
+          status TEXT NOT NULL,
+          valid_from TEXT NOT NULL,
+          valid_through TEXT
+        ) WITHOUT ROWID;
+        CREATE TABLE mapping (
+          mapping_order INTEGER NOT NULL,
+          surface_key TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          canonical_label TEXT NOT NULL,
+          mapping_status TEXT NOT NULL,
+          source_db TEXT NOT NULL,
+          mapping_method TEXT NOT NULL,
+          approved INTEGER NOT NULL,
+          valid_from TEXT NOT NULL,
+          valid_through TEXT,
+          PRIMARY KEY(surface_key,mapping_order)
+        ) WITHOUT ROWID;
+        CREATE TABLE relation_raw (
+          left_id TEXT NOT NULL,
+          right_id TEXT NOT NULL,
+          relation TEXT NOT NULL
+        );
+    """)
+
+
+def _validated_record(row, source, connection, mapping_order: int) -> int:
+    record_keys = {"id", "canonical_label", "status", "valid_from",
+                   "valid_through", "aliases"}
+    alias_keys = {"surface", "source_db", "mapping_method", "approved",
+                  "valid_from", "valid_through"}
+    if not isinstance(row, dict) or set(row) != record_keys:
+        raise ValueError("authority record has the wrong schema")
+    entity_id = _nonblank(row["id"], "authority record id")
+    canonical = _nonblank(row["canonical_label"], "canonical_label")
+    status = _nonblank(row["status"], "authority record status")
+    valid_from = _iso(row["valid_from"], "record valid_from")
+    valid_through = row["valid_through"]
+    if valid_through is not None:
+        valid_through = _iso(valid_through, "record valid_through")
+        if valid_through < valid_from:
+            raise ValueError("record valid_through precedes valid_from")
+    if not isinstance(row["aliases"], list):
+        raise ValueError("authority record aliases must be an array")
+    try:
+        connection.execute(
+            "INSERT INTO record VALUES(?,?,?,?,?)",
+            (entity_id, canonical, status, valid_from, valid_through))
+    except sqlite3.IntegrityError as exc:
+        raise ValueError(f"duplicate authority record id {entity_id!r}") from exc
+    active = status == "active"
+    for surface in (entity_id, canonical):
+        connection.execute(
+            "INSERT INTO mapping VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (mapping_order, _key(surface), entity_id, canonical, "exact",
+             source.authority, "canonical_label", int(active), valid_from,
+             valid_through))
+        mapping_order += 1
+    for alias in row["aliases"]:
+        if not isinstance(alias, dict) or set(alias) != alias_keys:
+            raise ValueError("authority alias has the wrong schema")
+        surface = _nonblank(alias["surface"], "alias surface")
+        source_db = _nonblank(alias["source_db"], "alias source_db")
+        method = _nonblank(alias["mapping_method"], "alias mapping_method")
+        if type(alias["approved"]) is not bool:
+            raise ValueError("alias approved must be an exact bool")
+        alias_from = _iso(alias["valid_from"], "alias valid_from")
+        alias_through = alias["valid_through"]
+        if alias_through is not None:
+            alias_through = _iso(alias_through, "alias valid_through")
+            if alias_through < alias_from:
+                raise ValueError("alias valid_through precedes valid_from")
+        if alias_from < valid_from:
+            alias_from = valid_from
+        if valid_through is not None and (
+                alias_through is None or alias_through > valid_through):
+            alias_through = valid_through
+        connection.execute(
+            "INSERT INTO mapping VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (mapping_order, _key(surface), entity_id, canonical, "synonym",
+             source_db, method, int(active and alias["approved"]), alias_from,
+             alias_through))
+        mapping_order += 1
+    return mapping_order
+
+
+def _validated_relation(row, connection) -> None:
+    relation_keys = {"left_id", "right_id", "relation"}
+    if not isinstance(row, dict) or set(row) != relation_keys:
+        raise ValueError("authority relation has the wrong schema")
+    left = _nonblank(row["left_id"], "relation left_id")
+    right = _nonblank(row["right_id"], "relation right_id")
+    relation = row["relation"]
+    if relation not in _RELATIONS:
+        raise ValueError("authority relation is unsupported or references unknown ids")
+    connection.execute("INSERT INTO relation_raw VALUES(?,?,?)",
+                       (left, right, relation))
+
+
+def _finish_sqlite_index(connection, source, top_values, top_keys) -> str:
+    expected_keys = {
+        "schema_version", "entity_type", "authority", "version",
+        "release_date", "records", "relations",
+    }
+    if top_keys != expected_keys:
+        raise ValueError("authority snapshot has the wrong top-level schema")
+    for key in ("schema_version", "entity_type", "authority", "version"):
+        expected = getattr(source, key, AUTHORITY_SNAPSHOT_SCHEMA)
+        if top_values.get(key) != expected:
+            raise ValueError(f"authority snapshot {key} does not match its lock")
+    release_date = _iso(top_values.get("release_date"), "authority release_date")
+    if date.fromisoformat(release_date) > date.fromisoformat(source.lookup_date):
+        raise ValueError("authority snapshot release_date is after lookup_date")
+    connection.execute(
+        "CREATE INDEX relation_raw_pair_idx ON relation_raw(left_id,right_id)")
+    missing = connection.execute("""
+        SELECT 1 FROM relation_raw rr
+        LEFT JOIN record l ON l.entity_id=rr.left_id
+        LEFT JOIN record r ON r.entity_id=rr.right_id
+        WHERE l.entity_id IS NULL OR r.entity_id IS NULL LIMIT 1
+    """).fetchone()
+    if missing:
+        raise ValueError("authority relation is unsupported or references unknown ids")
+    conflict = connection.execute("""
+        SELECT 1 FROM relation_raw
+        GROUP BY left_id,right_id HAVING COUNT(DISTINCT relation)>1 LIMIT 1
+    """).fetchone()
+    if conflict:
+        raise ValueError("conflicting authority relation rows")
+    reverse_conflict = connection.execute("""
+        SELECT 1 FROM relation_raw a JOIN relation_raw b
+          ON a.left_id=b.right_id AND a.right_id=b.left_id
+        WHERE b.relation != CASE a.relation
+          WHEN 'claim_subsumes_evidence' THEN 'evidence_subsumes_claim'
+          WHEN 'evidence_subsumes_claim' THEN 'claim_subsumes_evidence'
+          ELSE a.relation END
+        LIMIT 1
+    """).fetchone()
+    if reverse_conflict:
+        raise ValueError("contradictory reverse authority relation rows")
+    connection.executescript("""
+        CREATE TABLE relation (
+          left_id TEXT NOT NULL,
+          right_id TEXT NOT NULL,
+          relation TEXT NOT NULL,
+          PRIMARY KEY(left_id,right_id)
+        ) WITHOUT ROWID;
+        INSERT INTO relation SELECT left_id,right_id,MIN(relation)
+          FROM relation_raw GROUP BY left_id,right_id;
+        DROP TABLE relation_raw;
+    """)
+    return release_date
+
+
+def build_frozen_sqlite_authority_index(source: AuthoritySnapshotSource,
+                                         target_path, *, scratch_dir=None
+                                         ) -> AuthoritySQLiteIndexSource:
+    """Stream one strict JSON snapshot into an atomic disk-backed index.
+
+    The source SHA-256 is computed during the same streaming pass.  At most one
+    authority record (and its aliases) is materialized in Python at a time.
+    """
+    try:
+        import ijson
+        from ijson.common import ObjectBuilder
+    except ImportError as exc:
+        raise RuntimeError(
+            "disk-backed F7 indexing requires the pinned ijson package") from exc
+
+    target = Path(target_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    scratch = Path(scratch_dir) if scratch_dir is not None else target.parent
+    scratch.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{source.entity_type}_f7_", suffix=".sqlite", dir=scratch)
+    os.close(descriptor)
+    temp_path = Path(temp_name)
+    partial = Path(str(target) + ".partial")
+    partial.unlink(missing_ok=True)
+    connection = sqlite3.connect(temp_path)
+    try:
+        _sqlite_schema(connection)
+        top_keys = set()
+        top_values = {}
+        builder = None
+        item_kind = None
+        mapping_order = 0
+        records_seen = relations_seen = False
+        with Path(source.path).open("rb") as raw_handle:
+            hashing_handle = _HashingReader(raw_handle)
+            try:
+                for prefix, event, value in ijson.parse(hashing_handle):
+                    if prefix == "" and event == "map_key":
+                        if value in top_keys:
+                            raise ValueError(f"duplicate JSON key: {value}")
+                        top_keys.add(value)
+                    if prefix in {"records", "relations"}:
+                        if event != "start_array" and event not in {
+                                "end_array", "map_key"}:
+                            raise ValueError(
+                                "authority records and relations must be arrays")
+                        if event == "start_array":
+                            if prefix == "records":
+                                records_seen = True
+                            else:
+                                relations_seen = True
+                    if builder is not None:
+                        builder.event(event, value)
+                        if not builder.containers:
+                            row = builder.value
+                            if item_kind == "records":
+                                mapping_order = _validated_record(
+                                    row, source, connection, mapping_order)
+                            else:
+                                _validated_relation(row, connection)
+                            builder = item_kind = None
+                        continue
+                    if prefix in {"records.item", "relations.item"}:
+                        if event != "start_map":
+                            raise ValueError(
+                                "authority records and relations must contain objects")
+                        builder = ObjectBuilder(map_type=_RejectingDict)
+                        item_kind = prefix.split(".", 1)[0]
+                        builder.event(event, value)
+                        continue
+                    if (prefix in {"schema_version", "entity_type", "authority",
+                                   "version", "release_date"}
+                            and event in {"string", "number", "boolean", "null"}):
+                        top_values[prefix] = value
+            except ijson.JSONError as exc:
+                raise ValueError(
+                    f"{source.entity_type} authority snapshot is not strict JSON") from exc
+            digest = hashing_handle.digest.hexdigest()
+        if builder is not None or not records_seen or not relations_seen:
+            raise ValueError("authority records and relations must be arrays")
+        if digest != source.sha256:
+            raise ValueError(
+                f"{source.entity_type} authority snapshot sha256 mismatch")
+        release_date = _finish_sqlite_index(
+            connection, source, top_values, top_keys)
+        metadata = {
+            "index_schema": AUTHORITY_SQLITE_INDEX_SCHEMA,
+            "entity_type": source.entity_type,
+            "authority": source.authority,
+            "version": source.version,
+            "release_date": release_date,
+            "lookup_date": source.lookup_date,
+            "accept_synonym_as_equivalent": json.dumps(
+                source.accept_synonym_as_equivalent),
+            "source_snapshot_sha256": source.sha256,
+        }
+        connection.executemany("INSERT INTO metadata VALUES(?,?)",
+                               sorted(metadata.items()))
+        connection.commit()
+        check = connection.execute("PRAGMA quick_check").fetchone()
+        if check != ("ok",):
+            raise ValueError("authority SQLite index failed quick_check")
+    except Exception:
+        connection.close()
+        temp_path.unlink(missing_ok=True)
+        partial.unlink(missing_ok=True)
+        raise
+    else:
+        connection.close()
+    try:
+        shutil.copyfile(temp_path, partial)
+        os.replace(partial, target)
+        index_digest = _sha256_file(target)
+        return AuthoritySQLiteIndexSource(
+            source.entity_type, str(target), index_digest)
+    finally:
+        temp_path.unlink(missing_ok=True)
+        partial.unlink(missing_ok=True)
+
+
+class FrozenSQLiteAuthorityNormalizer(FrozenAuthorityNormalizer):
+    """Frozen normalizer whose records and relations remain on disk.
+
+    The original JSON snapshots and the derived SQLite files are independently
+    SHA-256-pinned.  Connections are per-thread and opened immutable/read-only.
+    """
+
+    def __init__(self, sources, indexes):
+        source_rows = tuple(sources or ())
+        index_rows = tuple(indexes or ())
+        by_type = {source.entity_type: source for source in source_rows}
+        index_by_type = {index.entity_type: index for index in index_rows}
+        expected = set(SUPPORTED_AUTHORITIES)
+        if (set(by_type) != expected or len(by_type) != len(source_rows)
+                or set(index_by_type) != expected
+                or len(index_by_type) != len(index_rows)):
+            raise ValueError(
+                "production F7 requires exactly one pinned HGNC, ClinVar, RxNorm, "
+                "and MONDO authority snapshot and SQLite index")
+        self._local = threading.local()
+        self._snapshots = {}
+        for entity_type in SUPPORTED_AUTHORITIES:
+            source = by_type[entity_type]
+            index = index_by_type[entity_type]
+            if _sha256_file(source.path) != source.sha256:
+                raise ValueError(
+                    f"{entity_type} authority snapshot sha256 mismatch")
+            if _sha256_file(index.path) != index.sha256:
+                raise ValueError(
+                    f"{entity_type} authority SQLite index sha256 mismatch")
+            connection = self._open(index.path)
+            check = connection.execute("PRAGMA quick_check").fetchone()
+            if check != ("ok",):
+                raise ValueError("authority SQLite index failed quick_check")
+            metadata = dict(connection.execute(
+                "SELECT key,value FROM metadata").fetchall())
+            expected_metadata = {
+                "index_schema": AUTHORITY_SQLITE_INDEX_SCHEMA,
+                "entity_type": entity_type,
+                "authority": source.authority,
+                "version": source.version,
+                "lookup_date": source.lookup_date,
+                "accept_synonym_as_equivalent": json.dumps(
+                    source.accept_synonym_as_equivalent),
+                "source_snapshot_sha256": source.sha256,
+            }
+            if (set(metadata) != set(expected_metadata) | {"release_date"}
+                    or any(metadata.get(key) != value
+                           for key, value in expected_metadata.items())):
+                raise ValueError("authority SQLite index does not match its lock")
+            release_date = _iso(
+                metadata.get("release_date"), "authority release_date")
+            if date.fromisoformat(release_date) > date.fromisoformat(
+                    source.lookup_date):
+                raise ValueError("authority snapshot release_date is after lookup_date")
+            self._snapshots[entity_type] = _SQLiteSnapshot(
+                source, index, release_date, source.sha256)
+
+    @staticmethod
+    def _open(path):
+        uri = Path(path).resolve().as_uri() + "?mode=ro&immutable=1"
+        connection = sqlite3.connect(uri, uri=True)
+        connection.execute("PRAGMA query_only=ON")
+        return connection
+
+    def _connection(self, entity_type):
+        connections = getattr(self._local, "connections", None)
+        if connections is None:
+            connections = self._local.connections = {}
+        if entity_type not in connections:
+            connections[entity_type] = self._open(
+                self._snapshots[entity_type].index.path)
+        return connections[entity_type]
+
+    def normalize(self, entity_type, surface, *, lock):
+        snapshot = self._snapshots.get(entity_type)
+        if snapshot is None:
+            raise ValueError(f"unsupported entity type {entity_type!r}")
+        self._check_lock(snapshot, lock)
+        candidates = []
+        if isinstance(surface, str) and surface.strip():
+            candidates = self._connection(entity_type).execute("""
+                SELECT entity_id,canonical_label,mapping_status,source_db,
+                       mapping_method,approved,valid_from,valid_through,mapping_order
+                FROM mapping WHERE surface_key=? ORDER BY mapping_order
+            """, (_key(surface),)).fetchall()
+        valid = [row for row in candidates if _mapping_valid(_Mapping(
+            row[0], row[1], row[2], row[3], row[4], bool(row[5]), row[6], row[7]),
+            lock.lookup_date)]
+        ids = {row[0] for row in valid}
+        if len(ids) == 1:
+            chosen = sorted(valid, key=lambda row: (
+                row[2] != "exact", row[0], row[8]))[0]
+            entity_id, canonical, status = chosen[0], chosen[1], chosen[2]
+            source_db, method = chosen[3], chosen[4]
+            reason = "authority_mapping"
+        elif candidates:
+            status, entity_id, canonical = "ambiguous", "", ""
+            reason = ("conflicting_mapping" if len({row[0] for row in candidates}) > 1
+                      else "stale_or_unsupported_mapping")
+            source_db = snapshot.source.authority
+            method = reason
+        else:
+            status, entity_id, canonical = "unresolved", "", ""
+            reason = "surface_not_in_frozen_authority"
+            source_db = snapshot.source.authority
+            method = "none"
+        return {
+            "authority": snapshot.source.authority,
+            "version": snapshot.source.version,
+            "lookup_date": snapshot.source.lookup_date,
+            "source_db": source_db,
+            "mapping_method": method,
+            "id": entity_id,
+            "canonical_label": canonical,
+            "mapping_status": status,
+            "evidence": {"reason": reason, "snapshot_sha256": snapshot.digest},
+        }
+
+    def compare(self, id_a, id_b, entity_type, *, lock):
+        snapshot = self._snapshots.get(entity_type)
+        if snapshot is None:
+            raise ValueError(f"unsupported entity type {entity_type!r}")
+        self._check_lock(snapshot, lock)
+        connection = self._connection(entity_type)
+        known = connection.execute(
+            "SELECT entity_id FROM record WHERE entity_id IN (?,?)",
+            (id_a, id_b)).fetchall()
+        relation, reason = "unknown", "id_not_in_frozen_authority"
+        if len({row[0] for row in known}) == len({id_a, id_b}):
+            if id_a == id_b:
+                relation, reason = "equivalent", "identical_authority_id"
+            else:
+                row = connection.execute(
+                    "SELECT relation FROM relation WHERE left_id=? AND right_id=?",
+                    (id_a, id_b)).fetchone()
+                if row is not None:
+                    relation, reason = row[0], "explicit_authority_relation"
+                else:
+                    row = connection.execute(
+                        "SELECT relation FROM relation WHERE left_id=? AND right_id=?",
+                        (id_b, id_a)).fetchone()
+                    if row is not None:
+                        relation = {
+                            "claim_subsumes_evidence": "evidence_subsumes_claim",
+                            "evidence_subsumes_claim": "claim_subsumes_evidence",
+                        }.get(row[0], row[0])
+                        reason = "explicit_authority_relation_reversed"
+                    elif entity_type in {"gene", "variant"}:
+                        relation, reason = "provably_distinct", "distinct_authority_ids"
         return {
             "relation": relation,
             "authority": snapshot.source.authority,
