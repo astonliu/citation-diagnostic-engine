@@ -171,6 +171,10 @@ def test_the_head_is_read_not_supplied(tmp_path, monkeypatch):
     assert pl.verify_tree(str(tmp_path), str(tmp_path))["code_commit"] == "d" * 40
 
 
+def test_f6_cocitation_router_is_governed():
+    assert "cocitation.py" in pl.GOVERNING_MODULES
+
+
 # ------------------------------------------------------- the adapter receipt
 
 def test_an_empty_receipt_refuses():

@@ -74,7 +74,7 @@ GOVERNING_MODULES = (
     "ratelimit.py", "ncbi_meta.py", "textnorm.py", "unscoreable.py",
     "journal_identity.py", "f2_samework_rule.py", "f2_thresholds.py",
     "eval_report.py", "f8_retraction.py", "reason_registry.py",
-    "judgment_run.py", "judgment_band.py", "judgment_engine.py",
+    "judgment_run.py", "judgment_band.py", "judgment_engine.py", "cocitation.py",
     "band_prompts.py", "parser.py", "schema.py", "f3_provenance.py",
     "f4_strength.py", "f7_entity.py", "preband_contract.py",
     "f7_evidence_builder.py", "f7_seams.py",
