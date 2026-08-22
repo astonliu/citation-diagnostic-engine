@@ -91,6 +91,29 @@ def _crossref(doi: str, s) -> tuple[str, Optional[RetrievedRecord]]:
     return PROVIDER_FOUND, rec
 
 
+def _handle_json(resp):
+    """The Handle API's JSON body, whatever HTTP status carried it.
+
+    The general ``_json`` helper gates on HTTP 200 because for Crossref,
+    DataCite and OpenAlex a non-200 body is not a record.  The Handle API is
+    different: it answers "this handle does not exist" as **404 carrying
+    ``{"responseCode": 100}``**, which is its authoritative negative, not a
+    transport failure.  Reading it through ``_json`` discarded that body and
+    returned ``PROVIDER_ERROR``, so a DOI that genuinely does not exist made the
+    negative sweep INCOMPLETE -- and since ``lookup_exact_doi`` requires every
+    provider to have answered before it will report ``DOI_ANSWERED_ABSENT``, the
+    exact-DOI F1 route could never fire for the one population it exists to
+    catch.  Only the body is trusted here; the status code is not read.
+    """
+    if resp is None:
+        return None
+    try:
+        data = resp.json()
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _doi_proxy(doi: str, s) -> tuple[str, Optional[RetrievedRecord]]:
     """Authoritative DOI Handle existence, independent of registration agency."""
     try:
@@ -98,10 +121,13 @@ def _doi_proxy(doi: str, s) -> tuple[str, Optional[RetrievedRecord]]:
             s, f"{DOI_HANDLE_API}/{quote(doi, safe='')}", {}, timeout=20)
     except requests.RequestException:
         return PROVIDER_ERROR, None
-    data = _json(resp)
+    data = _handle_json(resp)
     if data is None:
         return PROVIDER_ERROR, None
     code = data.get("responseCode")
+    # Handle protocol codes: 1 = success, 100 = handle not found. Every other
+    # code (2 = error, 200 = values not found, ...) is NOT a statement that the
+    # handle is absent and must stay an error, so the sweep stays incomplete.
     if code == 1:
         return PROVIDER_FOUND, None
     if code == 100:

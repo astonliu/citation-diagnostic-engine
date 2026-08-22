@@ -259,3 +259,63 @@ def test_noid_candidate_providers_overlap():
 
     rec = fuzzy_biblio_lookup(_ref(doi=""), session=Session(handler))
     assert rec.resolved is False
+
+
+# --- the Handle API's real negative is a 404, not a 200 --------------------
+# Every fixture above answers a missing handle with HTTP 200 carrying
+# ``responseCode: 100``. The live service answers **404** carrying that body
+# (verified against https://doi.org/api/handles/10.1109/access.2023.3124567).
+# Reading it through the 200-gated ``_json`` helper turned the DOI resolver's
+# authoritative "absent" into PROVIDER_ERROR, which left the negative sweep
+# incomplete and made DOI_ANSWERED_ABSENT -- and therefore the exact-DOI F1
+# route -- unreachable for every DOI that does not exist. These two pin the
+# status code so the fixture cannot drift back.
+
+def test_handle_api_404_body_is_an_answer_not_an_outage():
+    from cre.f1.doi_lookup import PROVIDER_ABSENT, _doi_proxy
+    session = Session(lambda url, params: Response(
+        404, {"responseCode": 100, "handle": "10.9999/exact.fake"}))
+    status, record = _doi_proxy("10.9999/exact.fake", session)
+    assert status == PROVIDER_ABSENT
+    assert record is None
+
+
+def test_handle_api_404_with_no_body_stays_an_outage():
+    # A 404 that carries no parseable Handle response says nothing about the
+    # handle, so it must NOT be read as absence.
+    from cre.f1.doi_lookup import PROVIDER_ERROR, _doi_proxy
+    session = Session(lambda url, params: Response(404))
+    status, _ = _doi_proxy("10.9999/exact.fake", session)
+    assert status == PROVIDER_ERROR
+
+
+def test_exact_doi_absent_sweep_completes_when_the_resolver_404s():
+    # End-to-end: with the resolver answering its real 404 and the other three
+    # providers absent, the sweep is COMPLETE and reports answered-absent.
+    base = _empty_routes()
+
+    def handler(url, params):
+        if "doi.org/api/handles/" in url:
+            return Response(404, {"responseCode": 100})   # the real status
+        return base(url, params)
+
+    result = lookup_exact_doi("10.9999/exact.fake", s=Session(handler))
+    assert result.status == DOI_ANSWERED_ABSENT
+    assert result.providers["doi_proxy"] == "absent"
+
+
+def test_exact_doi_f1_is_reachable_when_the_resolver_404s():
+    # The same 404, end to end through the engine: a reference whose printed DOI
+    # does not exist and whose title finds nothing anywhere reaches F1. Before
+    # the Handle-API status fix this returned human_review on a phantom outage.
+    base = _empty_routes()
+
+    def handler(url, params):
+        if "doi.org/api/handles/" in url:
+            return Response(404, {"responseCode": 100})
+        return base(url, params)
+
+    out = process_reference(_ref(), _llm_must_not_run, session=Session(handler))
+    assert out.label == F1
+    assert out.log.doi_lookup_status == DOI_ANSWERED_ABSENT
+    assert out.log.decided_by == "exact_doi_absent_confirm_not_found_f1"
