@@ -212,11 +212,12 @@ def test_f4_and_f3_are_booked_separately_though_they_share_one_transport():
 # ==========================================================================
 # F7 -- generator and verifier, and the guard metering must not silence
 # ==========================================================================
-def _f7_pair(*, policy=None, **kw):
+def _f7_pair(*, policy=None, coverage_judge=None, **kw):
     return jr.judge_pair(
         jb.build_item(make_ref("c")),
         extractor=extractor_of(f7t.CLAIM),
-        coverage_judge=judge_established(True),
+        coverage_judge=(coverage_judge if coverage_judge is not None
+                        else judge_established(True)),
         fetch_abstract=abstract_ok,
         discriminator_call_llm=disc_llm(f4=f4_json(), v2=ORIGINATES),
         f7_evidence_builder=builder(),
@@ -352,3 +353,63 @@ def test_the_ledger_and_the_receipt_are_deliberately_not_name_joinable():
     # And the seam that proves why: one transport, two stages.
     assert "discriminator_call_llm" in RUN_SEAMS
     assert {"F3", "F4"} <= set(jr.PAID_CALL_STAGES)
+
+
+# ==========================================================================
+# RETRIES -- the half the bench could not exercise, and the contrapositive
+# ==========================================================================
+def _extractor_empty_then(*claims):
+    """[] on the first ask, then claims: the one retry the engine pays for.
+
+    An empty extraction from real PROSE is the answer that becomes NONE, so it is
+    the only one worth paying to confirm (judgment_run's bounded retry). Any other
+    empty input would ask the same broken question twice.
+    """
+    state = {"asked": 0}
+
+    def extractor(_sentence):
+        state["asked"] += 1
+        return [] if state["asked"] == 1 else list(claims)
+
+    extractor.state = state
+    return extractor
+
+
+def test_a_retried_claim_extraction_bills_both_attempts():
+    """_count_paid_call's own argument, finally under test: accounting that counts
+    only successful attempts understates the bill by exactly the retries the retry
+    budget exists to spend. Two asks, two charges, one of them flagged a retry."""
+    extractor = _extractor_empty_then(CLAIM_A)
+    rec = jr.judge_pair(
+        jb.build_item(make_ref("c")),
+        extractor=extractor,
+        coverage_judge=make_coverage_judge(
+            _counting_transport(_coverage_reply())),
+        fetch_abstract=abstract_ok)
+
+    assert extractor.state["asked"] == 2          # ground truth
+    assert rec["claim_extraction_attempts"] == 2
+    assert _stage(rec, "claim_extraction") == 2
+    assert _ledger(rec)["retries"] == 1
+    assert _ledger(rec)["total"] == sum(_ledger(rec)["by_stage"].values())
+
+
+def test_a_fully_wired_record_carries_no_unmetered_key_at_all():
+    """THE CONTRAPOSITIVE, and the more useful half. Naming an uncounted stage is
+    worth little unless its ABSENCE is meaningful: no unmetered_stages key must
+    mean every stage that ran was counted, so total is the bill rather than a
+    floor. Asserted with coverage, F4, F3 and F7 all live in one record."""
+    rec = _f7_pair(
+        f7_seams=seams(),
+        f3_fetch_reflist=lambda _p: ([], False),
+        coverage_judge=make_coverage_judge(
+            _counting_transport(_coverage_reply())))
+
+    ledger = _ledger(rec)
+    assert "unmetered_stages" not in ledger
+    # ...and it is absent because the stages RAN, not because they were skipped.
+    # All six billed stages of a fully wired pair, in one record.
+    for stage in ("claim_extraction", "coverage", "F4", "F3",
+                  "F7", "F7_verifier"):
+        assert _stage(rec, stage) >= 1, stage
+    assert ledger["total"] == sum(ledger["by_stage"].values())
