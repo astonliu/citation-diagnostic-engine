@@ -26,6 +26,18 @@ from .f7_evidence_builder import ProductionF7EvidenceBuilder
 
 AUTHORITY_SNAPSHOT_SCHEMA = "f7_authority_snapshot_v1"
 AUTHORITY_SQLITE_INDEX_SCHEMA = "f7_authority_sqlite_index_v1"
+
+#: HOW INDEX INTEGRITY IS ESTABLISHED, recorded in the F7 manifest block so the
+#: provenance states it rather than leaving a reader to infer it from absence.
+#:
+#: `PRAGMA quick_check` runs ONCE, at build time, over the exact bytes that the
+#: recorded sha256 then attests to (`build_frozen_sqlite_authority_index`). The
+#: load path re-hashes the file and compares: a match proves the bytes are
+#: byte-identical to the ones that passed, which is a STRONGER statement than
+#: re-running a structural scan, and it does not read every page of four
+#: databases on every run. See the comment at the load site.
+AUTHORITY_INDEX_INTEGRITY_ATTESTATION = (
+    "build_time_pragma_quick_check+load_time_sha256_match")
 RELATION_COMPARATOR_VERSION = "f7_relation_v1"
 SUPPORTED_AUTHORITIES = {
     "gene": "HGNC",
@@ -751,9 +763,19 @@ class FrozenSQLiteAuthorityNormalizer(FrozenAuthorityNormalizer):
                 raise ValueError(
                     f"{entity_type} authority SQLite index sha256 mismatch")
             connection = self._open(index.path)
-            check = connection.execute("PRAGMA quick_check").fetchone()
-            if check != ("ok",):
-                raise ValueError("authority SQLite index failed quick_check")
+            # NO PRAGMA quick_check HERE, DELIBERATELY -- do not re-add it.
+            #
+            # The sha256 comparison immediately above proves this file is
+            # byte-identical to the one that passed quick_check at BUILD time
+            # (see build_frozen_sqlite_authority_index). Structurally
+            # re-verifying bytes just proven unchanged establishes nothing new,
+            # and quick_check reads EVERY PAGE of the database -- so it cost a
+            # full scan of all four authority databases on every single run.
+            #
+            # Integrity is attested by build-time quick_check PLUS the load-time
+            # sha256 match, and that pairing is recorded in the F7 manifest block
+            # so the provenance still states how it was established. The sha256
+            # check is the stronger of the two and is not weakened or skipped.
             metadata = dict(connection.execute(
                 "SELECT key,value FROM metadata").fetchall())
             expected_metadata = {
@@ -777,6 +799,25 @@ class FrozenSQLiteAuthorityNormalizer(FrozenAuthorityNormalizer):
                 raise ValueError("authority snapshot release_date is after lookup_date")
             self._snapshots[entity_type] = _SQLiteSnapshot(
                 source, index, release_date, source.sha256)
+
+    def index_manifest(self) -> dict:
+        """Per-index provenance, INCLUDING how integrity was established.
+
+        Deliberately NOT folded into ``source_manifest``: that method is asserted
+        byte-equal between this disk-backed normalizer and the in-memory one, and
+        an index digest is a fact about the SQLite file that the in-memory path
+        does not have. Two different provenance questions, two methods.
+
+        ``integrity_attested_by`` is the record that quick_check still happens --
+        once, at build time, over the exact bytes the recorded sha256 then
+        attests to -- and that the load path proves those bytes unchanged rather
+        than re-scanning every page of four databases on every run.
+        """
+        return {entity_type: {
+            "index_sha256": snap.index.sha256,
+            "index_schema": AUTHORITY_SQLITE_INDEX_SCHEMA,
+            "integrity_attested_by": AUTHORITY_INDEX_INTEGRITY_ATTESTATION,
+        } for entity_type, snap in sorted(self._snapshots.items())}
 
     @staticmethod
     def _open(path):

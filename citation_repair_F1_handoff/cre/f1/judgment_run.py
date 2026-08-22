@@ -1626,7 +1626,8 @@ def _f3_manifest_block(f3_policy, discriminator_wired: bool) -> dict:
 
 
 def _f7_manifest_block(f7_policy, f7_records, *, wired: bool = False,
-                       evidence_context_supplied: bool = False) -> dict:
+                       evidence_context_supplied: bool = False,
+                       f7_seams=None) -> dict:
     """The ``"f7"`` block: policy, prompt digests, model ids, tallies.
 
     F7 rides HIGHEST in the engine ordering, so it can determine the published
@@ -1649,6 +1650,14 @@ def _f7_manifest_block(f7_policy, f7_records, *, wired: bool = False,
     """
     policy = f7_policy if f7_policy is not None else F7Policy()
     reachability = f7_reachability(policy)
+    # HOW AUTHORITY-INDEX INTEGRITY WAS ESTABLISHED. Present only for the
+    # disk-backed normalizer, which is the only one that has an index file to
+    # attest. Recorded because the load path no longer re-runs quick_check --
+    # without this the manifest would be silent about integrity and a reader
+    # could only infer it from an absence.
+    index_manifest = getattr(
+        (f7_seams or {}).get("normalizer") if hasattr(f7_seams, "get") else None,
+        "index_manifest", None)
     records = list(f7_records or [])
     # The per-tuple traces live at record["tuple_records"]; the relation digest
     # is stamped there, not on the outer §9 packet.
@@ -1715,6 +1724,13 @@ def _f7_manifest_block(f7_policy, f7_records, *, wired: bool = False,
             "evidence": _sha256_text(F7_EVIDENCE_PROMPT),
             "verifier": _sha256_text(F7_VERIFIER_PROMPT),
         },
+        # INDEX INTEGRITY, STATED RATHER THAN INFERRED. The load path proves the
+        # SQLite index is byte-identical to the file that passed
+        # `PRAGMA quick_check` when it was built; it does not re-scan every page
+        # of four databases on every run. Both halves are named here so the
+        # provenance says how integrity was established, not merely that it was.
+        **({"authority_index_integrity": index_manifest()}
+           if callable(index_manifest) else {}),
         "relation_prompt_digest_present": digest_present,
         "relation_prompt_sha256": sorted(set(real)) or None,
         "relation_comparisons_attempted": len(attempted),
@@ -3257,7 +3273,8 @@ def run_natural_judgment(
         # so, which is precisely what wired=False beside a present block says.
         **({"f7": _f7_manifest_block(
             f7_policy, f7_records_all, wired=f7_wired,
-            evidence_context_supplied=f7_evidence_builder is not None)}
+            evidence_context_supplied=f7_evidence_builder is not None,
+            f7_seams=f7_seams)}
            if f7_seams is not None else {}),
         "f4": {
             "mode": eff_f4_policy.mode,
