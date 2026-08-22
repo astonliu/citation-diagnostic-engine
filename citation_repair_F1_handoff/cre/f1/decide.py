@@ -23,12 +23,17 @@ and it must never raise the confidence of an accusation.
 from __future__ import annotations
 
 from .schema import (Reference, F1, F2, F8, CLEARED, UNVERIFIABLE, HUMAN_REVIEW,
+                     SAME_WORK,
                      UNSCOREABLE, V_FORMATTING, V_UNCERTAIN, fetch_answered)
 from .confirm import found_anywhere, all_errored, fully_answered, unanswered
 from .doi_lookup import (DOI_FOUND, DOI_FOUND_NO_METADATA,
                          DOI_ANSWERED_ABSENT, DOI_INCOMPLETE, DOI_CONFLICT,
                          DOI_NOT_ATTEMPTED)
 from .f8_retraction import F8_TIMING_INDETERMINATE, F8_UNRESOLVED
+from .unscoreable import (F8_TIMING_BOUNDARY_UNRESOLVED,
+                          IDENTITY_UNRESOLVED_AFTER_TITLE_SEARCH)
+from .confirm import (TITLE_SEARCH_IDENTITY_MIN, best_title_score,
+                      identity_settled_by_title)
 
 
 def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
@@ -60,11 +65,25 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
         log.decided_by = "f8_timing_indeterminate_excluded"
         return ref
     if log.f8_timing_status == F8_UNRESOLVED:
-        ref.label, ref.confidence = HUMAN_REVIEW, "LOW"
+        # A BOUNDARY THAT DID NOT ARRIVE IS NOT A QUESTION FOR A HUMAN. Every
+        # F8_UNRESOLVED reason names a missing date or an unanswered fetch, and it
+        # has now been retried (`assess_f8_timing_with_retry`). A human
+        # adjudicator cannot supply a date PubMed did not return either, so
+        # queueing it wastes the queue on work nobody can do. It leaves the
+        # scoreable set as a named, counted exclusion and terminates UNJUDGEABLE
+        # in Band 2.
+        #
+        # PRECISION-FIRST IS UNCHANGED: an unknown retraction state is still
+        # never an F8. This moves the row out of the human queue; it does not
+        # turn it into an accusation.
+        ref.label, ref.confidence = UNSCOREABLE, "HIGH"
         ref.rationale = (
-            "F8 retraction timing could not be resolved safely; held rather "
-            "than treated as a clean or post-retraction citation.")
-        log.decided_by = "f8_timing_unresolved_hold"
+            "F8 retraction timing could not be resolved after a bounded retry "
+            f"({log.f8_timing_reason or 'boundary unresolved'}); the citation is "
+            "neither cleared nor accused, and the missing boundary is not a "
+            "question a human adjudicator can answer.")
+        log.decided_by = "f8_timing_boundary_unresolved"
+        log.unscoreable_reason = F8_TIMING_BOUNDARY_UNRESOLVED
         return ref
 
     # F8: the citation points at a RETRACTED source (RESEARCH_PLAN_v2.2 §4.3 --
@@ -108,6 +127,8 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
     # visible for audit, but do not let an LLM/search disagreement turn it into
     # an automatic F1/F2 accusation.
     if log.same_work_reason:
+        # mixed_identity_conflict stays a human decision (an explicit F2 frame
+        # call); a proved same-work variant is machine-final. Set per branch.
         ref.label, ref.confidence = HUMAN_REVIEW, "MED"
         if log.identity_disposition == "mixed_identity_conflict":
             ref.rationale = (
@@ -117,10 +138,17 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
                 "decision, not described as a same-work variant.")
             log.decided_by = "mixed_identity_conflict_quarantine"
         else:
-            ref.rationale = (f"Resolved identifier appears to represent the same work "
-                             f"or a work variant ({log.same_work_reason}); quarantined "
-                             f"for human adjudication.")
-            log.decided_by = "same_work_variant_quarantine"
+            # MACHINE-FINAL, NOT AN ABSTAIN. A deterministic rule proved the same
+            # work; there is no further question for a human to answer. The row
+            # leaves the F2 scoreable denominator and PROCEEDS into the F3-F7
+            # band, because a translated or retitled paper is still the right
+            # paper and claim support is unaffected.
+            ref.label, ref.confidence = SAME_WORK, "HIGH"
+            ref.rationale = (f"Resolved identifier represents the same work or a "
+                             f"work variant ({log.same_work_reason}); identity is "
+                             f"settled. Excluded from F2 scoring, admitted to the "
+                             f"F3-F7 band.")
+            log.decided_by = "same_work_variant_resolved"
         return ref
 
     # THE CLAIMED-PMID FETCH NEVER ANSWERED.
@@ -253,11 +281,42 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
         log.decided_by = "llm_formatting"
         return ref
 
-    # LLM uncertain -> human review (precision-first; do not flag).
+    # LLM UNCERTAIN -> ASK THE DATABASES, NOT A HUMAN.
+    #
+    # This used to escalate on the model's shrug alone, with `db_hits: {}` on
+    # every row -- the deterministic title search had not been run. It runs
+    # first now (`run.process_reference`), and a NEAR-EXACT hit settles the
+    # identity by itself: the claimed work is in a database under that title, so
+    # whatever the metadata discrepancy is, it is not a fabricated reference.
+    #
+    # NO SEMANTIC LABEL IS ASSIGNED HERE. This is a scored database lookup
+    # against a named threshold, never a model judgment about whether two titles
+    # denote the same work.
     if llm_verdict == V_UNCERTAIN:
-        ref.label, ref.confidence = HUMAN_REVIEW, "LOW"
-        ref.rationale = "LLM filter uncertain; escalated for human adjudication."
-        log.decided_by = "llm_uncertain"
+        best = best_title_score(db_hits) if db_hits else None
+        log.title_search_best_score = best
+        if db_hits and identity_settled_by_title(db_hits):
+            ref.label, ref.confidence = CLEARED, "MED"
+            ref.rationale = (
+                f"LLM filter uncertain, but the claimed title matches a database "
+                f"record near-exactly (best score {best:.2f} >= "
+                f"{TITLE_SEARCH_IDENTITY_MIN:.0f}); the cited work exists as "
+                f"claimed and the discrepancy is not a fabrication.")
+            log.decided_by = "title_search_identity_settled"
+            return ref
+        # No match, or a match too weak to stand in for an adjudication. This is
+        # a SEMANTIC UNCERTAINTY ABOUT IDENTITY -- a title that is in none of the
+        # databases we query may still be a real trade-proceedings abstract --
+        # and a human adjudicator has no source we did not already ask.
+        ref.label, ref.confidence = UNSCOREABLE, "HIGH"
+        ref.rationale = (
+            "LLM filter uncertain and the claimed title was not found "
+            + (f"above the identity threshold (best score {best:.2f} < "
+               f"{TITLE_SEARCH_IDENTITY_MIN:.0f})" if best is not None
+               else "in any database that answered")
+            + "; identity unresolved after title search.")
+        log.decided_by = "identity_unresolved_after_title_search"
+        log.unscoreable_reason = IDENTITY_UNRESOLVED_AFTER_TITLE_SEARCH
         return ref
 
     # Survivor (fabrication or reference_error). Need the confirmation search.

@@ -169,6 +169,60 @@ def _is_journal_author_residue(title: str,
     return False
 
 
+#: JATS `publication-type` values naming something that is not a research
+#: article. A claim attributed to a database, a website, a report or a book is
+#: outside the F1-F8 taxonomy's scope. Calling such a reference `unverifiable`
+#: MISREPORTS it: `unverifiable` implies a paper-identity check was attempted and
+#: could not be completed, when in fact no paper identity was ever in question.
+#:
+#: `confproc` is in this set for the EMPTY-IDENTITY case ONLY (see
+#: :func:`is_non_article_reference`). A conference paper with a DOI or a title is
+#: a real work making a real claim and keeps its normal path -- 18 of the natural
+#: run's `confproc` references have an identity, and one of them resolves cleanly
+#: to 10.15607/rss.2021.xvii.089.
+NON_ARTICLE_PUBLICATION_TYPES = frozenset({
+    "book", "webpage", "other", "confproc"})
+
+#: The bucket name. Registered in `reason_registry.UNSCOREABLE_BUCKETS`.
+NON_ARTICLE_REFERENCE = "non_article_reference"
+
+#: The F8 timing boundary could not be resolved after a bounded retry -- a date
+#: PubMed did not return, not a judgment anyone withheld. A named, counted
+#: exclusion rather than a human-queue item, because no adjudicator can supply
+#: the missing boundary either.
+F8_TIMING_BOUNDARY_UNRESOLVED = "f8_timing_boundary_unresolved"
+
+#: The claimed title was searched and matched nothing strong enough to settle the
+#: identity. A genuine semantic uncertainty ABOUT IDENTITY -- a trade-proceedings
+#: abstract can be real and indexed nowhere -- and not a question a human
+#: adjudicator can answer from a source the pipeline did not already query.
+IDENTITY_UNRESOLVED_AFTER_TITLE_SEARCH = "identity_unresolved_after_title_search"
+
+
+def is_non_article_reference(claimed: ClaimedRef) -> bool:
+    """True for a non-article reference carrying NO identity of any kind.
+
+    BOTH conditions, and the conjunction is the whole safety of the rule. The
+    publication type alone would exclude every book chapter and conference paper
+    the pipeline can actually resolve; the empty identity alone would exclude a
+    badly-parsed journal article that deserves a real lookup. Together they name
+    exactly the reference that is neither a research article NOR resolvable:
+    a cancer-statistics database, a CDC tool, an industry blog, a think-tank
+    report, a book.
+
+    Deterministic and offline -- it reads the publisher's own attribute and three
+    empty strings, so it runs BEFORE any network lookup and costs nothing.
+    """
+    if (claimed.publication_type or "").strip().casefold() \
+            not in NON_ARTICLE_PUBLICATION_TYPES:
+        return False
+    return not any((
+        (claimed.claimed_pmid or "").strip(),
+        (claimed.claimed_doi or "").strip(),
+        (claimed.title or "").strip(),
+    ))
+
+
 def classify_unscoreable(claimed: ClaimedRef,
                          resolved: Optional[RetrievedRecord] = None
                          ) -> tuple[Optional[str], str]:
@@ -179,6 +233,16 @@ def classify_unscoreable(claimed: ClaimedRef,
     always apply. Checks are ordered most- to least- structural and return on the
     first hit. Conservative: any uncertainty yields ``(None, "")``.
     """
+    # --- scope, before identity ---------------------------------------------
+    # Checked first because it is the most structural fact available: this is not
+    # a research article and carries nothing to look one up by, so no title
+    # comparison is even defined for it.
+    if is_non_article_reference(claimed):
+        return (NON_ARTICLE_REFERENCE,
+                f"reference is a {claimed.publication_type or 'non-article'} "
+                "citation with no PMID, DOI or title; outside the taxonomy's "
+                "scope (not a research article), not a failed identity check.")
+
     ct = (claimed.title or "")
     nct = normalize_title(ct)
 

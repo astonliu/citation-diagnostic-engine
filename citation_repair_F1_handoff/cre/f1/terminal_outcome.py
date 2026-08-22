@@ -379,7 +379,17 @@ def resolve(record) -> tuple:
     if record.get("cited_text_retrievable") is False:
         return OUTCOME_UNJUDGEABLE, REASON_CITED_TEXT_UNAVAILABLE
 
-    # 4. A PARSE FAILURE THE RETRY BUDGET COULD NOT CLEAR, routed by which of the
+    # 4. EXCLUDED BEFORE THE BAND EVER RAN. Band 1 asserted a fault, reached no
+    #    verdict, or the reference carried no cited work -- so the F3-F7 question
+    #    was never asked of it. That is UNJUDGEABLE, and it must be caught HERE:
+    #    the no-claims branch below would otherwise read an excluded record's
+    #    empty `atomic_claims` as a failed extraction and queue it for a human,
+    #    who has nothing to adjudicate because nothing was ever extracted.
+    disposition = str(record.get("disposition") or "")
+    if disposition.startswith("excluded_"):
+        return OUTCOME_UNJUDGEABLE, f"preband_{disposition}"
+
+    # 5. A PARSE FAILURE THE RETRY BUDGET COULD NOT CLEAR, routed by which of the
     #    six faults it actually was.
     unresolved = record.get("parse_failure")
     if isinstance(unresolved, dict) and not unresolved.get("resolved"):
@@ -387,7 +397,7 @@ def resolve(record) -> tuple:
             unresolved.get("bucket") or classify_parse_failure(
                 unresolved.get("message")))
 
-    # 5. NO CLAIMS ON PROSE. The extractor read a real sentence, was retried, and
+    # 6. NO CLAIMS ON PROSE. The extractor read a real sentence, was retried, and
     #    still found nothing. NONE only when the sentence genuinely asserts
     #    nothing empirical -- and that has to be ATTESTED by the stage that
     #    decided it, never inferred from the empty list, which is exactly how the
@@ -399,20 +409,20 @@ def resolve(record) -> tuple:
             return OUTCOME_NONE, "prose_sentence_asserts_nothing_empirical"
         return OUTCOME_HUMAN_REVIEW, REASON_CLAIM_EXTRACTION_EMPTY
 
-    # 6. A PER-PAIR STAGE FAILURE. Claims and evidence survive on the record
+    # 7. A PER-PAIR STAGE FAILURE. Claims and evidence survive on the record
     #    (that is the point), but a stage that did not run cannot contribute to a
     #    clean bill of health.
     if record.get("stage_failures"):
         return OUTCOME_UNJUDGEABLE, "stage_failure"
 
-    # 7. SEMANTIC UNCERTAINTY WITH A STRUCTURALLY VALID RESPONSE. Insufficient
+    # 8. SEMANTIC UNCERTAINTY WITH A STRUCTURALLY VALID RESPONSE. Insufficient
     #    evidence, ambiguous evidence, unjudgeable strength, unjudgeable
     #    provenance -- the pipeline worked and the answer is "we cannot say".
     if record.get("hold_reasons"):
         return OUTCOME_UNJUDGEABLE, "held_" + str(
             record.get("disposition") or "unspecified")
 
-    # 8. Everything ran, nothing was found, and the input was real prose with no
+    # 9. Everything ran, nothing was found, and the input was real prose with no
     #    leading marker run.
     return OUTCOME_NONE, "all_wired_stages_ran_no_fault"
 

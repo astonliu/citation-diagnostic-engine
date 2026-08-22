@@ -243,3 +243,34 @@ def fully_answered(hits: dict) -> bool:
 
 def found_anywhere(hits: dict, match_threshold: float = 85.0) -> bool:
     return any((v is not None and v >= match_threshold) for v in hits.values())
+
+
+#: The score a title search must reach for it to SETTLE AN IDENTITY on its own,
+#: with no model opinion in the loop. Deliberately far above the ordinary
+#: `match_threshold` (85.0) used to decide "was this title found at all": that
+#: question tolerates a near miss, this one replaces a human adjudication and
+#: must not. Near-exact or nothing.
+TITLE_SEARCH_IDENTITY_MIN = 95.0
+
+
+def best_title_score(hits: dict) -> "float | None":
+    """The best score any database returned, or ``None`` if none answered.
+
+    ``None`` and ``0.0`` are different facts and must stay so: no database
+    answered, versus every database answered and found nothing. Scoring an
+    outage as zero would read as evidence of non-existence.
+    """
+    scores = [v for v in (hits or {}).values() if v is not None]
+    return max(scores) if scores else None
+
+
+def identity_settled_by_title(hits: dict,
+                              minimum: float = TITLE_SEARCH_IDENTITY_MIN) -> bool:
+    """True when a title search alone is strong enough to settle the identity.
+
+    Read against :data:`TITLE_SEARCH_IDENTITY_MIN`, not against the caller's
+    ordinary match threshold, because this result stands in for a human
+    adjudication rather than for a routine "found it" check.
+    """
+    best = best_title_score(hits)
+    return best is not None and best >= minimum

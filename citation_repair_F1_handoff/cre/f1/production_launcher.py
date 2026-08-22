@@ -717,6 +717,18 @@ def _require_full_launch_wiring(*, out_dir: str, run_kwargs: dict,
             f"full launch output root already exists: {out_dir}; use a fresh path")
 
 
+def _openalex_abstract_seam(mailto: str):
+    """``doi -> abstract`` bound to one session and the polite-pool mailto."""
+    import requests as _requests
+    from .doi_lookup import fetch_openalex_abstract
+    session = _requests.Session()
+
+    def seam(doi: str) -> str:
+        return fetch_openalex_abstract(doi, s=session, mailto=mailto)
+
+    return seam
+
+
 def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
                 corpus_manifest_path: str, model: str, authorized_models,
                 adapter_receipt, band1_snapshot_date: str,
@@ -867,6 +879,14 @@ def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         generated_by="production_launcher.launch_full",
         generated_at=band1_snapshot_date,
         check_attestations=attestations)
+
+    # THE OPENALEX ABSTRACT SEAM, bound to the same polite-pool mailto Band 1
+    # uses. Supplied here rather than left to the caller because a run that
+    # forgets it does not fail -- it silently reports "no abstract" for every
+    # DOI-only reference, which is a wrong terminal answer produced by a throttle.
+    if "fetch_openalex_abstract" not in run_kwargs:
+        run_kwargs["fetch_openalex_abstract"] = _openalex_abstract_seam(
+            openalex_mailto)
 
     manifest = launch(
         repo_dir=repo_dir, pkg_dir=pkg_dir, xml_dir=xml_dir,

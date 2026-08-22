@@ -30,7 +30,7 @@ import math
 from collections import Counter
 from typing import Optional
 
-from .schema import (F1, F2, UNVERIFIABLE, UNSCOREABLE, ClaimedRef,
+from .schema import (F1, F2, SAME_WORK, UNVERIFIABLE, UNSCOREABLE, ClaimedRef,
                      RetrievedRecord, fetch_answered)
 from .biblio_match import (flag_verdict, VERDICT_MATCH,
                            VERDICT_WRONG_PAPER, VERDICT_SAME_WORK_VARIANT,
@@ -106,6 +106,7 @@ def summarize(log_records: list[dict],
     """
     total = len(log_records)
     unscoreable_by_reason: Counter = Counter()
+    same_work_by_reason: Counter = Counter()
     unverifiable = 0
     pmid_bearing = 0
     pmid_resolved = 0
@@ -160,6 +161,8 @@ def summarize(log_records: list[dict],
                 f1_confirm_skipped_prevented += 1
             if decided_by == "quarantine_exception":
                 f1_quarantine_exception += 1
+        if label == SAME_WORK:
+            same_work_by_reason[lg.get("same_work_reason") or "unspecified"] += 1
         if label == UNSCOREABLE or lg.get("unscoreable_reason"):
             unscoreable_by_reason[lg.get("unscoreable_reason") or "unspecified"] += 1
             continue                       # excluded from numerator AND denominator
@@ -184,7 +187,13 @@ def summarize(log_records: list[dict],
             flagged_ids_by_band.setdefault(b, []).append(cid)
 
     unscoreable_total = sum(unscoreable_by_reason.values())
-    scoreable = total - unscoreable_total - unverifiable
+    same_work_total = sum(same_work_by_reason.values())
+    # SAME_WORK LEAVES THE F2 DENOMINATOR. The identity question is settled, so
+    # the row is not scored either way: counting it as a clear would inflate a
+    # PRECISION-ONLY metric, and counting it as flagged would assert a fault a
+    # deterministic rule just disproved. It is excluded, named and counted --
+    # never silently dropped, which is what the same-work spec forbids.
+    scoreable = total - unscoreable_total - unverifiable - same_work_total
 
     # Base rate headline: ID-bearing F2 as a fraction of PMID-bearing references
     # (the spec's ~0.1-0.2%); NOT a precision figure.
@@ -196,6 +205,7 @@ def summarize(log_records: list[dict],
             "scoreable": scoreable,
             "unverifiable": unverifiable,
             "unscoreable_total": unscoreable_total,
+            "same_work_total": same_work_total,
             "pmid_bearing": pmid_bearing,
             "pmid_resolved": pmid_resolved,
             "flagged_total": flagged_total,
@@ -234,6 +244,7 @@ def summarize(log_records: list[dict],
             ),
         },
         "unscoreable_by_reason": dict(unscoreable_by_reason),
+        "same_work_by_reason": dict(same_work_by_reason),
         "flagged_band_counts": dict(band_counts),
         "base_rate_per_pmid_bearing": base_rate,
         "wrong_paper_precision": _precision_on_band(
@@ -286,6 +297,8 @@ def format_report(report: dict) -> str:
         f"  references total      : {c['total']}",
         f"  scoreable             : {c['scoreable']}",
         f"  unverifiable          : {c['unverifiable']}",
+        f"  SAME_WORK (excluded)  : {c.get('same_work_total', 0)}  "
+        f"{report.get('same_work_by_reason', {})}",
         f"  UNSCOREABLE (excluded): {c['unscoreable_total']}  "
         f"{report['unscoreable_by_reason']}",
         f"  PMID-bearing          : {c['pmid_bearing']} "

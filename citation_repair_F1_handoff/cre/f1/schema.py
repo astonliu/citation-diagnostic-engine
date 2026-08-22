@@ -37,6 +37,22 @@ HUMAN_REVIEW = "human_review"
 # both the flagged pool and the F2 numerator. Maps to None (dropped from the
 # dataset) exactly like UNVERIFIABLE — it is a coverage bucket, never ACCURATE.
 UNSCOREABLE = "unscoreable"
+# A deterministic identity rule PROVED the resolved record is the same work, or a
+# variant of it: a translation, a correction, a canonical retitle, a conference
+# abstract of the same study. THE IDENTITY QUESTION IS SETTLED -- this is a
+# machine-final state, not an abstain.
+#
+# It is NOT `cleared`. F2 is precision-only in evaluation, and counting a
+# same-work row as an F2 clear would inflate that precision; the row leaves the
+# F2 SCOREABLE DENOMINATOR instead, scored neither way.
+#
+# It IS admissible to the F3-F7 band (`preband_disposition.BAND2_ADMITTING_LABELS`).
+# A translated or retitled paper is not a wrong paper, so nothing about claim
+# support is affected, and withholding the row would drop band population for a
+# reason with no bearing on what the band measures. The F2 same-work spec is
+# explicit that abstention is forbidden precisely because it silently drops F2
+# population; `human_review` on a proved same-work row was exactly that abstain.
+SAME_WORK = "same_work"
 
 # ---- Claimed-PMID retrieval transport status ----
 # THE DISTINCTION THAT TURNS AN OUTAGE INTO AN ACCUSATION.
@@ -298,6 +314,17 @@ class ClaimedRef:
     # This is provenance for corporate-author comparison; ``authors`` remains the
     # verbatim evidence and is never rewritten by a matcher rule.
     first_author_is_collab: bool = False
+    # WHAT THE PUBLISHER SAID THIS REFERENCE IS: the JATS `publication-type`
+    # attribute verbatim ("journal", "book", "webpage", "other", "confproc", ...)
+    # and which citation element carried it. READ, never inferred -- a taxonomy
+    # over claims attributed to peer-reviewed works does not apply to a database,
+    # a website or a think-tank report, and the publisher already told us which
+    # is which. Empty when the attribute is absent.
+    publication_type: str = ""
+    citation_element: str = ""
+    # The `ext-link` URL a web/report citation points at, verbatim. Provenance
+    # only -- never an identifier, never looked up.
+    ext_link: str = ""
 
 
 @dataclass
@@ -379,6 +406,10 @@ class StageLog:
     # Set when the (claimed, resolved) pair is not a scoreable title comparison
     # (see UNSCOREABLE). Names the reason; routes the ref out of the F2 numerator.
     unscoreable_reason: Optional[str] = None
+    # The best score any database returned for the claimed title on the
+    # identity-settling search. None means no database answered, which is a
+    # different fact from every database answering and finding nothing.
+    title_search_best_score: Optional[float] = None
     llm_verdict: Optional[str] = None
     db_hits: dict = field(default_factory=dict)
     decided_by: str = ""
@@ -412,6 +443,14 @@ class StageLog:
     f8_citing_date_earliest: str = ""
     f8_timing_gap_days: Optional[int] = None
     f8_timing_version: str = ""
+    # THE SPECIFIC BOUNDARY THAT WAS MISSING, not merely "unresolved". Without it
+    # every F8_UNRESOLVED row looks alike and none can be retried selectively or
+    # diagnosed: "cited_metadata_failure" and "citing_date_unavailable" are
+    # different outages needing different action.
+    f8_timing_reason: str = ""
+    # One row per boundary-resolution attempt, including the failures, so the
+    # fetches appear in the run's call accounting.
+    f8_timing_attempts: list = field(default_factory=list)
     # The §5.6 reason code carried by an F8 row; "" on every other row. Set by
     # decide() at the point the row takes the F8 route, so it names the ROUTE
     # taken rather than merely restating ``retracted`` (a retracted row that the
@@ -552,12 +591,15 @@ class Reference:
                     self.log.roster_resolved_surnames_measured,
                 "author_tripwire": self.log.author_tripwire,
                 "unscoreable_reason": self.log.unscoreable_reason,
+                "title_search_best_score": self.log.title_search_best_score,
                 "retracted": self.log.retracted,
                 "f8_timing_status": self.log.f8_timing_status,
                 "f8_notice_date": self.log.f8_notice_date,
                 "f8_citing_date_earliest": self.log.f8_citing_date_earliest,
                 "f8_timing_gap_days": self.log.f8_timing_gap_days,
                 "f8_timing_version": self.log.f8_timing_version,
+                "f8_timing_reason": self.log.f8_timing_reason,
+                "f8_timing_attempts": list(self.log.f8_timing_attempts),
                 "retraction_reason": self.log.retraction_reason,
                 "llm_verdict": self.log.llm_verdict,
                 "db_hits": self.log.db_hits,

@@ -92,6 +92,7 @@ from .coverage_aggregate import no_usable_fulltext_dict
 # re-exported below under the public names this module has always used, so the
 # two vocabularies cannot drift and no manifest byte moves.
 from . import cocitation
+from . import doi_lookup as dl
 from . import marker_scope
 from .cocitation import (
     ROUTE_GROUP_COVERED, ROUTE_GROUP_COVERAGE_GAP, ROUTE_UNSUPPORTED_MEMBER)
@@ -313,7 +314,7 @@ def extract_atomic_claims(sentence: str, *, extractor: Extractor) -> list:
 # ==========================================================================
 def assemble_evidence(item: dict, *, fetch_abstract: FetchAbstract,
                       fetch_reflist: "FetchReflist | None" = None,
-                      fetch_fulltext=None) -> dict:
+                      fetch_fulltext=None, fetch_openalex_abstract=None) -> dict:
     """Assemble the evidence a judge needs to check the claims.
 
     Always fetches the cited paper's abstract. When the cited work is a review
@@ -340,6 +341,29 @@ def assemble_evidence(item: dict, *, fetch_abstract: FetchAbstract,
         "review_reflist": [],
         "review_fulltext_available": None,
     }
+    # WHERE THE ABSTRACT CAME FROM, on every record. A PubMed abstract and an
+    # OpenAlex reconstruction of publisher metadata are not interchangeable for
+    # reporting, and a run that summed them would be describing a mixture it
+    # could not name. Stamped even when there is no abstract at all.
+    evidence["cited_abstract_source"] = (
+        dl.ABSTRACT_SOURCE_PUBMED if evidence_is_usable(evidence) else "")
+    # NO PMID, BUT A RESOLVED DOI. These references are real, cleared works with
+    # no PubMed record -- IEEE proceedings, non-indexed regional journals -- and
+    # the abstract is the only text of them that will ever be retrievable.
+    # Attempted only when the claimed PMID is genuinely absent, so no row that
+    # has a PubMed abstract is ever second-guessed by a third-party one.
+    if not str(cited_pmid or "").strip() and fetch_openalex_abstract is not None:
+        identifier = item.get("resolved_identifier") or {}
+        if identifier.get("kind") == "doi" and str(identifier.get("value") or "").strip():
+            abstract = fetch_openalex_abstract(identifier["value"])
+            if isinstance(abstract, str) and abstract.strip():
+                evidence["cited_abstract"] = abstract
+                evidence["cited_abstract_source"] = dl.ABSTRACT_SOURCE_OPENALEX
+                # PERMANENTLY abstract scope. There is no body to retrieve for
+                # this work, so an absence claim can never be checked against one
+                # -- the asymmetry guard applies to this path forever, not merely
+                # when a full-text retrieval happened to fail.
+                evidence["cited_abstract_body_unretrievable"] = True
     if item.get("cited_is_review") is True and fetch_reflist is not None:
         prov, avail = fetch_reflist(cited_pmid)
         evidence["review_reflist"] = prov or []

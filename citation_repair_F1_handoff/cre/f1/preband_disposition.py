@@ -48,13 +48,28 @@ DISPOSITION_SCHEMA = "preband_disposition_v2"
 
 # --- the label vocabulary, split by what it AUTHORIZES -------------------
 #: Band 2 may judge this reference: Band 1 verified the right, existing work.
+#: An F2 CLEAR. `same_work` is deliberately NOT here -- see BAND2_ADMITTING_LABELS.
 CLEARING_LABELS = frozenset({"cleared"})
+#: A deterministic identity rule proved the resolved record is the same work or a
+#: variant of it. Machine-final: not a clear, not an abstain, not a fault.
+SAME_WORK_LABELS = frozenset({"same_work"})
+#: WHAT BAND 2 MAY JUDGE -- which is NOT the same set as what F2 counts as clear,
+#: and conflating the two is the defect this pair of names exists to prevent.
+#:
+#: A same-work row is excluded from the F2 scoreable denominator (counting it as
+#: cleared would inflate a precision-only metric) AND admitted to the F3-F7 band
+#: (a translated or retitled paper is the right paper, so claim support is
+#: unaffected and withholding it would drop band population for an irrelevant
+#: reason). The artifact row says both true things at once: `cleared: false`,
+#: and a label this set admits.
+BAND2_ADMITTING_LABELS = CLEARING_LABELS | SAME_WORK_LABELS
 #: Band 1 asserted a deterministic fault. Band 2 must not judge it.
 FAULT_LABELS = frozenset({"F1", "F2", "F8"})
 #: Band 1 reached no verdict. Band 2 must not judge it, and must be able to tell
 #: this apart from "Band 1 never saw this reference".
 OPERATIONAL_LABELS = frozenset({"unverifiable", "unscoreable", "human_review"})
-DISPOSITION_LABELS = CLEARING_LABELS | FAULT_LABELS | OPERATIONAL_LABELS
+DISPOSITION_LABELS = (CLEARING_LABELS | SAME_WORK_LABELS | FAULT_LABELS
+                      | OPERATIONAL_LABELS)
 
 #: ``<citing_pmcid>:<ref_id>`` -- the format both parsers emit
 #: (``parser.parse_pmc_xml``). Verified byte-identical across the Band 1 and
@@ -252,12 +267,29 @@ def build_rows(log_source) -> list:
             "label": label,
             "citing_pmcid": cid.split(":", 1)[0],
             "cleared": label in CLEARING_LABELS,
+            # Kept alongside `cleared`, never folded into it: a same-work row is
+            # admissible to the band AND not an F2 clear, and one boolean cannot
+            # say both.
+            "band2_admitted": label in BAND2_ADMITTING_LABELS,
+            "unscoreable_reason": str(
+                (rec.get("log") or {}).get("unscoreable_reason") or ""),
             # The fifth field, and the reason this schema needed a fifth: without
             # it Band 2 re-derives identity from the CLAIMED pmid and discards
             # every reference Band 1 resolved by DOI. See resolved_identifier().
             "resolved_identifier": resolved_identifier(rec),
         })
     return rows
+
+
+def unscoreable_reason_counts(rows: "Iterable[dict]") -> dict:
+    """Unscoreable rows tallied by the reason they carry."""
+    out: dict = {}
+    for r in rows:
+        reason = str(r.get("unscoreable_reason") or "")
+        if r.get("label") == "unscoreable":
+            key = reason or "unspecified"
+            out[key] = out.get(key, 0) + 1
+    return dict(sorted(out.items()))
 
 
 def label_counts(rows: "Iterable[dict]") -> dict:
@@ -353,6 +385,7 @@ def write_disposition(log_source, out_path: str, *, f2_commit: str,
     os.replace(tmp, out_path)
 
     counts = label_counts(rows)
+    unscoreable_reasons = unscoreable_reason_counts(rows)
     pmcids = sorted({r["citing_pmcid"] for r in rows})
     attestations = _normalise_check_attestations(check_attestations)
     manifest = {
@@ -370,10 +403,20 @@ def write_disposition(log_source, out_path: str, *, f2_commit: str,
         "row_count": len(rows),
         "label_counts": counts,
         "cleared_count": sum(1 for r in rows if r["cleared"]),
+        # ADMITTED-TO-THE-BAND is a different number from CLEARED, and both are
+        # reported so neither can stand in for the other.
+        "band2_admitted_count": sum(
+            1 for r in rows if r["label"] in BAND2_ADMITTING_LABELS),
+        "same_work_count": counts.get("same_work", 0),
+        # Why each unscoreable row is unscoreable. `non_article_reference` is a
+        # SCOPE exclusion -- a database, website, report or book -- and reads as a
+        # methods sentence, not as a failure.
+        "unscoreable_by_reason": unscoreable_reasons,
         "citing_pmcid_count": len(pmcids),
         "citing_pmcids": pmcids,
         "label_vocabulary": sorted(DISPOSITION_LABELS),
         "clearing_labels": sorted(CLEARING_LABELS),
+        "band2_admitting_labels": sorted(BAND2_ADMITTING_LABELS),
         "citation_id_pattern": CITATION_ID_RE.pattern,
         "generated_by": generated_by,
         "generated_at": generated_at,

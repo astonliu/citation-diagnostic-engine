@@ -18,7 +18,7 @@ introduced them; renaming is a breaking change to the artifact contract.
 """
 from __future__ import annotations
 
-REASON_REGISTRY_VERSION = "5.7"
+REASON_REGISTRY_VERSION = "5.8"
 
 # --- §5.6 A.1: same-work reasons -> route review_same_work_variant ------------
 # Rev 5.5 activates strict-prefix review and adds the three corporate/DOI routes
@@ -104,6 +104,19 @@ UNSCOREABLE_BUCKETS = frozenset({
     "single_word_title",
     "numeric_or_year_only_title",
     "regulatory_code",
+    # Rev 5.8: the reference is not a research article AND carries no PMID, DOI or
+    # title -- a database, website, report or book. A SCOPE exclusion, distinct
+    # from every bucket above, which all describe a title comparison that could
+    # not be scored. Amendment lands with this commit (§5.6 A.4).
+    "non_article_reference",
+    # Rev 5.8: the F8 timing boundary did not resolve after a bounded retry. A
+    # transport outcome, not a judgment; excluded and counted rather than queued
+    # for a human who cannot supply the missing date either.
+    "f8_timing_boundary_unresolved",
+    # Rev 5.8: the claimed title was searched and no database match was strong
+    # enough to settle the identity. Semantic uncertainty about identity, not an
+    # adjudicable question.
+    "identity_unresolved_after_title_search",
 })
 
 REASON_REGISTRY = (SAME_WORK_REASONS | WRONG_PAPER_REASONS

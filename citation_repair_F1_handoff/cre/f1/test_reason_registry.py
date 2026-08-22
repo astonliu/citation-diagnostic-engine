@@ -36,6 +36,15 @@ def _emitted_reason_literals() -> set:
     reasons |= set(re.findall(r'repair_reason\s*=\s*"([^"]+)"', bm))
     # unscoreable: return ("bucket", ...)
     reasons |= set(re.findall(r'return\s*\(\s*"([a-z0-9_]+)"\s*,', un))
+    # unscoreable (rev 5.8): buckets emitted through a MODULE-LEVEL NAMED CONSTANT
+    # rather than an inline literal -- `return (NON_ARTICLE_REFERENCE, ...)` here,
+    # and `log.unscoreable_reason = F8_TIMING_BOUNDARY_UNRESOLVED` in decide. The
+    # literal never appears at the emission site, so the return-pattern above
+    # cannot see it, exactly like biblio_match's repair_reason. Scanning the
+    # DEFINITION site keeps the drift guard total: every `UPPER = "lower_snake"`
+    # in this module is a reason code by construction, so a new one cannot be
+    # added without the registry noticing.
+    reasons |= set(re.findall(r'^[A-Z][A-Z0-9_]* = "([a-z0-9_]+)"$', un, re.M))
     # decide (rev 5.6): the F8 retraction route. Its reason code names the route
     # the row took, assigned where the branch is taken, so the drift guard covers
     # the fourth emitter the same way it covers the other three.

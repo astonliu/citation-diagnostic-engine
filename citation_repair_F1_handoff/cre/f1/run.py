@@ -24,9 +24,12 @@ from .confirm import confirm
 from .decide import decide
 from .ncbi_meta import ncbi_pubtypes, is_retracted
 from .ratelimit import configure_ncbi
+from .unscoreable import (NON_ARTICLE_REFERENCE, classify_unscoreable,
+                          is_non_article_reference)
 from .doi_lookup import DOI_FOUND
 from .f8_retraction import (F8_CLEAR, F8_NOT_APPLICABLE, F8_QUALIFIED,
-                            F8_TIMING_VERSION, assess_f8_timing)
+                            F8_TIMING_VERSION, assess_f8_timing,
+                            assess_f8_timing_with_retry)
 from . import eval_report
 
 # Anthropic API errors worth retrying (transient); everything else fails fast.
@@ -137,6 +140,26 @@ def process_reference(ref: Reference, complete, *, ncbi_key="",
                       author_tripwire=True, session=None,
                       retraction_cache: dict | None = None,
                       f8_fetch_meta=None) -> Reference:
+    # SCOPE EXCLUSION, BEFORE ANY LOOKUP. A reference that is not a research
+    # article and carries no PMID, DOI or title has nothing to look up and no
+    # claim inside the taxonomy. Deciding it here costs no network call and,
+    # more importantly, stops it being labelled `unverifiable` -- which asserts
+    # that a paper-identity check was attempted and failed, when none was ever
+    # in question. 20 of the natural run's 562 references are exactly this:
+    # a cancer-statistics database, a CDC tool, an industry blog, a think-tank
+    # report, and 10 books.
+    if is_non_article_reference(ref.claimed):
+        _bucket, reason = classify_unscoreable(ref.claimed)
+        ref.label, ref.confidence = UNSCOREABLE, "HIGH"
+        ref.rationale = reason
+        ref.log.decided_by = "non_article_scope_exclusion"
+        ref.log.unscoreable_reason = NON_ARTICLE_REFERENCE
+        # The URL a web citation points at, kept as provenance so a reader can
+        # see WHAT was cited without reopening the XML.
+        if ref.claimed.ext_link:
+            ref.log.notes = f"ext-link: {ref.claimed.ext_link}"
+        return ref
+
     # cheap path. With a claimed PMID: EFetch + metadata compare. Without one:
     # compare_and_flag runs the structured no-ID bibliographic lookup itself.
     if ref.claimed.claimed_pmid:
@@ -149,8 +172,14 @@ def process_reference(ref: Reference, complete, *, ncbi_key="",
     # honestly records "unknown" rather than a lookup it could not perform.
     if f8_fetch_meta is not None:
         cited_pmid = (ref.retrieved.pmid or ref.claimed.claimed_pmid or "").strip()
-        assessment = assess_f8_timing(
+        # RETRY THE BOUNDARY BEFORE HOLDING. Every F8_UNRESOLVED reason names
+        # something that did not ARRIVE, not something that was decided.
+        assessment, attempts = assess_f8_timing_with_retry(
             cited_pmid, ref.source_pmid, fetch_meta=f8_fetch_meta)
+        ref.log.f8_timing_reason = assessment.reason
+        ref.log.f8_timing_attempts = [
+            {"attempt": a.attempt, "status": a.status, "reason": a.reason}
+            for a in attempts]
         ref.log.f8_timing_status = assessment.status
         ref.log.f8_notice_date = assessment.notice_date
         ref.log.f8_citing_date_earliest = assessment.citing_date_earliest
@@ -205,8 +234,18 @@ def process_reference(ref: Reference, complete, *, ncbi_key="",
     # expensive path (flagged survivors only -- PMID candidates and no-ID
     # references whose cheap lookup found a poor match or nothing)
     verdict = llm_filter(ref, complete)
-    if verdict in (V_FORMATTING, V_UNCERTAIN):
+    if verdict == V_FORMATTING:
         return decide(ref, flagged, verdict, None, match_threshold)
+    if verdict == V_UNCERTAIN:
+        # AN UNCERTAIN LLM IS NOT A REASON TO STOP LOOKING. This returned with
+        # `hits=None`, so the deterministic title search never ran and every one
+        # of these rows reached a human with `db_hits: {}` -- escalated on a
+        # model's shrug while the cheap, deterministic evidence was still sitting
+        # unqueried. The search runs first now; a human is asked only if it also
+        # cannot settle the identity.
+        hits = confirm(ref, ncbi_key, crossref_mailto, openalex_mailto,
+                       match_threshold, s=session or requests)
+        return decide(ref, flagged, verdict, hits, match_threshold)
 
     hits = confirm(ref, ncbi_key, crossref_mailto, openalex_mailto,
                    match_threshold, s=session or requests)

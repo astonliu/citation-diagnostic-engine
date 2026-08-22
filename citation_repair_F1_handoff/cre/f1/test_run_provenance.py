@@ -752,14 +752,32 @@ def test_f6_only_run_is_unaffected(tmp_path):
 
 # ------------------------------------- the queue audit (CODEX 3, second half)
 
-def test_a_queue_short_of_the_scoreable_set_blocks_reportability(tmp_path):
+def test_a_queue_short_of_the_finding_set_blocks_reportability(tmp_path):
+    """The guard that catches an EMPTY annotation queue. The queue must equal the
+    records carrying an F3-F7 finding -- a queue holding fewer rows than the run
+    found is a different denominator than the manifest reports."""
     from . import preband_contract as pc
     from .test_preband_contract import good_manifest, preds
     m = good_manifest()
-    m["queue_audit"] = {"matches": False, "queue_rows": 1, "scoreable_rows": 2,
+    m["queue_audit"] = {"matches": False, "queue_rows": 1, "finding_rows": 2,
+                        "scoreable_rows": 2,
                         "symmetric_difference": ["PMC1:B2"]}
     r = pc.reportability_report(m, preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
-    assert r["checks"]["queue_matches_scoreable"] is False
+    assert r["checks"]["queue_matches_findings"] is False
+
+
+def test_an_empty_queue_against_real_findings_blocks_reportability(tmp_path):
+    """The failure this guard exists for: findings were produced and the queue
+    file is EMPTY. A count-only check on `scoreable_records` would not see it."""
+    from . import preband_contract as pc
+    from .test_preband_contract import good_manifest, preds
+    m = good_manifest()
+    m["queue_audit"] = {"matches": False, "queue_rows": 0, "finding_rows": 2,
+                        "scoreable_rows": 2,
+                        "symmetric_difference": ["PMC1:B1", "PMC1:B2"]}
+    r = pc.reportability_report(m, preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))
+    assert r["checks"]["queue_matches_findings"] is False
+    assert r["reportable"] is False
 
 
 def test_a_real_run_queue_matches_its_scoreable_predictions(tmp_path, monkeypatch):
@@ -770,7 +788,9 @@ def test_a_real_run_queue_matches_its_scoreable_predictions(tmp_path, monkeypatc
                         corpus_manifest_path=cpath)
     q = manifest["queue_audit"]
     assert q["matches"] is True
-    assert q["queue_rows"] == q["scoreable_rows"] == manifest["scoreable_records"]
+    assert q["queue_rows"] == q["finding_rows"] == manifest["scoreable_records"]
+    # The two queues describe disjoint populations, always.
+    assert q["queues_disjoint"] is True
 
 
 # ------------------- the queue audit reads FILES, not its own bookkeeping
@@ -782,30 +802,55 @@ def test_queue_audit_detects_a_short_queue_file(tmp_path):
     pred = tmp_path / "p.jsonl"
     queue = tmp_path / "q.jsonl"
     pred.write_text("".join(json.dumps(
-        {"citation_id": c, "disposition": jr.DISP_PREDICTED}) + "\n"
+        {"citation_id": c, "disposition": jr.DISP_PREDICTED,
+         "terminal_outcome": "F6"}) + "\n"
         for c in ("PMC1:B1", "PMC1:B2")), encoding="utf-8")
     queue.write_text(json.dumps({"item_key": "PMC1:B1"}) + "\n",
                      encoding="utf-8")   # one row short
     audit = jr._queue_audit(str(pred), str(queue))
     assert audit["matches"] is False
     assert audit["queue_rows"] == 1
-    assert audit["scoreable_rows"] == 2
+    assert audit["finding_rows"] == 2
     assert audit["symmetric_difference"] == ["PMC1:B2"]
     assert audit["source"] == "files_on_disk"
 
 
-def test_queue_audit_ignores_non_scoreable_predictions(tmp_path):
+def test_queue_audit_detects_a_wholly_empty_queue(tmp_path):
+    """A run that produced findings and wrote NO queue rows. This is the shape a
+    reportable number must never be computed over."""
+    pred = tmp_path / "p.jsonl"
+    queue = tmp_path / "q.jsonl"
+    pred.write_text(json.dumps(
+        {"citation_id": "PMC1:B1", "disposition": jr.DISP_PREDICTED,
+         "terminal_outcome": "F6"}) + "\n", encoding="utf-8")
+    queue.write_text("", encoding="utf-8")
+    audit = jr._queue_audit(str(pred), str(queue))
+    assert audit["queue_rows"] == 0
+    assert audit["finding_rows"] == 1
+    assert audit["matches"] is False
+
+
+def test_queue_audit_ignores_predictions_carrying_no_finding(tmp_path):
+    """NONE and UNJUDGEABLE are conclusions, not queue items, and belong to
+    neither file. Only an F3-F7 finding earns a blind gold-label payload."""
     pred = tmp_path / "p.jsonl"
     queue = tmp_path / "q.jsonl"
     pred.write_text(
         json.dumps({"citation_id": "PMC1:B1",
-                    "disposition": jr.DISP_PREDICTED}) + "\n"
+                    "disposition": jr.DISP_PREDICTED,
+                    "terminal_outcome": "F6"}) + "\n"
         + json.dumps({"citation_id": "PMC1:B2",
-                      "disposition": jr.DISP_EXCLUDED_PREBAND}) + "\n",
+                      "disposition": jr.DISP_EXCLUDED_PREBAND,
+                      "terminal_outcome": "UNJUDGEABLE"}) + "\n"
+        + json.dumps({"citation_id": "PMC1:B3",
+                      "disposition": jr.DISP_HELD_NO_CLAIMS,
+                      "terminal_outcome": "NONE"}) + "\n",
         encoding="utf-8")
     queue.write_text(json.dumps({"item_key": "PMC1:B1"}) + "\n",
                      encoding="utf-8")
-    assert jr._queue_audit(str(pred), str(queue))["matches"] is True
+    audit = jr._queue_audit(str(pred), str(queue))
+    assert audit["matches"] is True
+    assert audit["finding_rows"] == 1
 
 
 def test_queue_audit_detects_an_id_swap(tmp_path):
@@ -813,12 +858,13 @@ def test_queue_audit_detects_an_id_swap(tmp_path):
     pred = tmp_path / "p.jsonl"
     queue = tmp_path / "q.jsonl"
     pred.write_text(json.dumps(
-        {"citation_id": "PMC1:B1", "disposition": jr.DISP_PREDICTED}) + "\n",
+        {"citation_id": "PMC1:B1", "disposition": jr.DISP_PREDICTED,
+         "terminal_outcome": "F6"}) + "\n",
         encoding="utf-8")
     queue.write_text(json.dumps({"item_key": "PMC9:ZZ"}) + "\n",
                      encoding="utf-8")
     audit = jr._queue_audit(str(pred), str(queue))
-    assert audit["queue_rows"] == audit["scoreable_rows"] == 1
+    assert audit["queue_rows"] == audit["finding_rows"] == 1
     assert audit["matches"] is False
 
 

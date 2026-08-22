@@ -43,11 +43,17 @@ MANIFEST_SUFFIX = ".manifest.json"
 #: emits; ``accurate`` is the taxonomy-vocabulary spelling and stays accepted so
 #: this change can never turn a previously-cleared row into an exclusion.
 CLEARING_LABELS = frozenset({"cleared", "accurate"})
+#: Proved same work or work variant. Machine-final, admitted to the band, and
+#: NOT an F2 clear -- see `preband_disposition.BAND2_ADMITTING_LABELS`.
+SAME_WORK_LABELS = frozenset({"same_work"})
+#: What Band 2 may judge. Wider than CLEARING_LABELS on purpose.
+BAND2_ADMITTING_LABELS = CLEARING_LABELS | SAME_WORK_LABELS
 #: Band 1 asserted a deterministic fault.
 FAULT_LABELS = frozenset({"F1", "F2", "F8"})
 #: Band 1 reached no verdict -- distinct from "Band 1 never saw this reference".
 OPERATIONAL_LABELS = frozenset({"unverifiable", "unscoreable", "human_review"})
-DISPOSITION_LABELS = CLEARING_LABELS | FAULT_LABELS | OPERATIONAL_LABELS
+DISPOSITION_LABELS = (CLEARING_LABELS | SAME_WORK_LABELS | FAULT_LABELS
+                      | OPERATIONAL_LABELS)
 
 #: ``<citing_pmcid>:<ref_id>``, e.g. ``PMC12967000:bibr1-09226028251392269``.
 CITATION_ID_RE = re.compile(r"^PMC\d+:\S+$")

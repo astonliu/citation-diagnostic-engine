@@ -174,6 +174,97 @@ def _openalex(doi: str, s) -> tuple[str, Optional[RetrievedRecord]]:
     return PROVIDER_CONFLICT, None
 
 
+#: The longest inverted index we will reconstruct. An abstract is a paragraph;
+#: anything past this is a malformed record or a full text pasted into the field,
+#: and reconstructing it would put an unbounded string into every evidence dict.
+OPENALEX_ABSTRACT_MAX_TOKENS = 20000
+
+#: The abstract's provenance value, written into ``evidence["cited_abstract_source"]``.
+#: An OpenAlex abstract is a third-party RECONSTRUCTION of publisher metadata, not
+#: a PubMed abstract, and the two must never be summed in a report as one thing.
+ABSTRACT_SOURCE_OPENALEX = "openalex_doi"
+ABSTRACT_SOURCE_PUBMED = "pubmed"
+
+
+def reconstruct_inverted_abstract(index) -> str:
+    """Rebuild an abstract from OpenAlex's ``abstract_inverted_index``.
+
+    The field maps each token to the list of positions it occupies. Sorting every
+    (position, token) pair and joining by ascending position is the whole of the
+    transform.
+
+    ALL OR NOTHING. A malformed index -- a non-list position list, a non-integer
+    position, a token that is not a string -- returns ``""`` rather than a partial
+    reconstruction. A half-rebuilt abstract is worse than none: it reads as
+    ordinary prose, so a judge would weigh it as evidence and a reader would never
+    know a gap had been silently dropped out of the middle of it.
+    """
+    if not isinstance(index, dict) or not index:
+        return ""
+    pairs: list = []
+    for token, positions in index.items():
+        if not isinstance(token, str) or not isinstance(positions, (list, tuple)):
+            return ""
+        for position in positions:
+            # bool is an int subclass and would sort as 0/1, silently reordering
+            # the sentence; excluded explicitly rather than by luck.
+            if not isinstance(position, int) or isinstance(position, bool):
+                return ""
+            pairs.append((position, token))
+            if len(pairs) > OPENALEX_ABSTRACT_MAX_TOKENS:
+                return ""
+    if not pairs:
+        return ""
+    pairs.sort(key=lambda pair: pair[0])
+    return " ".join(token for _position, token in pairs).strip()
+
+
+def fetch_openalex_abstract(doi: str, *, s=requests, mailto: str = "") -> str:
+    """The cited work's abstract from OpenAlex, by DOI. ``""`` when there is none.
+
+    WHY THIS EXISTS. 80 of the natural run's 562 references were Band-1 cleared
+    with no PMID -- IEEE proceedings and non-indexed regional journals that have no
+    PubMed record and never will. Crossref does not carry abstracts for them
+    (``10.1109/icra.2016.7487344`` has title, container-title and type, and no
+    ``abstract`` field). OpenAlex does, as an inverted index.
+
+    ``mailto`` joins OpenAlex's polite pool. It is not decoration: the anonymous
+    pool 429s under load, and a rate-limited fetch here reads downstream as "this
+    paper has no abstract", which is a wrong terminal answer produced by a
+    throttle.
+
+    Returns ``""`` on absence, on any transport or decode failure, and on a
+    malformed index. The caller treats an empty result as "no abstract" and
+    terminates the reference UNJUDGEABLE -- never as a licence to guess.
+    """
+    doi = _norm_doi(doi)
+    if not doi:
+        return ""
+    params = {"filter": f"doi:{doi}", "per-page": 1,
+              "select": "id,doi,abstract_inverted_index"}
+    if mailto:
+        params["mailto"] = mailto
+    try:
+        resp = request_with_retry(s, OPENALEX_WORKS, params,
+                                  limiter=OPENALEX, timeout=20)
+    except requests.RequestException:
+        return ""
+    data = _json(resp)
+    if data is None:
+        return ""
+    results = data.get("results")
+    if not isinstance(results, list) or not results:
+        return ""
+    item = results[0]
+    if not isinstance(item, dict):
+        return ""
+    # The DOI must match. OpenAlex's filter is authoritative, but a record for a
+    # DIFFERENT work would put another paper's abstract under this citation.
+    if not doi_equivalent(doi, item.get("doi") or ""):
+        return ""
+    return reconstruct_inverted_abstract(item.get("abstract_inverted_index"))
+
+
 def lookup_exact_doi(value: str, *, s=requests) -> ExactDoiResult:
     """Check one mechanically-normalized DOI against all configured providers."""
     doi = _norm_doi(value)

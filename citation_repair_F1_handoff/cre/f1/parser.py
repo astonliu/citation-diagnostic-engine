@@ -210,6 +210,30 @@ def _citation_node(ref):
     return _first(ref, "element-citation", "mixed-citation", "citation")
 
 
+def _publication_type(cit) -> str:
+    """The publisher's own `publication-type`, verbatim and lowercased.
+
+    Read from the attribute and never inferred from the citation's contents:
+    guessing "this looks like a website" from a URL would put a real paper that
+    happens to carry a link outside the taxonomy's scope.
+    """
+    value = cit.get("publication-type") or cit.get("publication-format") or ""
+    return str(value).strip().casefold()
+
+
+def _ext_link(cit) -> str:
+    """The reference's `ext-link` URL, or "". Provenance for a web citation."""
+    for node in cit.iter():
+        if _localname(node.tag) == "ext-link":
+            for key, value in node.attrib.items():
+                if key.split("}")[-1] == "href" and str(value).strip():
+                    return str(value).strip()
+            text = _text(node)
+            if text:
+                return text
+    return ""
+
+
 # --------------------------------------------------------------------------
 # Citance linking (HANDOFF task 3)
 # --------------------------------------------------------------------------
@@ -823,6 +847,9 @@ def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:
             pages=_pages_from(cit),
             written_title_excised=excised,
             first_author_is_collab=_first_author_is_collab(cit),
+            publication_type=_publication_type(cit),
+            citation_element=_localname(cit.tag),
+            ext_link=_ext_link(cit),
         )
         ref_id = ref.get("id") or f"ref{i}"
         reference = Reference(

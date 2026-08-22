@@ -184,6 +184,12 @@ DISP_HELD_UNSUPPORTED_COCITATION_MEMBER = "held_unsupported_cocitation_member"
 # Pipeline/taxonomy labels that mean "the cited work was verified as the right,
 # existing paper" -> the F3-F7 band may proceed. Everything else is out of band.
 _CLEAR_LABELS = frozenset({"cleared", "accurate"})
+#: WHAT THE BAND MAY JUDGE, which is wider than what F2 counts as a clear. A
+#: proved same-work row is not an F2 clear and IS the right paper, so it is
+#: admitted here while staying out of the F2 denominator. Testing admission
+#: against `_CLEAR_LABELS` conflated the two questions and silently dropped 16
+#: references from the band for a reason with no bearing on claim support.
+_BAND2_ADMITTING = _CLEAR_LABELS | frozenset({"same_work"})
 
 # Dispositions at which the pair was actually JUDGED, as opposed to excluded
 # before the substrate. NO LONGER THE ANNOTATION-QUEUE GATE: the queue is filled
@@ -390,6 +396,50 @@ def _preserve_stage_failure(rec: dict, stage: str, exc) -> None:
     rec["ts"] = int(time.time())
     print(f"[judgment-run-stage-failure] {rec.get('citation_id')}: "
           f"{stage}: {exc}")
+
+
+#: The rationale stamped on a verdict whose absence claim was refused because the
+#: body was never read. A named constant so the string is greppable in an output
+#: file and cannot drift between producer and reader.
+ABSTRACT_SCOPE_ABSENCE_RATIONALE = "abstract_silent_body_unread"
+
+
+def _guard_abstract_scope_absence(verdicts: list) -> int:
+    """AN ABSTRACT MAY NOT ASSERT ABSENCE. Coerce ``False`` -> ``None``.
+
+    An abstract is a summary. It can ESTABLISH a claim, and it can CONTRADICT
+    one -- both rest on evidence that is PRESENT. It cannot establish that a
+    claim is absent from the paper, because the paper's body was never read.
+
+    ``established=False`` maps to ``SupportState.UNESTABLISHED``
+    (``judgment_engine.from_legacy_coverage``), which is what makes F6 fire. Let
+    an argument from silence through at abstract scope and F6 fires by
+    construction on every abstract-scope row, and the F6 precision figure stops
+    meaning anything. Same defect class as DEC-030's scope stamp: a verdict must
+    never be read at a scope it was not produced at.
+
+    A CONTRADICTION IS NOT SILENCE and survives untouched. On the production
+    judge this coerces ZERO rows -- ``coverage_aggregate.aggregate_coverage``
+    already returns ``False`` only when ``contradicts`` is true, and maps silence
+    and unconfirmed specifics to ``None``. The guard exists because the judge is
+    an INJECTED seam and ``coverage_verdicts`` takes ``established`` straight from
+    whatever it returns, so nothing else in the path re-derives it. It is a net
+    under the seam, not a change to the honest path.
+
+    Returns the number of verdicts coerced, so a nonzero count is visible in the
+    record rather than silently applied.
+    """
+    coerced = 0
+    for verdict in verdicts:
+        if verdict.get("established") is False and (
+                verdict.get("contradicts") is not True):
+            verdict["established"] = None
+            original = verdict.get("rationale") or ""
+            verdict["rationale"] = (
+                f"{ABSTRACT_SCOPE_ABSENCE_RATIONALE}"
+                + (f" | {original}" if original else ""))
+            coerced += 1
+    return coerced
 
 
 def _evidence_absence_detail(item: dict, *, fulltext_path: bool) -> dict:
@@ -660,7 +710,7 @@ def _preband(citation_id: str, disp: "dict | None") -> "tuple[bool, str, object]
         return False, DISP_EXCLUDED_PREBAND_MISSING, None
     label = disp[citation_id]
     key = (label or "").strip().casefold() if isinstance(label, str) else ""
-    if key in _CLEAR_LABELS:
+    if key in _BAND2_ADMITTING:
         return True, "", label
     return False, DISP_EXCLUDED_PREBAND, label
 
@@ -758,6 +808,7 @@ def _excluded_record(ref, disposition: str, preband_label=None,
 
 def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract,
                         fetch_reflist=None, fetch_fulltext=None,
+                        fetch_openalex_abstract=None,
                         coverage_judge_v3=None, claims_cache=None,
                         claims_cache_order=None, scope_counts=None) -> tuple:
     """PHASE 1 of :func:`judge_pair`: evidence, atomic claims, coverage verdicts.
@@ -811,9 +862,14 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
     # opted-in run back to abstract scope and judge it with v2 -- a scope change
     # nothing in the output would record.
     fulltext_path = fetch_fulltext is not None
+    # Set only when the full-text path degraded to a real abstract judgment, so
+    # the scope stamp below can tell "judged at full text" from "configured for
+    # full text, judged at abstract scope".
+    abstract_scope_fallback = False
     item["evidence"] = jb.assemble_evidence(
         item, fetch_abstract=fetch_abstract, fetch_reflist=fetch_reflist,
-        fetch_fulltext=fetch_fulltext)
+        fetch_fulltext=fetch_fulltext,
+        fetch_openalex_abstract=fetch_openalex_abstract)
     rec["evidence"] = item["evidence"]
     from .band_prompts import evidence_is_usable
     rec["evidence_usable"] = bool(evidence_is_usable(item["evidence"]))
@@ -916,6 +972,17 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
             # Default path: abstract scope, v2 prompt, no parser-version key.
             verdicts = jb.coverage_verdicts(claims, item["evidence"],
                                             judge=coverage_judge)
+            if item["evidence"].get("cited_abstract_body_unretrievable") is True:
+                # An OpenAlex abstract for a work with no retrievable body. The
+                # asymmetry applies PERMANENTLY here, not merely after a failed
+                # retrieval: there is no body to fetch, ever, so no absence claim
+                # about this work can ever be checked.
+                rec["abstract_scope_fallback"] = {
+                    "fired": True,
+                    "body_unretrievable": True,
+                    "coerced_false_to_none": _guard_abstract_scope_absence(
+                        verdicts),
+                }
         else:
             fulltext = item["evidence"].get("cited_fulltext")
             complete = (isinstance(fulltext, dict)
@@ -926,18 +993,35 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
                     prompt_version=COVERAGE_PROMPT_VERSION_V3,
                     parser_version=RESPONSE_PARSER_VERSION_V3)
             else:
+                # THE BODY WAS NOT RETRIEVED. That is not the same fact as "there
+                # is no evidence": 108 of the 112 rows this branch held on the
+                # natural run already carried the cited ABSTRACT, usable, in the
+                # same evidence dict. Emitting the deterministic hold over a
+                # present abstract throws away evidence we hold and calls the
+                # citation unjudgeable on the strength of a retrieval failure.
                 rec["fulltext_incomplete_hold"] = True
-                verdicts = jb.coverage_verdicts(
-                    claims, item["evidence"],
-                    judge=lambda cl, _ev: [no_usable_fulltext_dict() for _ in cl],
-                    prompt_version=COVERAGE_PROMPT_VERSION_V3,
-                    parser_version=RESPONSE_PARSER_VERSION_V3)
+                if jb.evidence_is_usable(item["evidence"]):
+                    verdicts = jb.coverage_verdicts(
+                        claims, item["evidence"], judge=coverage_judge)
+                    rec["abstract_scope_fallback"] = {
+                        "fired": True,
+                        "coerced_false_to_none": _guard_abstract_scope_absence(
+                            verdicts),
+                    }
+                    abstract_scope_fallback = True
+                else:
+                    verdicts = jb.coverage_verdicts(
+                        claims, item["evidence"],
+                        judge=lambda cl, _ev: [no_usable_fulltext_dict()
+                                               for _ in cl],
+                        prompt_version=COVERAGE_PROMPT_VERSION_V3,
+                        parser_version=RESPONSE_PARSER_VERSION_V3)
     except ValueError as exc:
         _record_stage_failure(rec, "coverage", exc)
         verdicts = _coverage_failure_verdicts(
             claims, item["evidence"], exc, fulltext_path=fulltext_path)
 
-    if fulltext_path:
+    if fulltext_path and not abstract_scope_fallback:
         # PROVENANCE MUST STATE THE SCOPE THE ROW WAS ACTUALLY JUDGED AT.
         # _new_record stamps the frozen ABSTRACT version on every record, which is
         # correct on the default path and a FALSE PROVENANCE STAMP here -- the same
@@ -946,6 +1030,15 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
         rec["coverage_prompt_version"] = COVERAGE_PROMPT_VERSION_V3
         rec["response_parser_version"] = RESPONSE_PARSER_VERSION_V3
         rec["evidence_scope"] = EVIDENCE_SCOPE_FULLTEXT
+    elif abstract_scope_fallback:
+        # THE SAME RULE, APPLIED TO THE FALLBACK. This row was configured for the
+        # full-text path and JUDGED at abstract scope by the v2 prompt, so it must
+        # be stamped abstract or every reader downstream -- including the F4 scope
+        # pair and the asymmetry guard itself -- would read it at a scope it was
+        # never produced at. No `response_parser_version`: the v2 reply contract
+        # carries none, and stamping one would name a contract that did not run.
+        rec["coverage_prompt_version"] = COVERAGE_PROMPT_VERSION
+        rec["evidence_scope"] = EVIDENCE_SCOPE_ABSTRACT
     # The cluster match, per verdict as well as per record: a reader auditing one
     # claim must not have to join back to the row header to see which clause of
     # the sentence it belonged to.
@@ -965,7 +1058,8 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
 
 
 def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
-               fetch_reflist=None, discriminator_call_llm=None,
+               fetch_reflist=None, fetch_openalex_abstract=None,
+               discriminator_call_llm=None,
                f4_verifier_call_llm=None,
                f3_fetch_reflist=None, f3_resolve_pmcid=None,
                f4_policy=None, f3_policy=None,
@@ -1021,7 +1115,9 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
     rec, claims, verdicts = judge_pair_coverage(
         item, extractor=extractor, coverage_judge=coverage_judge,
         fetch_abstract=fetch_abstract, fetch_reflist=fetch_reflist,
-        fetch_fulltext=fetch_fulltext, coverage_judge_v3=coverage_judge_v3)
+        fetch_fulltext=fetch_fulltext,
+        fetch_openalex_abstract=fetch_openalex_abstract,
+        coverage_judge_v3=coverage_judge_v3)
     return judge_pair_finish(
         rec, item, claims, verdicts, fetch_abstract=fetch_abstract,
         cogroup_covered=cogroup_covered,
@@ -2129,7 +2225,7 @@ def run_natural_judgment(
     f4_policy=None, f3_policy=None,
     f5_seams=None, f5_evidence_builder=None, f5_policy=None,
     f7_seams=None, f7_evidence_builder=None, f7_policy=None,
-    fetch_fulltext=None, coverage_judge_v3=None,
+    fetch_fulltext=None, coverage_judge_v3=None, fetch_openalex_abstract=None,
     model: str = "", email: str = DEFAULT_EMAIL, api_key: str = "",
     max_docs: "int | None" = None, session=None,
     chain_genesis: str = "",
@@ -2496,6 +2592,15 @@ def run_natural_judgment(
     # Which identifier kind each reference entered the band on. The point of the
     # v2 handoff is that "doi" is now a nonzero bucket instead of a silent drop.
     identifier_kinds: dict = {}
+    # WHERE EACH ABSTRACT CAME FROM. A PubMed abstract and an OpenAlex
+    # reconstruction of publisher metadata are different evidence and are never
+    # summed as one number.
+    evidence_abstract_sources: dict = {}
+    # How often the full-text path degraded to a real abstract judgment, and how
+    # many absence claims the asymmetry guard refused. A nonzero coercion count
+    # on the production judge means an injected judge bypassed
+    # `aggregate_coverage`, and is worth seeing.
+    abstract_fallback_counts = {"records": 0, "coerced_false_to_none": 0}
     # EVERY billed attempt, retries included. A retry that is not counted is a
     # paid call the accounting cannot see.
     paid_call_totals = {"total": 0, "retries": 0}
@@ -2540,6 +2645,14 @@ def run_natural_judgment(
         if rec["human_review_required"]:
             human_review_by_reason[reason] = (
                 human_review_by_reason.get(reason, 0) + 1)
+        source = str((rec.get("evidence") or {}).get("cited_abstract_source") or "")
+        if source:
+            evidence_abstract_sources[source] = (
+                evidence_abstract_sources.get(source, 0) + 1)
+        if (rec.get("abstract_scope_fallback") or {}).get("fired"):
+            abstract_fallback_counts["records"] += 1
+            abstract_fallback_counts["coerced_false_to_none"] += int(
+                rec["abstract_scope_fallback"].get("coerced_false_to_none") or 0)
         ledger = rec.get("paid_calls") or {}
         paid_call_totals["total"] += int(ledger.get("total") or 0)
         paid_call_totals["retries"] += int(ledger.get("retries") or 0)
@@ -2661,6 +2774,7 @@ def run_natural_judgment(
                 item, extractor=extractor, coverage_judge=coverage_judge,
                 fetch_abstract=fetch_abstract, fetch_reflist=fetch_reflist,
                 fetch_fulltext=fetch_fulltext,
+                fetch_openalex_abstract=fetch_openalex_abstract,
                 coverage_judge_v3=coverage_judge_v3,
                 claims_cache=claims_cache, claims_cache_order=order,
                 scope_counts=local_scope_counts)
@@ -3317,6 +3431,8 @@ def run_natural_judgment(
             {**selection.binding(), **selection_accounting}
             if selection is not None else {"selection_applied": False}),
         "preband_identifier_kinds": dict(sorted(identifier_kinds.items())),
+        "evidence_abstract_sources": dict(sorted(evidence_abstract_sources.items())),
+        "abstract_scope_fallback": dict(abstract_fallback_counts),
         # THE OUTCOME LAYER. `disposition` above says where each pair stopped;
         # this says what was concluded about it. One entry per emitted record,
         # from the closed vocabulary, so the two can be reconciled but never
