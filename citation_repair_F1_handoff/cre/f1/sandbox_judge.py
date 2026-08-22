@@ -42,17 +42,32 @@ DIFFERENT taxonomy (F6, the coverage route) is asked.
 NO NETWORK IN THE DEFAULT PATH except the model calls the selected taxonomies
 make, each one receipted through the same ``AdapterReceipt`` production uses.
 
-READ THE RECEIPT PER SEAM, NOT ITS TOTAL, AND DO NOT READ THE RECORD'S LEDGER AT
-ALL. ``receipt.summary()["total_calls"]`` counts every seam INVOCATION, including
+READ THE RECEIPT PER SEAM, NOT ITS TOTAL, AND CROSS-CHECK IT AGAINST THE RECORD.
+``receipt.summary()["total_calls"]`` counts every seam INVOCATION, including
 ``fetch_abstract``, which this module serves from the packet and which costs
-nothing -- the paid count is the sum of the model-backed seams. The record's own
-``paid_calls`` ledger is worse than loose: ``judgment_run._count_paid_call`` has
-exactly two live call sites and both book ``"claim_extraction"`` (the third sits
-in ``_run_with_retry``, which nothing calls), so coverage, F3, F4, F5 and F7's
-assessor calls are never booked. On the F7 packet the ledger reports ``total: 1``
-against seven paid calls the receipt names one by one. That gap is production's
-and is left alone here; it is reported, not patched, because a sandbox that
-edited the engine to make its own output tidy would stop measuring the engine.
+nothing -- the paid count is the sum of the model-backed seams, never the total.
+
+That per-seam count is also the only INDEPENDENT check on the record's own
+``paid_calls`` ledger, and the two are worth comparing on every run: the receipt
+wraps the seams from outside and counts what fired, the ledger books stages from
+inside the engine, and only the ledger survives into a run manifest, which sums
+it per record. A ledger BELOW the receipt is a stage that spent without booking,
+and it undercounts the bill by that much on every record of a corpus. This module
+reports the comparison and never reconciles it: a sandbox that edited the engine
+to make its own output tidy would stop measuring the engine.
+
+BOTH STATES, MEASURED ON THE SAME F7 PACKET, because the pair is the argument for
+keeping the comparison. At 41031d9 the ledger read ``total: 1`` against seven paid
+calls the receipt named one by one, with only ``claim_extraction`` booked. At
+35bdd74, which books every billed stage, it reads ``total: 7`` and the two
+counters agree. The check earned its place by disagreeing once; it stays because
+agreement is the only state that licenses costing a corpus from a manifest.
+
+One asymmetry survives and a reader has to know it: the counters name the same
+stage differently. The receipt keys by SEAM (``coverage_judge_v3``,
+``f7_generator``) and the ledger by STAGE (``coverage``, ``F7``), so the two
+``by_stage``/``calls_by_seam`` maps cannot be joined on their keys. Compare the
+paid totals, not the labels.
 
 Usage:
     python -m cre.f1.sandbox_judge packet.json --model claude-opus-5

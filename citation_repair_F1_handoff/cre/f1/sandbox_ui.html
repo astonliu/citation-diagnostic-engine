@@ -1,0 +1,1077 @@
+<title>Judgment Bench</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+:root{
+  --paper:#FBFBFD; --card:#FFFFFF; --sunk:#F4F5F9;
+  --ink:#1B1D24; --ink-soft:#5A5E6B; --ink-faint:#878C9B;
+  --rule:#DFE1E9; --rule-soft:#ECEEF3;
+  --accent:#3A3F8F; --accent-soft:#EBECF7;
+  --wired:#1F6F4A; --wired-soft:#E7F2EC;
+  --silent:#8A6D1F; --silent-soft:#F7F1DF;
+  --refuse:#A02B39; --refuse-soft:#FAEBEC;
+  --shadow:0 1px 2px rgba(27,29,36,.05), 0 8px 24px -16px rgba(27,29,36,.18);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#14161C; --card:#1B1E26; --sunk:#171A21;
+    --ink:#E8E9EF; --ink-soft:#9BA0AF; --ink-faint:#767C8C;
+    --rule:#2C303B; --rule-soft:#23262F;
+    --accent:#9BA2F2; --accent-soft:#232744;
+    --wired:#6FCB9B; --wired-soft:#17301F;
+    --silent:#D9B94F; --silent-soft:#2E2716;
+    --refuse:#F5919A; --refuse-soft:#331A1E;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#14161C; --card:#1B1E26; --sunk:#171A21;
+  --ink:#E8E9EF; --ink-soft:#9BA0AF; --ink-faint:#767C8C;
+  --rule:#2C303B; --rule-soft:#23262F;
+  --accent:#9BA2F2; --accent-soft:#232744;
+  --wired:#6FCB9B; --wired-soft:#17301F;
+  --silent:#D9B94F; --silent-soft:#2E2716;
+  --refuse:#F5919A; --refuse-soft:#331A1E;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font:400 15px/1.55 "IBM Plex Sans",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1280px; margin:0 auto; padding:32px 24px 72px}
+
+header{border-bottom:1px solid var(--rule); padding-bottom:20px; margin-bottom:24px}
+h1{font:600 31px/1.15 "Newsreader",Georgia,serif; margin:0 0 7px; letter-spacing:-.011em; text-wrap:balance}
+.sub{color:var(--ink-soft); font-size:14px; max-width:78ch; margin:0}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,monospace}
+.sub code{font-size:.92em; color:var(--ink)}
+
+.banner{
+  display:none; background:var(--silent-soft); color:var(--silent);
+  border:1px solid var(--silent); border-radius:5px; padding:9px 12px;
+  font-size:13px; margin-bottom:20px; line-height:1.5;
+}
+.banner code{color:inherit}
+.banner.ok{background:var(--wired-soft); color:var(--wired); border-color:var(--wired)}
+.banner .dot{display:inline-block; width:7px; height:7px; border-radius:50%;
+  background:currentColor; margin-right:7px; vertical-align:middle}
+
+.running{display:flex; align-items:center; gap:11px; padding:14px 16px;
+  border:1px solid var(--accent); background:var(--accent-soft);
+  border-radius:5px; color:var(--accent); font-size:13px}
+.spin{width:13px; height:13px; border:2px solid currentColor; border-right-color:transparent;
+  border-radius:50%; animation:sp .7s linear infinite; flex:0 0 auto}
+@keyframes sp{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none; border-right-color:currentColor; opacity:.5}}
+.elapsed{font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums; margin-left:auto}
+
+.cols{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:26px; align-items:start}
+@media (max-width:1000px){.cols{grid-template-columns:minmax(0,1fr)}}
+.lane{display:flex; flex-direction:column; gap:20px; min-width:0}
+
+section{
+  background:var(--card); border:1px solid var(--rule); border-radius:6px;
+  padding:20px; box-shadow:var(--shadow);
+}
+h2{
+  font:600 12px/1 "IBM Plex Sans",sans-serif; text-transform:uppercase;
+  letter-spacing:.09em; color:var(--ink-soft); margin:0 0 14px;
+  display:flex; align-items:center; gap:9px;
+}
+h2 .step{
+  font-family:"IBM Plex Mono",monospace; font-size:11px; font-weight:600;
+  background:var(--accent-soft); color:var(--accent);
+  width:19px; height:19px; border-radius:3px;
+  display:inline-flex; align-items:center; justify-content:center; flex:0 0 auto;
+}
+h3{font:600 12px/1 "IBM Plex Sans",sans-serif; letter-spacing:.05em;
+   text-transform:uppercase; color:var(--ink-faint); margin:18px 0 9px}
+.stack{display:flex; flex-direction:column; gap:14px}
+.row{display:flex; gap:12px; flex-wrap:wrap}
+.row>*{flex:1 1 150px; min-width:0}
+
+label{display:block; font-size:12px; font-weight:500; margin-bottom:5px}
+label .key{font-family:"IBM Plex Mono",monospace; font-size:11px;
+           color:var(--ink-faint); font-weight:400; margin-left:6px}
+input,textarea,select{
+  width:100%; background:var(--paper); color:var(--ink);
+  border:1px solid var(--rule); border-radius:4px; padding:8px 10px;
+  font:400 13.5px/1.5 "IBM Plex Mono",ui-monospace,monospace;
+}
+textarea{resize:vertical; min-height:68px}
+input:focus-visible,textarea:focus-visible,select:focus-visible,
+button:focus-visible,summary:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+input.bad,textarea.bad{border-color:var(--refuse)}
+
+.tax{display:flex; gap:8px; flex-wrap:wrap}
+.tax button{
+  font:500 13px/1 "IBM Plex Mono",monospace; padding:9px 13px; cursor:pointer;
+  background:var(--paper); color:var(--ink-soft);
+  border:1px solid var(--rule); border-radius:4px;
+}
+.tax button[aria-pressed="true"]{
+  background:var(--accent-soft); border-color:var(--accent);
+  color:var(--accent); font-weight:600;
+}
+.tax button.locked{cursor:default; background:var(--wired-soft);
+  border-color:var(--wired); color:var(--wired); font-weight:600}
+
+.note{font-size:12.5px; color:var(--ink-soft); margin:11px 0 0; line-height:1.5}
+.note.tight{margin-top:7px}
+.pill{display:inline-block; font:500 11px/1 "IBM Plex Mono",monospace;
+      padding:4px 7px; border-radius:3px; letter-spacing:.02em; white-space:nowrap}
+.pill.wired{background:var(--wired-soft); color:var(--wired)}
+.pill.silent{background:var(--silent-soft); color:var(--silent)}
+.pill.refuse{background:var(--refuse-soft); color:var(--refuse)}
+.pill.accent{background:var(--accent-soft); color:var(--accent)}
+.pill.flat{background:var(--sunk); color:var(--ink-soft)}
+
+.gate{display:none; border-top:1px solid var(--rule-soft); padding-top:16px; margin-top:16px}
+.gate[data-on="1"]{display:block}
+.why{font-size:12px; color:var(--accent); margin:0 0 12px; font-weight:500}
+
+/* ---- gate bar: the summary that decides whether step 2 is worth running ---- */
+.gatebar{border-radius:6px; border:1px solid; padding:15px 17px; box-shadow:var(--shadow)}
+.gatebar.ok{background:var(--wired-soft); border-color:var(--wired)}
+.gatebar.no{background:var(--refuse-soft); border-color:var(--refuse)}
+.gatebar .hd{font:600 14px/1.3 "IBM Plex Sans",sans-serif; display:flex;
+             align-items:baseline; gap:9px; flex-wrap:wrap}
+.gatebar.ok .hd{color:var(--wired)}
+.gatebar.no .hd{color:var(--refuse)}
+.gatebar .hd .sm{font-weight:400; font-size:12.5px; color:var(--ink-soft)}
+.gl{list-style:none; margin:13px 0 0; padding:0; display:flex; flex-direction:column; gap:9px}
+.gl li{display:grid; grid-template-columns:auto minmax(0,1fr); gap:9px; align-items:start}
+.gl .src{font:500 10.5px/1.5 "IBM Plex Mono",monospace; padding:2px 6px;
+         border-radius:3px; background:var(--card); color:var(--ink-soft); white-space:nowrap}
+.gl .msg{font:400 12.5px/1.5 "IBM Plex Mono",monospace; color:var(--ink); min-width:0;
+         overflow-wrap:anywhere}
+.gl.warn .src{color:var(--silent)}
+
+pre{
+  margin:0; background:var(--sunk); border:1px solid var(--rule-soft);
+  border-radius:4px; padding:13px; overflow-x:auto;
+  font:400 12.5px/1.6 "IBM Plex Mono",ui-monospace,monospace;
+  color:var(--ink); max-height:420px; overflow-y:auto;
+}
+.cmd{
+  background:var(--sunk); border:1px solid var(--rule-soft); border-radius:4px;
+  padding:12px 13px; font:400 12.5px/1.7 "IBM Plex Mono",monospace;
+  overflow-x:auto; white-space:pre; color:var(--ink);
+}
+.acts{display:flex; gap:9px; flex-wrap:wrap; margin-top:13px}
+button.go,button.ghost{
+  font:500 13px/1 "IBM Plex Sans",sans-serif; padding:9px 14px;
+  border-radius:4px; cursor:pointer; border:1px solid;
+}
+button.go{background:var(--accent); border-color:var(--accent); color:#fff}
+button.ghost{background:var(--card); border-color:var(--rule); color:var(--ink)}
+button.go:disabled{opacity:.42; cursor:not-allowed}
+button:disabled{cursor:not-allowed}
+
+/* ---- paper bank ---- */
+.bank{display:flex; flex-direction:column; gap:13px}
+.paper{border:1px solid var(--rule); border-radius:5px; padding:14px; background:var(--paper)}
+.paper-head{display:flex; align-items:center; gap:9px; margin-bottom:11px}
+.paper-head .pid{font:600 11px/1 "IBM Plex Mono",monospace; color:var(--accent);
+  background:var(--accent-soft); padding:4px 6px; border-radius:3px}
+.paper-head .t{font-size:12.5px; color:var(--ink-soft); flex:1; min-width:0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.paper-head .del{font:400 12px/1 "IBM Plex Sans",sans-serif; background:none;
+  border:none; color:var(--ink-faint); cursor:pointer; padding:4px; text-decoration:underline}
+.paper-head .del:hover{color:var(--refuse)}
+.grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(135px,1fr)); gap:10px}
+.empty{font-size:12.5px; color:var(--ink-faint); font-style:italic; margin:0}
+
+/* ---- record reader ---- */
+.outcome{display:flex; align-items:center; gap:13px; flex-wrap:wrap;
+  padding:15px 17px; border-radius:5px; border:1px solid var(--rule); background:var(--sunk)}
+.outcome .big{font:600 26px/1 "IBM Plex Mono",monospace; letter-spacing:-.01em}
+.outcome.finding{background:var(--accent-soft); border-color:var(--accent)}
+.outcome.finding .big{color:var(--accent)}
+.outcome.clean{background:var(--wired-soft); border-color:var(--wired)}
+.outcome.clean .big{color:var(--wired)}
+.outcome.hold{background:var(--silent-soft); border-color:var(--silent)}
+.outcome.hold .big{color:var(--silent)}
+.outcome .meta{font-size:12.5px; color:var(--ink-soft); line-height:1.45}
+.outcome .meta b{font-family:"IBM Plex Mono",monospace; font-weight:500; color:var(--ink)}
+
+table{width:100%; border-collapse:collapse; font-size:12.5px}
+.tw{overflow-x:auto}
+th{text-align:left; font:600 10.5px/1 "IBM Plex Sans",sans-serif; text-transform:uppercase;
+   letter-spacing:.07em; color:var(--ink-faint); padding:0 10px 7px 0; white-space:nowrap}
+td{padding:7px 10px 7px 0; border-top:1px solid var(--rule-soft); vertical-align:top}
+td.n{font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums; text-align:right;
+     padding-right:14px; white-space:nowrap}
+td.m{font-family:"IBM Plex Mono",monospace}
+tr.free td{color:var(--ink-faint)}
+
+.stamps{display:flex; flex-wrap:wrap; gap:7px}
+.flag{border-left:3px solid var(--silent); background:var(--silent-soft);
+  padding:11px 13px; border-radius:0 4px 4px 0; font-size:12.5px; line-height:1.55; color:var(--ink)}
+.flag.bad{border-left-color:var(--refuse); background:var(--refuse-soft)}
+.flag b{font-family:"IBM Plex Mono",monospace; font-weight:600}
+details{margin-top:12px}
+summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
+.err{color:var(--refuse); font:400 12.5px/1.5 "IBM Plex Mono",monospace}
+.rr{display:flex; flex-direction:column; gap:15px}
+</style>
+
+<div class="wrap">
+<header>
+  <h1>Judgment Bench</h1>
+  <p class="sub">Authors one <code>cre_sandbox_packet_v1</code> of synthetic data, refuses it for every reason the engine would refuse it, runs it through the real F3&ndash;F7 band, and reads the record back. <strong>The page itself never judges.</strong> It has no model and no opinion &mdash; every verdict below is the engine&rsquo;s, and this page only makes the packet honest going in and legible coming out.</p>
+</header>
+
+<div id="live" class="banner ok"><span class="dot"></span>Connected to the engine. Packets run from this page.</div>
+<div id="ro" class="banner">Published view &mdash; no engine behind this page. Author and copy a packet, run it in your venv, then paste the record into step 3. To run packets from the page itself: <code>python -m cre.f1.sandbox_server</code> from <code>citation_repair_F1_handoff</code>.</div>
+
+<div class="cols">
+
+<!-- ================= LEFT LANE: authoring ================= -->
+<div class="lane">
+
+<section>
+  <h2>Taxonomies</h2>
+  <div class="tax" id="tax">
+    <button class="locked" type="button" title="Coverage always runs; F6 is its route">F6 &middot; always on</button>
+    <button type="button" data-t="F4" aria-pressed="false">F4</button>
+    <button type="button" data-t="F3" aria-pressed="false">F3</button>
+    <button type="button" data-t="F5" aria-pressed="false">F5</button>
+    <button type="button" data-t="F7" aria-pressed="false">F7</button>
+  </div>
+  <p class="note" id="wiring"></p>
+</section>
+
+<section>
+  <h2>The pair</h2>
+  <div class="stack">
+    <div class="row">
+      <div><label>Citation id<span class="key">citation_id</span></label>
+        <input id="f_cid" value="PMC0000001:bibr1"></div>
+      <div><label>Citing PMCID<span class="key">citing_pmcid</span></label>
+        <input id="f_pmcid" value="PMC0000001"></div>
+      <div><label>Citing PMID<span class="key">citing_pmid</span></label>
+        <input id="f_pmid" placeholder="optional"></div>
+    </div>
+    <div><label>Citing sentence<span class="key">citing_sentence</span></label>
+      <textarea id="f_sent" placeholder="The sentence in the citing paper that carries the marker."></textarea></div>
+
+    <h3>The cited work</h3>
+    <div class="row">
+      <div><label>Title<span class="key">cited_claimed.title</span></label><input id="f_ctitle"></div>
+      <div><label>PMID<span class="key">claimed_pmid</span></label><input id="f_cpmid" placeholder="blank if none"></div>
+      <div><label>DOI<span class="key">claimed_doi</span></label><input id="f_cdoi" placeholder="optional"></div>
+    </div>
+    <div class="row">
+      <div><label>Published<span class="key">cited_claimed.year</span></label>
+        <input id="f_cyear" placeholder="2010-11-01"></div>
+      <div><label>Authors, comma separated<span class="key">cited_claimed.authors</span></label>
+        <input id="f_cauth" placeholder="Baigent, Blackwell"></div>
+      <div><label>Journal<span class="key">cited_claimed.journal</span></label><input id="f_cjrnl"></div>
+    </div>
+    <div><label>Abstract<span class="key">cited_abstract</span></label>
+      <textarea id="f_abs" placeholder="The evidence coverage is judged against, on the default path."></textarea></div>
+  </div>
+
+  <div class="gate" id="g_F3">
+    <p class="why">F3 requires &middot; provenance is unanswerable without the cited work's own bibliography</p>
+    <label>Cited work's reference list, one per line<span class="key">cited_reference_list</span></label>
+    <textarea id="f_reflist" rows="4" placeholder="Smith 2019, J Immunol&#10;Chen 2021, Nature"></textarea>
+  </div>
+
+  <div class="gate" id="g_F5">
+    <p class="why">F5 requires &middot; supersession is a question about a point in time</p>
+    <div class="row">
+      <div><label>As of<span class="key">f5_as_of_date</span></label><input id="f_asof" placeholder="2024-03-01"></div>
+      <div><label>Candidate ids from the bank<span class="key">f5_candidate_ids</span></label>
+        <input id="f_cands" placeholder="1, 3 — blank means every paper in the bank"></div>
+    </div>
+    <p class="note tight">The cited work joins the bank automatically as its own row, because the evidence builder fetches it by PMID. It must not also appear as a candidate &mdash; nothing supersedes itself.</p>
+  </div>
+
+  <div class="gate" id="g_F7">
+    <p class="why">F7 requires &middot; entity attribution reads body text, and only body text</p>
+    <div class="row" style="margin-bottom:13px">
+      <div style="flex:1 1 100%"><label>Cited PMCID<span class="key">cited_pmcid</span></label>
+        <input id="f_cpmcid" placeholder="PMC4661126"></div>
+    </div>
+    <label>Body sections<span class="key">cited_sections</span></label>
+    <div class="bank" id="secs"></div>
+    <div class="acts"><button class="ghost" type="button" id="addsec">Add section</button></div>
+    <p class="note tight">F7 admits <code>methods</code>, <code>results</code>, <code>table</code> and <code>figure</code>. Never the abstract, introduction or discussion &mdash; those are where authors restate other people's findings, which is the thing F7 is trying to catch.</p>
+  </div>
+
+  <p class="note" id="f4note"></p>
+</section>
+
+<section>
+  <h2>Synthetic paper bank</h2>
+  <p class="note" style="margin:0 0 14px">Every field matches a real PubMed record, so a synthetic candidate is indistinguishable in shape from a fetched one &mdash; the content is yours, which is the point. Each paper keeps a stable id; an F5 packet references it by that id.</p>
+  <div class="bank" id="bank"></div>
+  <div class="acts">
+    <button class="ghost" type="button" id="addp">Add paper</button>
+  </div>
+</section>
+
+</div>
+
+<!-- ================= RIGHT LANE: the run ================= -->
+<div class="lane">
+
+<div class="gatebar ok" id="gatebar"></div>
+
+<section>
+  <h2><span class="step">1</span>Packet</h2>
+  <pre id="out">{}</pre>
+  <div class="acts">
+    <button class="go" type="button" id="copy">Copy packet</button>
+    <button class="ghost" type="button" id="dl">Save as JSON</button>
+    <button class="ghost" type="button" id="loadex">Load the F7 example</button>
+  </div>
+</section>
+
+<section>
+  <h2><span class="step">2</span>Run it</h2>
+  <div class="stack">
+    <div><label>Authorities folder<span class="key">--authorities, F7 only</span></label>
+      <input id="f_auth" placeholder="/path/to/f7_authorities"></div>
+    <div>
+      <div class="row">
+        <div style="flex:1 1 200px"><label style="display:flex;align-items:center;gap:8px;font-weight:400;margin:0">
+          <input type="checkbox" id="f_dry" style="width:auto;margin:0"> Dry run &mdash; zero model calls
+        </label></div>
+        <div style="flex:0 0 180px"><label>Re-hash<span class="key">--verify</span></label>
+          <select id="f_verify">
+            <option value="sqlite">sqlite &middot; 16.6 GB</option>
+            <option value="all">all &middot; 21.6 GB</option>
+            <option value="none">none &middot; trust manifest</option>
+          </select></div>
+      </div>
+    </div>
+    <div id="runbox" class="acts" style="display:none">
+      <button class="go" type="button" id="run">Run the packet</button>
+    </div>
+    <div id="runstate" style="margin-top:13px"></div>
+    <details id="cmdwrap" open>
+      <summary id="cmdsum">The equivalent command</summary>
+      <div class="cmd" id="cmd" style="margin-top:9px"></div>
+      <p class="note" id="runnote"></p>
+      <div class="acts"><button class="ghost" type="button" id="copycmd">Copy command</button></div>
+    </details>
+</section>
+
+<section>
+  <h2><span class="step">3</span>Read the record</h2>
+  <p class="note" id="recintro" style="margin:0 0 12px">Paste what the command printed. Nothing here is computed &mdash; every value below is read straight out of the engine's own JSON.</p>
+  <textarea id="f_rec" rows="4" placeholder="Paste the JSON the run printed to stdout."></textarea>
+  <div class="acts">
+    <button class="go" type="button" id="readrec">Read it</button>
+    <button class="ghost" type="button" id="clearrec">Clear</button>
+  </div>
+  <div id="recout"></div>
+</section>
+
+</div>
+</div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  var TAX = ["F4","F3","F5","F7"];
+  var SEC_LABELS = ["methods","results","table","figure"];
+  var OUTCOMES = ["F3","F4","F5","F6","F7","NONE","UNJUDGEABLE","HUMAN_REVIEW_REQUIRED"];
+  var FINDINGS = ["F3","F4","F5","F6","F7"];
+  // Seams that cost nothing: the bench serves them from the packet, and even in
+  // production they are retrievals, not model calls. Anything NOT on this list
+  // is counted as paid -- an unknown seam must never make the bill look smaller.
+  var FREE_SEAMS = ["fetch_abstract","fetch_reflist","fetch_fulltext",
+                    "f3_fetch_reflist","f3_resolve_pmcid","pubtypes_lookup"];
+
+  var on = {};
+  // Whether an engine is behind this page. Decided by asking, once, at load --
+  // never assumed from the URL, because the same file is served from the local
+  // runner and published as a static artifact and must be right in both.
+  var LIVE = null;
+  var $ = function(id){ return document.getElementById(id); };
+  function esc(s){
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){
+      return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c];
+    });
+  }
+  function lsGet(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+  function lsSet(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
+
+  // Per-viewer state only. The authorities path is a local filesystem path and
+  // stays out of the saved document on purpose -- it names the viewer's own disk.
+  try{
+    var s = lsGet("bench.tax");
+    if(s){ JSON.parse(s).forEach(function(t){ on[t] = true; }); }
+  }catch(e){}
+
+  /* ---------------- packet ---------------- */
+
+  function papers(){
+    return Array.prototype.map.call(document.querySelectorAll("#bank .paper"), function(el){
+      var g = function(k){ var n = el.querySelector('[data-f="'+k+'"]'); return n ? n.value.trim() : ""; };
+      return { id: parseInt(el.getAttribute("data-pid"),10),
+               title:g("title"), authors:g("authors"), year:g("year"),
+               journal:g("journal"), pmid:g("pmid"), doi:g("doi"), abstract:g("abstract") };
+    });
+  }
+
+  function sections(){
+    return Array.prototype.map.call(document.querySelectorAll("#secs .paper"), function(el){
+      var sel = el.querySelector('[data-f="label"]');
+      var ttl = el.querySelector('[data-f="title"]');
+      var txt = el.querySelector('[data-f="text"]');
+      return { label: sel ? sel.value : "results",
+               title: ttl ? ttl.value.trim() : "",
+               text:  txt ? txt.value.trim()  : "" };
+    });
+  }
+
+  function build(){
+    var picked = TAX.filter(function(t){ return on[t]; });
+    var cited = {
+      title: $("f_ctitle").value.trim(),
+      claimed_pmid: $("f_cpmid").value.trim(),
+      claimed_doi: $("f_cdoi").value.trim()
+    };
+    var yr = $("f_cyear").value.trim();
+    var au = $("f_cauth").value.split(",").map(function(x){ return x.trim(); }).filter(Boolean);
+    var jr = $("f_cjrnl").value.trim();
+    if(yr) cited.year = yr;
+    if(au.length) cited.authors = au;
+    if(jr) cited.journal = jr;
+
+    var p = {
+      schema: "cre_sandbox_packet_v1",
+      citation_id: $("f_cid").value.trim(),
+      citing_pmcid: $("f_pmcid").value.trim(),
+      citing_sentence: $("f_sent").value.trim(),
+      cited_claimed: cited,
+      cited_abstract: $("f_abs").value.trim(),
+      taxonomies: picked
+    };
+    var cpm = $("f_pmid").value.trim();
+    if(cpm) p.citing_pmid = cpm;
+
+    if(on.F3){
+      p.cited_reference_list = $("f_reflist").value.split("\n")
+        .map(function(x){ return x.trim(); }).filter(Boolean);
+    }
+    if(on.F5){
+      p.f5_as_of_date = $("f_asof").value.trim();
+      var bank = papers();
+      var raw = $("f_cands").value.trim();
+      if(raw){
+        var ids = raw.split(",").map(function(x){ return parseInt(x.trim(),10); })
+                     .filter(function(n){ return !isNaN(n); });
+        p.f5_candidate_ids = ids;
+      }
+      // EVERY paper in the bank is a candidate row. Emitting a placeholder for
+      // an id the bank does not hold is what the old page did; the engine now
+      // refuses that packet, and inventing the row here only moved the refusal
+      // further from the mistake.
+      p.f5_candidates = bank.map(function(b){
+        return { id:b.id, title:b.title, authors:b.authors, year:b.year,
+                 journal:b.journal, pmid:b.pmid, doi:b.doi, abstract:b.abstract };
+      });
+    }
+    if(on.F7){
+      var pmc = $("f_cpmcid").value.trim();
+      if(pmc) p.cited_pmcid = pmc;
+      p.cited_sections = sections().filter(function(s){ return s.text || s.title; });
+    }
+    return p;
+  }
+
+  /* ---------------- the gates ----------------
+     Each entry quotes the message the engine itself raises, and names the
+     function that raises it. A refusal means the run dies before the first
+     model call; a warning means it runs and answers a thinner question than
+     you probably meant to ask. */
+
+  function gates(p){
+    var refuse = [], warn = [];
+    var R = function(src,msg){ refuse.push({src:src,msg:msg}); };
+    var W = function(src,msg){ warn.push({src:src,msg:msg}); };
+    var picked = p.taxonomies || [];
+    var has = function(t){ return picked.indexOf(t) >= 0; };
+
+    if(!p.citation_id) R("build_item", "packet is missing required field 'citation_id'");
+    if(!p.citing_sentence) R("build_item", "packet is missing required field 'citing_sentence'");
+    if(p.citing_sentence && p.citing_sentence.length < 12)
+      W("terminal_outcome", "a citing sentence this short may classify as a fragment or marker-only input rather than prose, which terminates UNJUDGEABLE before coverage is asked anything");
+    if(!p.cited_abstract && !has("F7"))
+      W("coverage", "no cited_abstract and no F7 body: coverage will be asked to judge against empty evidence");
+
+    if(has("F3") && !(p.cited_reference_list || []).length)
+      R("sandbox_judge.judge", "F3 selected but the packet carries no cited_reference_list; F3 is provenance-only and cannot be asked without the cited work's own bibliography");
+
+    if(has("F5")){
+      var cited_pmid = (p.cited_claimed || {}).claimed_pmid || "";
+      var cands = p.f5_candidates || [];
+      if(!p.f5_as_of_date)
+        R("build_f5", "F5 needs f5_as_of_date: supersession asks whether a superseding work existed AT A POINT IN TIME and has no answer without one");
+      if(!cited_pmid)
+        R("build_f5", "F5 needs cited_claimed.claimed_pmid: supersession is judged against the cited work, which has to be identified to be fetched");
+      if(!(p.cited_claimed || {}).year)
+        R("build_f5", "F5 needs the cited work's publication date (cited_pub_date, or cited_claimed.year): 'was there a later paper' has no answer without the date the comparison is against");
+      var seenId = {}, seenKey = {};
+      cands.forEach(function(c){
+        if(seenId[c.id])
+          R("build_f5", "f5_candidates has two papers with id " + c.id + "; bank ids must be unique or a candidate is silently lost");
+        seenId[c.id] = 1;
+        var key = c.pmid || ("BENCH:" + c.id);
+        if(seenKey[key])
+          R("build_f5", "f5_candidates has two papers keyed '" + key + "'; a repeated pmid would collapse two candidates into one bank row");
+        seenKey[key] = 1;
+        if(cited_pmid && c.pmid === cited_pmid)
+          R("build_f5", "f5_candidates contains the cited work itself (PMID " + cited_pmid + "); a paper cannot supersede itself -- remove it from the bank");
+        if(c.year && !/^\d{4}(-\d{2}(-\d{2})?)?/.test(c.year))
+          W("build_f5", "paper id " + c.id + " has year '" + c.year + "'; the bank row takes the first 10 characters as a publication date, so a value that is not YYYY-MM-DD will not compare the way you mean");
+        if(!c.year)
+          W("build_f5", "paper id " + c.id + " has no publication date, so its bank row carries an empty pub_date and cannot be placed before or after the cited work");
+        if(!c.title && !c.abstract)
+          W("build_f5", "paper id " + c.id + " is blank; the engine accepts an empty bank row and will judge supersession against a paper with no title and no abstract rather than refusing it");
+      });
+      var declared = p.f5_candidate_ids;
+      if(declared){
+        var absent = declared.filter(function(i){ return !seenId[i]; });
+        if(absent.length)
+          R("build_f5", "f5_candidate_ids names paper id(s) [" + absent.join(", ") + "], which the bank does not hold; add them or drop the ids rather than judging against papers that do not exist");
+      }
+      if(!cands.length)
+        W("build_f5", "the bank holds no candidates, so retrieval returns nothing and F5 can only conclude that nothing superseded the cited work -- a true answer to a question with no content");
+    }
+
+    if(has("F7")){
+      var secs = p.cited_sections || [];
+      if(!secs.length)
+        R("fulltext_from_packet", "F7 needs cited_sections; it asserts nothing without body text");
+      secs.forEach(function(s, i){
+        if(SEC_LABELS.indexOf(s.label) < 0)
+          R("fulltext_from_packet", "cited_sections[" + i + "].label '" + s.label + "' is not one of [methods, results, table, figure]; F7 reads body evidence only, never the abstract, introduction or discussion");
+        if(!s.text)
+          R("fulltext_from_packet", "cited_sections[" + i + "].text is empty");
+      });
+      if(!p.cited_pmcid)
+        R("fulltext_from_packet", "F7 needs cited_pmcid: the builder cross-binds the cited PMID to a resolved PMCID and treats an unresolved work as no evidence");
+      if(!(p.cited_claimed || {}).claimed_pmid)
+        W("ProductionF7EvidenceBuilder", "no claimed_pmid: the builder checks the retrieved body's pmid against the item's cited_pmid, and a work with no identity gives the authority normalizer nothing to bind an entity to");
+      if(!$("f_auth").value.trim())
+        W("build_f7", "no authorities folder set below, so the command in step 2 will not carry --authorities and load_authorities has no manifest to read");
+    }
+    return { refuse: refuse, warn: warn };
+  }
+
+  /* ---------------- render ---------------- */
+
+  function glist(rows, cls){
+    return '<ul class="gl ' + cls + '">' + rows.map(function(r){
+      return '<li><span class="src">' + esc(r.src) + '</span>' +
+             '<span class="msg">' + esc(r.msg) + '</span></li>';
+    }).join("") + '</ul>';
+  }
+
+  function paintGates(p){
+    var g = gates(p);
+    var bar = $("gatebar");
+    var n = g.refuse.length, w = g.warn.length;
+    bar.className = "gatebar " + (n ? "no" : "ok");
+    var head;
+    if(n){
+      head = '<div class="hd">' + n + (n === 1 ? " gate refuses this packet" : " gates refuse this packet") +
+             '<span class="sm">The run stops here, before the authority load and before the first paid call.</span></div>';
+    }else{
+      head = '<div class="hd">No gate refuses this packet' +
+             '<span class="sm">Every check the engine makes before its first model call passes.</span></div>';
+    }
+    bar.innerHTML = head +
+      (n ? glist(g.refuse, "") : "") +
+      (w ? '<div style="margin-top:' + (n ? "13px" : "11px") + '"><span class="pill silent">' + w +
+           (w === 1 ? " warning" : " warnings") + '</span>' + glist(g.warn, "warn") + '</div>' : "");
+    $("copy").disabled = n > 0;
+    $("dl").disabled = n > 0;
+    var rb = $("run");
+    if(rb){
+      rb.disabled = n > 0;
+      rb.textContent = n > 0 ? "Refused — fix the gates above"
+                     : ($("f_dry").checked ? "Dry run" : "Run the packet");
+    }
+    return g;
+  }
+
+  function paintCmd(p){
+    var picked = p.taxonomies || [];
+    var parts = ["python -m cre.f1.sandbox_judge packet.json"];
+    if(picked.indexOf("F7") >= 0){
+      var a = $("f_auth").value.trim();
+      parts.push('  --authorities "' + (a || "/path/to/f7_authorities") + '"');
+    }
+    var vf = $("f_verify").value;
+    if(vf !== "sqlite" && picked.indexOf("F7") >= 0) parts.push("  --verify " + vf);
+    if($("f_dry").checked) parts.push("  --dry-run");
+    var body = parts.join(" \\\n");
+    var dry = $("f_dry").checked;
+    $("cmd").textContent = (dry ? "" : 'ANTHROPIC_API_KEY="$(cat ~/.cre_bench_key)" \\\n') + body;
+    $("runnote").innerHTML = dry
+      ? "A dry run resolves the wiring, loads and re-hashes the authorities, and prints the plan &mdash; without a single model call. It is the honest answer to &ldquo;what would this do&rdquo;: an empty record would read as a verdict."
+      : "The key is read from a file inside the command, never passed as <code>--api-key</code> &mdash; a key on the command line is visible in <code>ps</code> to every process on the machine. Run from <code>citation_repair_F1_handoff</code>: <code>cre</code> is a namespace package and will not import from the repo root.";
+  }
+
+  function paint(){
+    TAX.forEach(function(t){
+      var b = document.querySelector('[data-t="'+t+'"]');
+      if(b) b.setAttribute("aria-pressed", on[t] ? "true" : "false");
+      var g = $("g_"+t);
+      if(g) g.setAttribute("data-on", on[t] ? "1" : "0");
+    });
+    var picked = TAX.filter(function(t){ return on[t]; });
+    var silent = TAX.filter(function(t){ return !on[t]; });
+    var full = picked.indexOf("F7") >= 0;
+    $("wiring").innerHTML =
+      '<span class="pill wired">wired&nbsp; F6' + (picked.length ? " &middot; " + picked.join(" &middot; ") : "") + '</span>' +
+      (silent.length ? ' <span class="pill silent">silent&nbsp; ' + silent.join(" &middot; ") + '</span>' : '') +
+      ' <span class="pill flat">coverage&nbsp; ' + (full ? "coverage_v3 &middot; full text" : "coverage_v2 &middot; abstract") + '</span>' +
+      '<br>A silent discriminator asserts nothing; it is never handed a confident negative.' +
+      (full ? ' Selecting F7 also moves coverage off the abstract and onto the body you supply, because F7&rsquo;s sections <em>are</em> the full-text seam &mdash; it is the one choice that changes what a different taxonomy is asked.' : '');
+    $("f4note").textContent = on.F4
+      ? "F4 needs no extra input — strength is refined from the same sentence and abstract."
+      : "";
+    render();
+  }
+
+  function render(){
+    var p = build();
+    $("out").textContent = JSON.stringify(p, null, 2);
+    paintGates(p);
+    paintCmd(p);
+  }
+
+  /* ---------------- bank + sections ---------------- */
+
+  function nextId(sel){
+    var max = 0;
+    Array.prototype.forEach.call(document.querySelectorAll(sel), function(el){
+      var n = parseInt(el.getAttribute("data-pid"),10);
+      if(!isNaN(n) && n > max) max = n;
+    });
+    return max + 1;
+  }
+  function field(k, lab, val){
+    return '<div><label>' + esc(lab) + '<span class="key">' + esc(k) + '</span></label>' +
+           '<input data-f="' + esc(k) + '" value="' + esc(val || "") + '"></div>';
+  }
+
+  function addPaper(v){
+    v = v || {};
+    var id = v.id || nextId("#bank .paper");
+    var el = document.createElement("div");
+    el.className = "paper";
+    el.setAttribute("data-pid", String(id));
+    el.innerHTML =
+      '<div class="paper-head"><span class="pid">id ' + id + '</span>' +
+      '<span class="t">Synthetic paper ' + id + '</span>' +
+      '<button class="del" type="button">remove</button></div>' +
+      '<div class="grid">' +
+        field("title","Title",v.title) + field("authors","Authors",v.authors) +
+        field("year","Published",v.year) + field("journal","Journal",v.journal) +
+        field("pmid","PMID",v.pmid) + field("doi","DOI",v.doi) +
+      '</div>' +
+      '<div style="margin-top:10px"><label>Abstract<span class="key">abstract</span></label>' +
+      '<textarea data-f="abstract" rows="3">' + esc(v.abstract || "") + '</textarea></div>';
+    var bank = $("bank");
+    var e = bank.querySelector(".empty");
+    if(e) e.remove();
+    bank.appendChild(el);
+    render();
+  }
+
+  function addSection(v){
+    v = v || {};
+    var id = nextId("#secs .paper");
+    var el = document.createElement("div");
+    el.className = "paper";
+    el.setAttribute("data-pid", String(id));
+    var opts = SEC_LABELS.map(function(l){
+      return '<option' + (v.label === l ? " selected" : "") + '>' + l + '</option>';
+    }).join("");
+    el.innerHTML =
+      '<div class="paper-head"><span class="pid">' + id + '</span>' +
+      '<span class="t">Body section</span>' +
+      '<button class="del" type="button">remove</button></div>' +
+      '<div class="row" style="margin-bottom:10px">' +
+        '<div style="flex:0 0 130px"><label>Label<span class="key">label</span></label>' +
+        '<select data-f="label">' + opts + '</select></div>' +
+        '<div><label>Heading<span class="key">title</span></label>' +
+        '<input data-f="title" value="' + esc(v.title || "") + '"></div>' +
+      '</div>' +
+      '<textarea data-f="text" rows="4" placeholder="Section text.">' + esc(v.text || "") + '</textarea>';
+    var box = $("secs");
+    var e = box.querySelector(".empty");
+    if(e) e.remove();
+    box.appendChild(el);
+    render();
+  }
+
+  function emptyIfBare(sel, msg){
+    var box = $(sel);
+    if(!box.querySelector(".paper") && !box.querySelector(".empty")){
+      var d = document.createElement("p");
+      d.className = "empty";
+      d.textContent = msg;
+      box.appendChild(d);
+    }
+  }
+  function bare(){
+    emptyIfBare("bank", "No papers yet. Add one to reference it from an F5 packet.");
+    emptyIfBare("secs", "No sections yet. F7 asserts nothing without body text.");
+  }
+
+  /* ---------------- record reader ---------------- */
+
+  function kv(label, val, mono){
+    return '<tr><td>' + esc(label) + '</td><td class="' + (mono ? "m" : "") + '">' + esc(val) + '</td></tr>';
+  }
+  function table(head, rows){
+    return '<div class="tw"><table><thead><tr>' +
+      head.map(function(h){ return '<th>' + esc(h) + '</th>'; }).join("") +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+
+  function readRecord(){
+    var box = $("recout");
+    var raw = $("f_rec").value.trim();
+    if(!raw){ box.innerHTML = ""; return; }
+    var d;
+    try{ d = JSON.parse(raw); }
+    catch(err){
+      box.innerHTML = '<div class="flag bad" style="margin-top:14px">That is not valid JSON. ' +
+        'If the run failed, its traceback went to stderr and stdout was empty &mdash; there is no record to read. ' +
+        '<br><span class="err">' + esc(String(err.message || err)) + '</span></div>';
+      return;
+    }
+    var html = ['<div class="rr" style="margin-top:16px">'];
+
+    if(d.dry_run){
+      var plan = d.plan || {};
+      html.push('<div class="outcome hold"><span class="big">DRY RUN</span>' +
+        '<span class="meta">No model was called. The wiring resolved, so the packet is sufficient to start.</span></div>');
+      html.push('<div><h3>Plan</h3>' + table(["Field","Value"],
+        Object.keys(plan).filter(function(k){ return k !== "wiring_provenance"; }).sort().map(function(k){
+          var v = plan[k];
+          return kv(k, (typeof v === "object" ? JSON.stringify(v) : String(v)), true);
+        }).join("")) + '</div>');
+      if((d.wired_seams || []).length)
+        html.push('<div><h3>Wired seams</h3><div class="stamps">' +
+          d.wired_seams.map(function(s){ return '<span class="pill wired">' + esc(s) + '</span>'; }).join("") +
+          '</div></div>');
+      if(plan.wiring_provenance)
+        html.push('<details><summary>Wiring provenance</summary><pre>' +
+          esc(JSON.stringify(plan.wiring_provenance, null, 2)) + '</pre></details>');
+      html.push('</div>');
+      box.innerHTML = html.join("");
+      return;
+    }
+
+    var r = d.record || (d.terminal_outcome || d.coverage_verdicts ? d : null);
+    if(!r){
+      box.innerHTML = '<div class="flag bad" style="margin-top:14px">That JSON parsed, but it holds no record. ' +
+        'Expected the object the run prints: a <b>record</b> key, or a bare record carrying <b>terminal_outcome</b>.</div>';
+      return;
+    }
+    var receipt = d.receipt || {};
+
+    /* outcome */
+    var oc = r.terminal_outcome || "";
+    var known = OUTCOMES.indexOf(oc) >= 0;
+    var kind = FINDINGS.indexOf(oc) >= 0 ? "finding" : (oc === "NONE" ? "clean" : "hold");
+    html.push('<div class="outcome ' + kind + '"><span class="big">' + esc(oc || "—") + '</span>' +
+      '<span class="meta">reason <b>' + esc(r.terminal_reason || "—") + '</b>' +
+      '<br>human review <b>' + (r.human_review_required ? "required" : "not required") + '</b>' +
+      ' &middot; ' + (known ? 'in the closed vocabulary' : '<b style="color:var(--refuse)">NOT in the closed vocabulary</b>') +
+      '</span></div>');
+
+    /* scope stamps */
+    var stampKeys = ["coverage_prompt_version","response_parser_version","evidence_scope",
+                     "claim_extract_prompt_version","claim_input_status","claim_extraction_attempts"];
+    var stamps = stampKeys.filter(function(k){ return r[k] !== undefined; });
+    if(stamps.length){
+      html.push('<div><h3>What was actually asked</h3><div class="stamps">' +
+        stamps.map(function(k){
+          var v = String(r[k]);
+          var cl = (k === "coverage_prompt_version" && v === "coverage_v3") ? "accent" : "flat";
+          return '<span class="pill ' + cl + '">' + esc(k) + ' = ' + esc(v) + '</span>';
+        }).join("") + '</div>');
+      if(r.coverage_prompt_version === "coverage_v3")
+        html.push('<p class="note">Coverage was judged on the retrieved body, not the abstract &mdash; one model call per claim, spans resolved against the sections you supplied.</p>');
+      if(r.fulltext_incomplete_hold)
+        html.push('<div class="flag" style="margin-top:11px">The body was not retrieved completely, so coverage was held rather than judged. That is a retrieval failure, not a finding about the citation.</div>');
+      html.push('</div>');
+    }
+
+    /* claims and coverage */
+    var claims = r.atomic_claims || [], vs = r.coverage_verdicts || [];
+    if(claims.length || vs.length){
+      var rows = "";
+      var n = Math.max(claims.length, vs.length);
+      for(var i = 0; i < n; i++){
+        var c = claims[i], v = vs[i] || {};
+        var est = v.established;
+        var lab = est === true ? '<span class="pill wired">established</span>'
+                : est === false ? '<span class="pill refuse">not established</span>'
+                : '<span class="pill silent">' + esc(est === null || est === undefined ? "uncertain" : String(est)) + '</span>';
+        rows += '<tr><td class="n">' + (i+1) + '</td><td>' +
+                esc(typeof c === "string" ? c : JSON.stringify(c)) + '</td><td>' + lab + '</td></tr>';
+      }
+      html.push('<div><h3>Claims and coverage</h3>' + table(["#","Atomic claim","Verdict"], rows) + '</div>');
+    }
+
+    /* taxonomy output */
+    var buckets = [["findings","findings"],["strength_records","F4 strength"],
+                   ["f5_records","F5 supersession"],["f7_records","F7 entity"],
+                   ["hold_reasons","holds"],["stage_failures","stage failures"]];
+    var brows = buckets.filter(function(b){ return (r[b[0]] || []).length; })
+      .map(function(b){ return '<tr><td class="m">' + esc(b[0]) + '</td><td>' + esc(b[1]) +
+        '</td><td class="n">' + r[b[0]].length + '</td></tr>'; }).join("");
+    if(brows) html.push('<div><h3>Taxonomy output</h3>' + table(["Key","What it holds","Rows"], brows) +
+      '<details><summary>Show the rows verbatim</summary><pre>' + esc(JSON.stringify(
+        buckets.reduce(function(acc,b){ if((r[b[0]]||[]).length) acc[b[0]] = r[b[0]]; return acc; }, {}),
+        null, 2)) + '</pre></details></div>');
+
+    /* receipt */
+    var by = receipt.calls_by_seam || {};
+    var seams = Object.keys(by).sort();
+    if(seams.length){
+      var paid = 0, free = 0;
+      var srows = seams.map(function(s){
+        var isFree = FREE_SEAMS.indexOf(s) >= 0;
+        if(isFree) free += by[s]; else paid += by[s];
+        return '<tr class="' + (isFree ? "free" : "") + '"><td class="m">' + esc(s) + '</td><td>' +
+          (isFree ? '<span class="pill flat">served locally</span>' : '<span class="pill accent">model call</span>') +
+          '</td><td class="n">' + by[s] + '</td></tr>';
+      }).join("");
+      html.push('<div><h3>Receipt &middot; ' + esc(receipt.model || "") + '</h3>' +
+        table(["Seam","Kind","Calls"], srows) +
+        '<p class="note">' + paid + ' paid, ' + free + ' served from the packet, ' +
+        (receipt.total_calls !== undefined ? receipt.total_calls : (paid+free)) +
+        ' invocations total. Read the paid number per seam, never the total &mdash; the total counts the free ones too.</p>');
+
+      /* THE LEDGER CHECK. Two independent counts of the same spend: the receipt
+         wraps the seams and counts invocations, the record books stages from
+         inside the engine. Agreement is the only state that licenses costing a
+         corpus from the record, because the manifest sums these per-record
+         ledgers and the receipt does not survive the process. */
+      var ledger = r.paid_calls || {};
+      var lt = ledger.total;
+      if(lt !== undefined){
+        var same = lt === paid;
+        var unmet = ledger.unmetered_stages || [];
+        html.push('<div class="flag' + (same && !unmet.length ? "" : " bad") + '" style="margin-top:12px">' +
+          'The record\'s ledger says <b>paid_calls.total = ' + lt + '</b>' +
+          (ledger.by_stage ? ' (' + esc(Object.keys(ledger.by_stage).map(function(k){
+              return k + ": " + ledger.by_stage[k]; }).join(", ")) + ')' : '') +
+          ' against <b>' + paid + '</b> paid calls the receipt names one by one.' +
+          (same ? ' The two agree, so this record can be costed.'
+                : ' <br><br>They disagree by <b>' + Math.abs(lt - paid) + '</b>, and the receipt is the one to trust here — it counted the wrapped seams as they fired. A ledger below the receipt means some stage spent without booking, and a run manifest summing these per-record ledgers would undercount the bill by that much per record.') +
+          (unmet.length ? '<br><br>Stages that ran through an <b>unmetered</b> callable: <b>' +
+             esc(unmet.join(", ")) + '</b>. Their spend is unknown, which is not the same fact as zero.' : '') +
+          '</div>');
+      }
+      html.push('</div>');
+    }
+
+    html.push('<details><summary>Whole record, verbatim</summary><pre>' +
+      esc(JSON.stringify(d, null, 2)) + '</pre></details>');
+    html.push('</div>');
+    box.innerHTML = html.join("");
+  }
+
+  /* ---------------- live run ---------------- */
+
+  function runState(html, cls){
+    $("runstate").innerHTML = html ? '<div class="' + (cls || "running") + '">' + html + '</div>' : "";
+  }
+
+  function errBlock(res){
+    // The four failures mean different things to someone holding a packet, so
+    // they are never collapsed into one red box.
+    var K = {
+      refusal: ["The engine refused the packet",
+                "This is the engine working, not an outage. It stopped before the first paid call."],
+      key:     ["No API key", "A dry run still works — it makes no model call."],
+      model:   ["The provider rejected the call", "Nothing was judged. Check balance, key and model id."],
+      busy:    ["A run is already in flight", "Paid calls are serialized so two tabs cannot bill twice for one answer."],
+      engine:  ["The run raised", "This is a defect, not a refusal. The traceback is below."]
+    };
+    var k = K[res.kind] || K.engine;
+    var h = '<div class="flag bad"><b>' + esc(k[0]) + '</b><br>' +
+            '<span class="err">' + esc(res.error || "") + '</span><br>' +
+            '<span style="color:var(--ink-soft)">' + esc(k[1]) + '</span></div>';
+    if(res.traceback)
+      h += '<details><summary>Traceback</summary><pre>' + esc(res.traceback) + '</pre></details>';
+    return h;
+  }
+
+  function runLive(){
+    var p = build();
+    if(gates(p).refuse.length) return;
+    var dry = $("f_dry").checked;
+    var t0 = Date.now();
+    var tick = setInterval(function(){
+      var el = document.querySelector("#runstate .elapsed");
+      if(el) el.textContent = ((Date.now() - t0)/1000).toFixed(1) + "s";
+    }, 100);
+    var wantsF7 = (p.taxonomies || []).indexOf("F7") >= 0;
+    runState('<span class="spin"></span><span>' +
+      (dry ? "Resolving the wiring" : "Running") +
+      (wantsF7 ? " — re-hashing the authorities first, which is the gate, not overhead"
+               : (dry ? "" : " — one call to extract claims, then one per claim for coverage")) +
+      '</span><span class="elapsed">0.0s</span>');
+    $("run").disabled = true;
+
+    fetch("/api/run", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ packet: p, dry_run: dry,
+                             authorities: $("f_auth").value.trim(),
+                             verify: $("f_verify").value })
+    }).then(function(r){ return r.json(); }).then(function(res){
+      clearInterval(tick);
+      $("run").disabled = false;
+      var secs = (res.elapsed !== undefined ? res.elapsed : (Date.now()-t0)/1000);
+      if(!res.ok){ runState(errBlock(res), "x"); return; }
+      runState('<span>Done in ' + secs + 's. The record is in step 3.</span>', "running");
+      $("f_rec").value = JSON.stringify(res.result, null, 2);
+      readRecord();
+      var box = $("recout");
+      if(box) box.scrollIntoView({behavior: "smooth", block: "nearest"});
+    }).catch(function(err){
+      clearInterval(tick);
+      $("run").disabled = false;
+      runState(errBlock({kind:"engine", error:String(err && err.message || err)}), "x");
+    });
+  }
+
+  function goLive(st){
+    LIVE = st;
+    $("live").style.display = "block";
+    $("live").innerHTML = '<span class="dot"></span>Connected to the engine &mdash; model <code>' +
+      esc(st.model || "") + '</code>, key ' +
+      (st.key && st.key.present ? 'from <code>' + esc(st.key.source) + '</code>'
+                                : '<strong>not found</strong>, so dry runs only') + '.';
+    $("runbox").style.display = "flex";
+    $("cmdwrap").open = false;
+    $("cmdsum").textContent = "The equivalent command, to run it yourself";
+    $("recintro").textContent =
+      "Filled in by the Run button above, or paste a record from anywhere. " +
+      "Nothing here is computed \u2014 every value is read straight out of the engine's own JSON.";
+    if(st.authorities && !$("f_auth").value.trim()) $("f_auth").value = st.authorities;
+    render();
+  }
+
+  /* ---------------- the F7 example ---------------- */
+
+  function loadExample(){
+    on.F7 = true; TAX.forEach(function(t){ if(t !== "F7") on[t] = false; });
+    lsSet("bench.tax", JSON.stringify(Object.keys(on).filter(function(k){ return on[k]; })));
+    $("f_cid").value = "PMC0000001:bibr3";
+    $("f_pmcid").value = "PMC0000001";
+    $("f_pmid").value = "";
+    $("f_sent").value = "Loss-of-function variants in PIEZO2 impair proprioception in affected individuals.";
+    $("f_ctitle").value = "Piezo2 is the principal mechanotransduction channel for proprioception";
+    $("f_cpmid").value = "26551544";
+    $("f_cdoi").value = ""; $("f_cyear").value = ""; $("f_cauth").value = ""; $("f_cjrnl").value = "";
+    $("f_abs").value = "We show that Piezo2 is the principal mechanotransduction channel for proprioception in mice.";
+    $("f_cpmcid").value = "PMC4661126";
+    $("secs").innerHTML = "";
+    addSection({ label:"results", title:"Piezo2 in proprioceptors",
+      text:"Conditional deletion of Piezo2 in sensory neurons abolished rapidly adapting mechanically activated currents in proprioceptors and produced severely uncoordinated body movements and limb positions in mice." });
+    addSection({ label:"methods", title:"Mouse lines",
+      text:"Piezo2 conditional knockout mice were generated by crossing Piezo2 floxed animals to a sensory-neuron Cre driver. All procedures followed institutional animal care guidelines." });
+    paint();
+  }
+
+  /* ---------------- events ---------------- */
+
+  document.addEventListener("click", function(ev){
+    var t = ev.target;
+    if(t.matches("[data-t]")){
+      var k = t.getAttribute("data-t");
+      on[k] = !on[k];
+      lsSet("bench.tax", JSON.stringify(Object.keys(on).filter(function(x){ return on[x]; })));
+      paint(); return;
+    }
+    if(t.matches(".del")){
+      var card = t.closest(".paper");
+      if(card){ card.remove(); bare(); render(); }
+      return;
+    }
+    if(t.id === "addp"){ addPaper(); return; }
+    if(t.id === "addsec"){ addSection(); return; }
+    if(t.id === "loadex"){ loadExample(); return; }
+    if(t.id === "run"){ runLive(); return; }
+    if(t.id === "readrec"){ readRecord(); return; }
+    if(t.id === "clearrec"){ $("f_rec").value = ""; $("recout").innerHTML = ""; return; }
+    if(t.id === "copy" || t.id === "copycmd"){
+      var txt = t.id === "copy" ? JSON.stringify(build(), null, 2) : $("cmd").textContent;
+      var was = t.textContent;
+      if(navigator.clipboard){
+        navigator.clipboard.writeText(txt).then(function(){
+          t.textContent = "Copied";
+          setTimeout(function(){ t.textContent = was; }, 1400);
+        }, function(){ t.textContent = "Copy blocked"; setTimeout(function(){ t.textContent = was; }, 1600); });
+      }
+      return;
+    }
+    if(t.id === "dl"){
+      (async function(){
+        var was = t.textContent;
+        var dl = await (window.claude && window.claude.use ? claude.use("downloads") : null);
+        if(!dl){ t.textContent = "Not available here"; setTimeout(function(){ t.textContent = was; }, 1600); return; }
+        try{
+          await dl.save({ filename:"packet.json", data: JSON.stringify(build(), null, 2) });
+        }catch(err){
+          t.textContent = "Save declined";
+          setTimeout(function(){ t.textContent = was; }, 1600);
+        }
+      })();
+      return;
+    }
+  });
+
+  document.addEventListener("input", function(ev){
+    var t = ev.target;
+    if(!t.matches("input,textarea,select")) return;
+    if(t.id === "f_rec") return;
+    if(t.id === "f_auth") lsSet("bench.auth", t.value);
+    render();
+  });
+  document.addEventListener("change", function(ev){
+    if(ev.target.id === "f_dry" || ev.target.id === "f_verify") render();
+  });
+
+  // ASK, DO NOT ASSUME. Served by sandbox_server this resolves and the page runs
+  // packets; published as an artifact it 404s or is blocked, and the page says
+  // so plainly rather than offering a Run button that cannot work.
+  fetch("/api/status", {cache: "no-store"})
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(st){
+      if(st && st.live) goLive(st);
+      else $("ro").style.display = "block";
+    })
+    .catch(function(){ $("ro").style.display = "block"; });
+
+  var savedAuth = lsGet("bench.auth");
+  if(savedAuth) $("f_auth").value = savedAuth;
+  bare();
+  paint();
+})();
+</script>
