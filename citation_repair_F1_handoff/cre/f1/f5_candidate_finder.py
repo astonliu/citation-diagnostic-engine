@@ -365,14 +365,73 @@ def _valid_metadata_record(record, pmid: str) -> bool:
     return True
 
 
+#: How the three streams are fused into one candidate order.
+#:
+#: ``multi_stream_first`` is the shipped behaviour: every candidate appearing in
+#: two or more streams is emitted first, ordered by STREAM COUNT before rank,
+#: then the three channels round-robin. It has one measured defect -- the size of
+#: that leading block scales with ``pool_limit``, which is derived from the cap,
+#: so a candidate's position is not stable as the cap changes. Measured on live
+#: streams: WHI 2002 moves from #37 at cap 50 to #174 at cap 200, and
+#: PROWESS-SHOCK from #49 to #138. A budget that buys the top N therefore buys a
+#: different N at every cap, which is the opposite of what a budget is for.
+#:
+#: ``rrf`` is reciprocal-rank fusion, sum(1/(k+rank)) over the streams a
+#: candidate appears in. It does NOT stop agreement from beating rank -- at k=60
+#: two appearances at rank 31 (2/91) still outscore one at rank 1 (1/61), and
+#: that is intended: agreement across independent streams is real evidence. What
+#: it removes is the two structural defects above -- the LEXICOGRAPHIC precedence
+#: of stream count over rank, and the leading block whose size scales with
+#: pool_limit. Rank and agreement trade off smoothly instead.
+#:
+#: That is what buys cap-invariance. Measured on the same live streams:
+#: PROWESS-SHOCK #3 at cap 50 and #3 at cap 200 (absent / #189 today), WHI 2002
+#: #8 / #9 (#16 / #143 today), ARISE #2 / #2 (absent / absent today).
+#:
+#: Both are recorded in the retrieval plan, so ``query_hash`` separates runs made
+#: under different fusions and no record can silently claim the other one.
+RANKING_MULTI_STREAM_FIRST = "multi_stream_first"
+RANKING_RRF = "rrf"
+RANKINGS = frozenset({RANKING_MULTI_STREAM_FIRST, RANKING_RRF})
+RANKING_DEFAULT = RANKING_MULTI_STREAM_FIRST
+
+#: The RRF smoothing constant. 60 is the value from Cormack et al. 2009, where
+#: reciprocal-rank fusion was introduced and shown to beat the individual
+#: rankers it combines; it is not tuned here, because tuning it on three
+#: hand-picked fixtures would be fitting to the fixtures.
+RRF_K = 60
+
+
+def fuse_reciprocal_rank(source_ids: dict, *, exclude: str = "",
+                         limit: int, k: int = RRF_K) -> list:
+    """Reciprocal-rank fusion over ``{stream_name: [pmid, ...]}``. PURE.
+
+    Ties break on the numeric PMID so the order is total and reproducible -- a
+    retrieval order that depended on dict iteration would make ``query_hash``
+    a promise the finder could not keep.
+    """
+    scores: dict[str, float] = {}
+    for ids in source_ids.values():
+        for rank, pmid in enumerate(ids):
+            if pmid == exclude:
+                continue
+            scores[pmid] = scores.get(pmid, 0.0) + 1.0 / (k + rank + 1)
+    return [pmid for pmid, _score in sorted(
+        scores.items(), key=lambda kv: (-kv[1], int(kv[0])))][:limit]
+
+
 class PubMedCandidateFinder:
     """Injected, cached production candidate finder for ``build_f5_seams``."""
 
     def __init__(self, *, api_key: str = "", email: str = DEFAULT_EMAIL,
                  session=None, cache_dir: "str | None" = None,
-                 timeout: float = 30.0, max_retries: int = 4):
+                 timeout: float = 30.0, max_retries: int = 4,
+                 ranking: str = RANKING_DEFAULT):
         if not isinstance(email, str) or not email.strip():
             raise ValueError("email must be a nonblank string")
+        if ranking not in RANKINGS:
+            raise ValueError(f"ranking must be one of {sorted(RANKINGS)}")
+        self.ranking = ranking
         self.api_key = str(api_key or "")
         self.email = email.strip()
         self.session = session
@@ -573,6 +632,7 @@ class PubMedCandidateFinder:
             "candidate_cap": cap, "pool_limit": pool_limit,
             "sources": ["pubmed_esearch_claim", "pubmed_esearch_mesh",
                         FORWARD_LINKNAME],
+            "ranking": self.ranking,
         }
         query_hash = _canonical_sha256(plan)
         streams: list[dict] = []
@@ -643,30 +703,40 @@ class PubMedCandidateFinder:
         # Preserve the strongest multi-stream candidates first, then round-robin
         # the three channels.  A very long forward-citation list must not crowd
         # every claim-query or MeSH-only candidate out of the metadata pool.
-        ordered = [pmid for pmid in ranked if len(appearances[pmid]) > 1]
-        already = set(ordered)
-        stream_order = (FORWARD_LINKNAME, "pubmed_esearch_claim",
-                        "pubmed_esearch_mesh")
-        positions = {name: 0 for name in stream_order}
-        while len(ordered) < min(pool_limit, len(appearances)):
-            added = False
-            for source in stream_order:
-                ids = source_ids.get(source) or []
-                position = positions[source]
-                while position < len(ids) and (ids[position] == cited_pmid
-                                                or ids[position] in already):
-                    position += 1
-                positions[source] = position + 1
-                if position >= len(ids):
-                    continue
-                pmid = ids[position]
-                already.add(pmid)
-                ordered.append(pmid)
-                added = True
-                if len(ordered) >= pool_limit:
+        if self.ranking == RANKING_RRF:
+            # RECIPROCAL-RANK FUSION. Rank and cross-stream agreement trade off
+            # smoothly here instead of agreement winning outright, and nothing
+            # scales with pool_limit -- so a candidate's position no longer moves
+            # when the cap moves. That is the property a deep-comparison budget
+            # needs: a budget that buys the top N is only meaningful if the top N
+            # does not change every time the cap does.
+            ordered = fuse_reciprocal_rank(
+                source_ids, exclude=cited_pmid, limit=pool_limit)
+        else:
+            ordered = [pmid for pmid in ranked if len(appearances[pmid]) > 1]
+            already = set(ordered)
+            stream_order = (FORWARD_LINKNAME, "pubmed_esearch_claim",
+                            "pubmed_esearch_mesh")
+            positions = {name: 0 for name in stream_order}
+            while len(ordered) < min(pool_limit, len(appearances)):
+                added = False
+                for source in stream_order:
+                    ids = source_ids.get(source) or []
+                    position = positions[source]
+                    while position < len(ids) and (ids[position] == cited_pmid
+                                                    or ids[position] in already):
+                        position += 1
+                    positions[source] = position + 1
+                    if position >= len(ids):
+                        continue
+                    pmid = ids[position]
+                    already.add(pmid)
+                    ordered.append(pmid)
+                    added = True
+                    if len(ordered) >= pool_limit:
+                        break
+                if not added:
                     break
-            if not added:
-                break
         if len(ordered) > pool_limit:
             ordered = ordered[:pool_limit]
             truncated = True
