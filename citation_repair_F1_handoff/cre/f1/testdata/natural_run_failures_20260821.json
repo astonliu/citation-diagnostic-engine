@@ -1,0 +1,79 @@
+{
+  "schema": "cre_natural_run_regression_cases_v1",
+  "source": "Saved Google Drive production artifacts from seeded random PMCID batches 000-003 on 2026-08-21",
+  "cases": {
+    "punctuation_adjacent_marker": {
+      "citation_id": "PMC10908279:cit0004",
+      "pmcid": "PMC10908279",
+      "old_citance": "4–6",
+      "paragraph_excerpt": "The higher water content and lower fat tissue content in pediatric patients, along with qualitative and quantitative differences in blood-borne drug transport proteins, determine variations in the pharmacokinetics of drugs, including antibiotics.",
+      "marker": "4–6",
+      "rid": "cit0004",
+      "cited_pmid": "36163488",
+      "cited_title": "Associations between salivary cytokines and oral health, age, and sex in healthy children"
+    },
+    "table_reference_cell": {
+      "citation_id": "PMC12903921:ref162",
+      "pmcid": "PMC12903921",
+      "old_citance": "(162)",
+      "cells": [
+        "Formic acid and blends with sodium formate and propionic acid",
+        "Poultry",
+        "Four Salmonella strains",
+        "Blend of formic acid and propionic acid ↓ pathogens"
+      ],
+      "marker": "162",
+      "rid": "ref162",
+      "cited_pmid": "23597100",
+      "cited_title": "Organic acids for control of Salmonella in different feed materials"
+    },
+    "f5_table_hash": {
+      "citation_id": "PMC11624350:bib31",
+      "pmcid": "PMC11624350",
+      "citing_sentence": "MI is defined using the Society for Cardiovascular Angiography & Interventions (SCAI) definition for periprocedural MI and the Fourth Universal Definition for spontaneous MI beyond discharge.30,31",
+      "cited_pmid": "24135581",
+      "cited_title": "Consideration of a new definition of clinically relevant myocardial infarction after coronary revascularization: an expert consensus document from the Society for Cardiovascular Angiography and Interventions (SCAI)",
+      "section_work_id": "39077123",
+      "section_index": 8,
+      "section_label": "table",
+      "original_section_sha256": "a2b5357ee64e7e05130252088a9450dc35180ff02a563cabc810826e6093d0c9",
+      "exact_excerpt": "∙ CK-MB >10x ULN or cTn >70x ULN | \n",
+      "observed_error": "fulltext section 8 content_sha256 does not match stored text"
+    },
+    "empty_claim_extraction": {
+      "citation_id": "PMC13449730:cit0072",
+      "pmcid": "PMC13449730",
+      "citing_sentence": "SARS-CoV-272 and Influenza virus73 exemplify early suppression of IFN signaling, allowing uncontrolled viral replication before host defenses are fully engaged.",
+      "cited_pmid": "35317858",
+      "cited_title": "SARS-CoV-2 NSP13 helicase suppresses interferon signaling by perturbing JAK1 phosphorylation of STAT1",
+      "observed_error": "empty model output",
+      "provider_event": {
+        "stage": "claim_extraction",
+        "model": "claude-opus-5",
+        "max_tokens": 2048,
+        "input_tokens": 1307,
+        "output_tokens": 0,
+        "prompt_chars": 3658,
+        "prompt_sha256": "07a17cf3f42c669ca32583f8cadc3a58eb6bc457d06392964a57c1a833677a46",
+        "output_chars": 0,
+        "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "f4_invalid_dimensions": {
+      "citation_id": "PMC12933143:bib-0018",
+      "pmcid": "PMC12933143",
+      "citing_sentence": "For instance, reduced expression of SMAD1, a key regulator of the TGFβ signaling pathway, has been noted in HM patients with SCL39A5 mutations [13, 18].",
+      "cited_pmid": "34302427",
+      "cited_title": "SLC39A5 Dysfunction Impairs Extracellular Matrix Synthesis in High Myopia Pathogenesis",
+      "observed_error": "dimensions must be an object with exactly the four ladder keys"
+    },
+    "f7_span_binding": {
+      "citation_id": "PMC12351407:zld250171r2",
+      "pmcid": "PMC12351407",
+      "citing_sentence": "2 In this study, patients with DM with cancer had better prognosis than patients with cancer from the general population.",
+      "cited_pmid": "39679826",
+      "cited_title": "Mortality trends and causes of death in myotonic dystrophy type 1 patients from the UK Clinical Practice Research Datalink",
+      "observed_error": "relation_span is not verbatim in its bound section"
+    }
+  }
+}

@@ -178,9 +178,10 @@ def test_parallel_same_sentence_reuses_success_and_preserves_failure_owner(
 
     assert calls == 2
     assert [row["citation_id"] for row in rows] == ["c1", "c2"]
-    assert rows[0]["disposition"] == jr.DISP_QUARANTINE_PARSE
+    assert rows[0]["disposition"] == jr.DISP_HELD_CLAIM_EXTRACTION_FAILURE
+    assert rows[0]["stage_failures"][0]["stage"] == "claim_extraction"
     assert rows[1]["disposition"] == jr.DISP_HELD_FULL_COVERAGE
-    assert manifest["counts"][jr.DISP_QUARANTINE_PARSE] == 1
+    assert manifest["counts"][jr.DISP_HELD_CLAIM_EXTRACTION_FAILURE] == 1
 
 
 @pytest.mark.parametrize("value", [True, False, 0, -1, 33, 1.5, "4"])

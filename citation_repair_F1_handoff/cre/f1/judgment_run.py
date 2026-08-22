@@ -18,7 +18,7 @@ Pipeline per parsed ref:
                                                                      FAIL CLOSED if unknown
   4. assemble_evidence       (cited abstract; review reflist opt;
                               cited_fulltext when the full-text seam is wired)
-  5. extract_atomic_claims + coverage_verdicts (injected LLM)     -> QUARANTINE on ValueError
+  5. extract_atomic_claims + coverage_verdicts (injected LLM)     -> stage-local HOLD on ValueError
                               -- abstract scope (coverage_v2) by default, or the
                               retrieved BODY (coverage_v3, DEC-030/032) when BOTH
                               fetch_fulltext and coverage_judge_v3 are supplied
@@ -80,7 +80,10 @@ from . import marker_scope
 from . import preband_contract as pc
 from .preband_contract import PrebandContractError
 from .judgment_engine import (
+    ClaimSupport,
     DiscriminatorContractError,
+    EntityAssessment,
+    EntityState,
     ProvenanceAssessment,
     ProvenanceState,
     SupportState,
@@ -146,6 +149,7 @@ DISP_EXCLUDED_PREBAND_MISSING = "excluded_preband_disposition_missing"
 DISP_EXCLUDED_PREBAND = "excluded_preband"          # + preband_label carries the F1/F2 label
 DISP_QUARANTINE_PARSE = "quarantine_parse"
 DISP_HELD_NO_CLAIMS = "held_no_atomic_claims"
+DISP_HELD_CLAIM_EXTRACTION_FAILURE = "held_claim_extraction_failure"
 DISP_PREDICTED = "predicted"                        # label == F6
 DISP_HELD_FULL_COVERAGE = "held_full_coverage_pending_F3_F5_F7"  # legacy (discriminators unwired)
 DISP_HELD_INSUFFICIENT = "held_insufficient_evidence"
@@ -169,7 +173,9 @@ _CLEAR_LABELS = frozenset({"cleared", "accurate"})
 
 # Scoreable dispositions get a blind annotation payload; excluded/quarantine do not.
 _SCOREABLE = frozenset(
-    {DISP_PREDICTED, DISP_HELD_FULL_COVERAGE, DISP_HELD_INSUFFICIENT,
+    {DISP_PREDICTED, DISP_HELD_NO_CLAIMS,
+     DISP_HELD_CLAIM_EXTRACTION_FAILURE,
+     DISP_HELD_FULL_COVERAGE, DISP_HELD_INSUFFICIENT,
      DISP_HELD_PENDING_F5_F7, DISP_HELD_PROVENANCE_UNJUDGEABLE,
      DISP_HELD_STRENGTH_UNJUDGEABLE,
      DISP_HELD_UNSUPPORTED_COCITATION_MEMBER,
@@ -179,6 +185,40 @@ _SCOREABLE = frozenset(
      # clear the co-citation fix must never become.
      DISP_HELD_COCITATION_COVERED}
 )
+
+
+def _record_stage_failure(rec: dict, stage: str, exc: ValueError) -> None:
+    """Keep a model/schema failure local to its taxonomy stage."""
+    rec.setdefault("stage_failures", []).append({
+        "stage": stage,
+        "error_type": type(exc).__name__,
+        "message": str(exc),
+    })
+
+
+def _stage_failed(rec: dict, stage: str) -> bool:
+    return any(row.get("stage") == stage
+               for row in rec.get("stage_failures") or [])
+
+
+def _coverage_failure_verdicts(claims: list, evidence: dict, exc: ValueError,
+                               *, fulltext_path: bool) -> list:
+    """Produce honest UNKNOWN coverage rows after a strict reply failure."""
+    rationale = f"coverage stage failed: {type(exc).__name__}: {exc}"
+    if fulltext_path:
+        raw = no_usable_fulltext_dict()
+        raw["rationale"] = rationale
+        return jb.coverage_verdicts(
+            claims, evidence, judge=lambda cl, _ev: [dict(raw) for _ in cl],
+            prompt_version=COVERAGE_PROMPT_VERSION_V3,
+            parser_version=RESPONSE_PARSER_VERSION_V3)
+    return jb.coverage_verdicts(
+        claims, evidence,
+        judge=lambda cl, _ev: [{
+            "established": None,
+            "rationale": rationale,
+            "evidence_span": "",
+        } for _ in cl])
 
 _TRUST_BOUNDARY = (
     "The record hash chain detects mutation only while the manifest chain tip is "
@@ -504,8 +544,9 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
     ``marker_scope``): the claims this reference was actually cited for, and the
     (reference, claim) pairs that were therefore never asked.
 
-    Returns ``(rec, claims, verdicts)``. Raises ValueError (propagated from the
-    strict band parsers) on malformed model output; the caller quarantines it.
+    Returns ``(rec, claims, verdicts)``. A strict model-reply failure is recorded
+    against its stage and converted to an honest hold so the citation pair still
+    reaches human review. Structural/programming errors continue to propagate.
     """
     rec = _new_record(item)
     rec["preband_cleared"] = True
@@ -538,24 +579,25 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
     rec["evidence_usable"] = bool(evidence_is_usable(item["evidence"]))
 
     sentence = item["citing_sentence"]
-    if claims_cache is None:
-        claims = jb.extract_atomic_claims(sentence, extractor=extractor)
-    elif isinstance(claims_cache, _OrderedClaimsCache):
-        if claims_cache_order is None:
-            raise ValueError(
-                "claims_cache_order is required for the ordered claims cache")
-        claims = claims_cache.get_or_extract(
-            sentence, claims_cache_order, extractor)
-    else:
-        if sentence not in claims_cache:
-            # Assigned only on success, so a sentence whose reply is malformed
-            # keeps its per-reference retry and its per-reference quarantine
-            # count -- run_band's rule, reproduced rather than reinvented.
-            claims_cache[sentence] = jb.extract_atomic_claims(
-                sentence, extractor=extractor)
-        # Copy: the cached list is shared by every reference on this citance, and
-        # each record owns its own claims.
-        claims = list(claims_cache[sentence])
+    try:
+        if claims_cache is None:
+            claims = jb.extract_atomic_claims(sentence, extractor=extractor)
+        elif isinstance(claims_cache, _OrderedClaimsCache):
+            if claims_cache_order is None:
+                raise ValueError(
+                    "claims_cache_order is required for the ordered claims cache")
+            claims = claims_cache.get_or_extract(
+                sentence, claims_cache_order, extractor)
+        else:
+            if sentence not in claims_cache:
+                # Assigned only on success. A failed extraction is not reused by
+                # another reference sharing the sentence.
+                claims_cache[sentence] = jb.extract_atomic_claims(
+                    sentence, extractor=extractor)
+            claims = list(claims_cache[sentence])
+    except ValueError as exc:
+        _record_stage_failure(rec, "claim_extraction", exc)
+        claims = []
     # MARKER ATTRIBUTION. A reference is asked only the claims its own marker
     # cluster was cited for; a claim it was never cited for cannot produce a
     # verdict against it, because the question is not put at all. Fails closed to
@@ -573,31 +615,33 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
         item["marker_scope"] = dict(scope_record)
     if scope_counts is not None:
         marker_scope.tally(scope_counts, scope, item.get("citing_pmcid") or "")
-    if not fulltext_path:
-        # Default path, untouched: abstract scope, v2 prompt, no parser-version key.
-        verdicts = jb.coverage_verdicts(claims, item["evidence"],
-                                        judge=coverage_judge)
-    else:
-        fulltext = item["evidence"].get("cited_fulltext")
-        complete = (isinstance(fulltext, dict)
-                    and fulltext.get("retrieval_complete") is True)
-        if complete:
-            verdicts = jb.coverage_verdicts(
-                claims, item["evidence"], judge=coverage_judge_v3,
-                prompt_version=COVERAGE_PROMPT_VERSION_V3,
-                parser_version=RESPONSE_PARSER_VERSION_V3)
+    try:
+        if not fulltext_path:
+            # Default path: abstract scope, v2 prompt, no parser-version key.
+            verdicts = jb.coverage_verdicts(claims, item["evidence"],
+                                            judge=coverage_judge)
         else:
-            # Mirrors the no-usable-abstract gate: deterministic HELD, no model call
-            # of EITHER version. Reached by a partial retrieval and equally by a
-            # reader result that is None or not a dict -- a fetch failure is an
-            # unretrieved body, which is what this branch is for. DEC-032 holds
-            # rather than flags when it cannot argue from silence.
-            rec["fulltext_incomplete_hold"] = True
-            verdicts = jb.coverage_verdicts(
-                claims, item["evidence"],
-                judge=lambda cl, _ev: [no_usable_fulltext_dict() for _ in cl],
-                prompt_version=COVERAGE_PROMPT_VERSION_V3,
-                parser_version=RESPONSE_PARSER_VERSION_V3)
+            fulltext = item["evidence"].get("cited_fulltext")
+            complete = (isinstance(fulltext, dict)
+                        and fulltext.get("retrieval_complete") is True)
+            if complete:
+                verdicts = jb.coverage_verdicts(
+                    claims, item["evidence"], judge=coverage_judge_v3,
+                    prompt_version=COVERAGE_PROMPT_VERSION_V3,
+                    parser_version=RESPONSE_PARSER_VERSION_V3)
+            else:
+                rec["fulltext_incomplete_hold"] = True
+                verdicts = jb.coverage_verdicts(
+                    claims, item["evidence"],
+                    judge=lambda cl, _ev: [no_usable_fulltext_dict() for _ in cl],
+                    prompt_version=COVERAGE_PROMPT_VERSION_V3,
+                    parser_version=RESPONSE_PARSER_VERSION_V3)
+    except ValueError as exc:
+        _record_stage_failure(rec, "coverage", exc)
+        verdicts = _coverage_failure_verdicts(
+            claims, item["evidence"], exc, fulltext_path=fulltext_path)
+
+    if fulltext_path:
         # PROVENANCE MUST STATE THE SCOPE THE ROW WAS ACTUALLY JUDGED AT.
         # _new_record stamps the frozen ABSTRACT version on every record, which is
         # correct on the default path and a FALSE PROVENANCE STAMP here -- the same
@@ -635,8 +679,9 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
                cogroup_covered=()) -> dict:
     """Type a single PRE-BAND-CLEARED item through coverage + the engine.
 
-    Mutates and returns a durable record. Raises ValueError (propagated from the
-    strict band parsers) on malformed model output -- the caller quarantines it.
+    Mutates and returns a durable record. Strict per-stage model/evidence errors
+    become explicit reviewable holds; structural/configuration errors may still
+    propagate to the caller's invariant quarantine.
     ``f4_policy=None`` defaults to a development-mode (non-reportable) F4Policy;
     ``f4_verifier_call_llm`` is threaded into ``refine_support_strength``.
 
@@ -667,8 +712,8 @@ def judge_pair(item: dict, *, extractor, coverage_judge, fetch_abstract,
     entity seam stays empty and F7 is never asserted either way. F7 is
     deliberately NOT gated on support state -- it may coexist with F6/F4, so
     support is context, not a veto. ``make_entity_assessor`` raises ValueError on
-    a configuration or provenance defect, which the caller quarantines exactly
-    like the other strict discriminators.
+    a configuration defect, which remains loud; per-pair provenance/model defects
+    become explicit F7 stage holds.
 
     ``cogroup_covered`` is the CO-CITATION OVERLAY (see
     ``judgment_engine.decide_judgment``): one flag per claim, True when a
@@ -713,8 +758,12 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
         # returned FULL_COVERAGE from a vacuous all([]) and disagreed with it on
         # the same record. The two ends now agree.
         rec["route"] = jb.route(verdicts)
-        rec["disposition"] = DISP_HELD_NO_CLAIMS
-        rec["hold_reasons"] = ["no atomic claims"]
+        if _stage_failed(rec, "claim_extraction"):
+            rec["disposition"] = DISP_HELD_CLAIM_EXTRACTION_FAILURE
+            rec["hold_reasons"] = ["claim extraction stage failed"]
+        else:
+            rec["disposition"] = DISP_HELD_NO_CLAIMS
+            rec["hold_reasons"] = ["no atomic claims"]
         return rec
 
     # Coverage -> typed support. The entity seam stays empty unless the F7 seams
@@ -730,12 +779,36 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
         f4_evidence = dict(item["evidence"])
         f4_evidence["coverage_evidence_scope"] = rec.get(
             "evidence_scope", EVIDENCE_SCOPE_ABSTRACT)
-        support, strength_records = refine_support_strength(
-            claims, coverage_support, f4_evidence,
-            call_llm=discriminator_call_llm,
-            verifier_call_llm=f4_verifier_call_llm,
-            policy=policy)
-        rec["strength_records"] = list(strength_records)
+        try:
+            support, strength_records = refine_support_strength(
+                claims, coverage_support, f4_evidence,
+                call_llm=discriminator_call_llm,
+                verifier_call_llm=f4_verifier_call_llm,
+                policy=policy)
+            rec["strength_records"] = list(strength_records)
+        except ValueError as exc:
+            _record_stage_failure(rec, "F4", exc)
+            support = tuple(
+                ClaimSupport(
+                    row.claim_index,
+                    SupportState.UNJUDGEABLE,
+                    (f"{row.rationale} | " if row.rationale else "")
+                    + f"F4 stage failed: {type(exc).__name__}: {exc}",
+                    row.evidence_spans,
+                ) if row.state is SupportState.SUPPORTED else row
+                for row in coverage_support)
+            coverage_scope = rec.get("evidence_scope", EVIDENCE_SCOPE_ABSTRACT)
+            rec["strength_records"] = [{
+                "claim_index": row.claim_index,
+                "assessed": False,
+                "derived": "UNJUDGEABLE",
+                "reason": "stage_failure",
+                "error": str(exc),
+                "f4_evidence_scope": "abstract",
+                "coverage_evidence_scope": coverage_scope,
+                "evidence_scopes_match": coverage_scope == "abstract",
+            } for row in coverage_support
+                if row.state is SupportState.SUPPORTED]
 
     all_supported = bool(support) and all(
         s.state is SupportState.SUPPORTED for s in support)
@@ -754,7 +827,13 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
                 cited_pmid=item["cited_pmid"], cited_pmcid=cited_pmcid,
                 cited_is_review=item.get("cited_is_review"),
                 policy=f3_policy or DEFAULT_F3_POLICY)
-            provenance = assessor(claims, support)
+            try:
+                provenance = assessor(claims, support)
+            except ValueError as exc:
+                _record_stage_failure(rec, "F3", exc)
+                provenance = ProvenanceAssessment(
+                    ProvenanceState.UNJUDGEABLE,
+                    rationale=f"F3 stage failed: {type(exc).__name__}: {exc}")
         else:
             provenance = ProvenanceAssessment(ProvenanceState.UNJUDGEABLE)
         rec["provenance"] = {
@@ -768,51 +847,75 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
     # F3. When BOTH f5_seams and f5_evidence_builder are supplied, decide_f5
     # produces the TemporalAssessment (and the per-claim F5 records); otherwise the
     # temporal seam holds UNJUDGEABLE (unevaluated -- never a fabricated confident
-    # negative). decide_f5 raises ValueError on a malformed seam payload / evidence,
-    # which the caller quarantines exactly like the other strict discriminators.
+    # negative). A malformed per-pair seam payload/evidence becomes an explicit
+    # F5 stage hold while preserving the rest of the judged pair.
     temporal = TemporalAssessment(TemporalState.UNJUDGEABLE)
     if f5_seams is not None and f5_evidence_builder is not None:
-        f5_evidence = f5_evidence_builder(item)
-        effective_f5_policy = (
-            f5_policy if f5_policy is not None else F5Policy())
-        temporal, f5_records = decide_f5(
-            claims, support, f5_evidence,
-            policy=effective_f5_policy,
-            **f5_seams)
-        if effective_f5_policy.mode == "deployment":
-            from .f5_evidence_store import source_packet_from_dict
-            from .f5_supersession import validate_f5_record
-            packet_rows = getattr(
-                f5_seams.get("fetch_comparability_source"),
-                "source_packet_log", None)
-            if not isinstance(packet_rows, list):
-                raise ValueError(
-                    "deployment F5 requires a source-packet replay log")
-            packet_map = {}
-            for packet_row in packet_rows:
-                packet = source_packet_from_dict(packet_row)
-                packet_map[packet.packet_sha256] = packet_row
-            for f5_record in f5_records:
-                validate_f5_record(
-                    f5_record, effective_f5_policy, packet_map)
-        rec["f5_records"] = list(f5_records)
+        try:
+            f5_evidence = f5_evidence_builder(item)
+            effective_f5_policy = (
+                f5_policy if f5_policy is not None else F5Policy())
+            temporal, f5_records = decide_f5(
+                claims, support, f5_evidence,
+                policy=effective_f5_policy,
+                **f5_seams)
+            if effective_f5_policy.mode == "deployment":
+                from .f5_evidence_store import source_packet_from_dict
+                from .f5_supersession import validate_f5_record
+                packet_rows = getattr(
+                    f5_seams.get("fetch_comparability_source"),
+                    "source_packet_log", None)
+                if not isinstance(packet_rows, list):
+                    raise ValueError(
+                        "deployment F5 requires a source-packet replay log")
+                packet_map = {}
+                for packet_row in packet_rows:
+                    packet = source_packet_from_dict(packet_row)
+                    packet_map[packet.packet_sha256] = packet_row
+                for f5_record in f5_records:
+                    validate_f5_record(
+                        f5_record, effective_f5_policy, packet_map)
+            rec["f5_records"] = list(f5_records)
+        except ValueError as exc:
+            _record_stage_failure(rec, "F5", exc)
+            temporal = TemporalAssessment(
+                TemporalState.UNJUDGEABLE,
+                rationale=f"F5 stage failed: {type(exc).__name__}: {exc}")
 
     # F7 (wrong entity): wired through injected seams like F3/F5. Deliberately NOT
     # gated on support state -- an entity mismatch may coexist with F6/F4, so
     # support is context, not a veto. make_entity_assessor raises ValueError on a
-    # configuration or provenance defect; that propagates to the caller's
-    # quarantine rather than being swallowed into a fabricated negative.
+    # configuration defect (which stays loud) or a per-pair provenance/model
+    # defect (which becomes an explicit F7 stage hold, never a negative).
     entities: tuple = ()
     if f7_seams is not None and f7_evidence_builder is not None:
-        evidence_context = f7_evidence_builder(item)
-        entity_assessor = make_entity_assessor(
-            **f7_seams,
-            evidence_context=evidence_context,
-            policy=f7_policy if f7_policy is not None else F7Policy())
-        entities = tuple(entity_assessor(claims))
-        for record in entity_assessor.records:
-            validate_f7_record(record, evidence_context)
-        rec["f7_records"] = list(entity_assessor.records)
+        try:
+            evidence_context = f7_evidence_builder(item)
+        except ValueError as exc:
+            _record_stage_failure(rec, "F7", exc)
+            entities = tuple(EntityAssessment(
+                index, EntityState.UNJUDGEABLE,
+                rationale=f"F7 stage failed: {type(exc).__name__}: {exc}")
+                for index in range(len(claims)))
+        else:
+            # Configuration is validated outside the per-pair failure boundary.
+            # A broken seam bundle must remain loud rather than converting every
+            # row in a run into the same expensive hold.
+            entity_assessor = make_entity_assessor(
+                **f7_seams,
+                evidence_context=evidence_context,
+                policy=f7_policy if f7_policy is not None else F7Policy())
+            try:
+                entities = tuple(entity_assessor(claims))
+                for record in entity_assessor.records:
+                    validate_f7_record(record, evidence_context)
+                rec["f7_records"] = list(entity_assessor.records)
+            except ValueError as exc:
+                _record_stage_failure(rec, "F7", exc)
+                entities = tuple(EntityAssessment(
+                    index, EntityState.UNJUDGEABLE,
+                    rationale=f"F7 stage failed: {type(exc).__name__}: {exc}")
+                    for index in range(len(claims)))
 
     own_buckets = jb.item_buckets(item)
     effective_cogroup_covered = tuple(
@@ -825,6 +928,10 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
         temporal=temporal, cogroup_covered=effective_cogroup_covered)
     rec["findings"] = list(decision.findings)
     rec["hold_reasons"] = list(decision.hold_reasons)
+    for failure in rec.get("stage_failures") or []:
+        reason = f"{failure['stage']} stage failed"
+        if reason not in rec["hold_reasons"]:
+            rec["hold_reasons"].append(reason)
 
     solo_route = jb.route(verdicts)
     member_route = (rec.get("cocitation") or {}).get("member_route")
@@ -1599,7 +1706,8 @@ class _OrderedClaimsCache:
     may call the extractor.  A successful result is reused by every later
     reference, exactly like the former serial ``dict`` cache.  A failed attempt
     is *not* cached: its owner raises and the next reference gets the retry,
-    preserving the existing per-reference quarantine rule.
+    preserving per-reference retry ownership; the caller records the exhausted
+    extraction as a reviewable stage hold.
 
     Different citing sentences may extract concurrently.  That is the useful
     parallelism; allowing two calls for the same sentence would spend more,
@@ -1963,6 +2071,8 @@ def run_natural_judgment(
     f4_outcomes: dict[str, int] = {}
     f4_hold_reasons: dict[str, int] = {}
     f4_scope_pairs: dict[str, int] = {}
+    stage_failure_counts: dict[str, int] = {}
+    stage_failure_records = 0
     # Full-text retrieval funnel. Separate from `counts` for the same reason
     # f4_counts is: `counts` sums to the record total and admits no statistics.
     fulltext_counts = {"no_usable_fulltext": 0}
@@ -2030,8 +2140,15 @@ def run_natural_judgment(
 
     def emit(rec: dict) -> None:
         nonlocal prev_link, chain_count, sentence_partition_affected_records
+        nonlocal stage_failure_records
         f5_records_all.extend(rec.get("f5_records") or [])
         f7_records_all.extend(rec.get("f7_records") or [])
+        stage_failures = rec.get("stage_failures") or []
+        if stage_failures:
+            stage_failure_records += 1
+        for failure in stage_failures:
+            stage = str(failure.get("stage") or "unknown")
+            stage_failure_counts[stage] = stage_failure_counts.get(stage, 0) + 1
         failures = rec.get("sentence_partition_failures") or []
         if failures:
             sentence_partition_affected_records += 1
@@ -2724,6 +2841,14 @@ def run_natural_judgment(
         "accounting_ok": total_records == refs_seen,
         "scoreable_records": scoreable_records,
         "annotation_queue_rows": manifest_queue_rows,
+        "stage_failures": {
+            "affected_reference_records": stage_failure_records,
+            "by_stage": dict(sorted(stage_failure_counts.items())),
+            "note": (
+                "Per-stage model/evidence failures are held and human-queued; "
+                "they do not erase the rest of the citation-pair record."
+            ),
+        },
         # CO-CITATION. A sentence citing eight references cites them
         # COLLECTIVELY; judging each alone against the whole sentence made F6
         # fire by construction on every member. Fixing that CHANGES THE UNIT OF

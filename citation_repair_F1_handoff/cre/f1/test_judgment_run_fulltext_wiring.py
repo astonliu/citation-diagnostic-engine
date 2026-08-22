@@ -268,13 +268,16 @@ def test_the_record_count_invariant_survives_the_new_tally(tmp_path, monkeypatch
     assert manifest["chain_record_count"] == len(rows)
 
 
-def test_a_malformed_v3_reply_quarantines_the_pair_not_the_run(tmp_path,
-                                                               monkeypatch):
-    """The strict parser reaches this layer intact: a reply that is not one bare
-    JSON object quarantines its pair through the existing ValueError path."""
+def test_a_malformed_v3_reply_holds_the_stage_and_queues_the_pair(tmp_path,
+                                                                  monkeypatch):
+    """A strict reply failure is local to coverage, not the whole pair."""
     manifest, rows = wired(tmp_path, monkeypatch, reply="```json\n{}\n```")
-    assert rows[0]["disposition"] == jr.DISP_QUARANTINE_PARSE
-    assert manifest["counts"][jr.DISP_QUARANTINE_PARSE] == 1
+    assert rows[0]["disposition"] == jr.DISP_HELD_INSUFFICIENT
+    assert rows[0]["coverage_verdicts"][0]["established"] is None
+    assert rows[0]["stage_failures"][0]["stage"] == "coverage"
+    assert manifest["counts"][jr.DISP_HELD_INSUFFICIENT] == 1
+    queue = tmp_path / "out" / "judgment_band_annotation_queue.jsonl"
+    assert len(queue.read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_a_claim_less_reference_still_routes_no_claims_on_this_path(tmp_path,

@@ -136,15 +136,26 @@ def adapt_fulltext_sections(fulltext: Any, *, work_id: str) -> FullTextAdaptatio
         label = section.get("label")
         title = _normalize_text(section.get("title", ""),
                                 f"sections[{index}].title") or ""
-        text = _normalize_text(section.get("text"), f"sections[{index}].text")
+        source_text = section.get("text")
         content_hash = section.get("content_sha256")
-        if not isinstance(label, str) or not label.strip() or text is None:
+        if (not isinstance(label, str) or not label.strip()
+                or not isinstance(source_text, str) or not source_text.strip()):
             raise ValueError(f"fulltext section {index} has invalid label/text")
-        if not isinstance(content_hash, str) or content_hash != _sha256_text(text):
+        # Validate the producer's binding BEFORE applying F5's canonicalization.
+        # Comparing its source hash to normalized text rejected valid table rows
+        # whenever XML rendering left trailing cell whitespace.
+        if (not isinstance(content_hash, str)
+                or content_hash != _sha256_text(source_text)):
             raise ValueError(
                 f"fulltext section {index} content_sha256 does not match stored text")
+        text = _normalize_text(source_text, f"sections[{index}].text")
+        if text is None:  # guarded above; retained as an explicit invariant
+            raise ValueError(f"fulltext section {index} has invalid label/text")
+        # The adapted packet owns normalized text, so its hash must bind that
+        # exact representation rather than reusing the source representation's
+        # digest.
         row = {"label": label, "title": title, "text": text,
-               "content_sha256": content_hash}
+               "content_sha256": _sha256_text(text)}
         preserved.append(row)
         normalized_label = label.strip().casefold()
         heading = f"[{normalized_label}]" + (f" {title}" if title else "")

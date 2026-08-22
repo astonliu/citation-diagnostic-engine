@@ -13,6 +13,9 @@ import time
 
 NOTEBOOK = (Path(__file__).resolve().parents[3]
             / "notebooks" / "CRE_MASS_ERROR_HUNT.ipynb")
+REAL_FAILURES = json.loads((
+    Path(__file__).with_name("testdata") / "natural_run_failures_20260821.json"
+).read_text(encoding="utf-8"))["cases"]
 
 
 def _notebook():
@@ -102,6 +105,7 @@ def test_cached_provider_adapter_warms_once_then_allows_overlap():
         "time": time,
         "MODEL": "test-model",
         "BAND2_MAX_TOKENS": 64,
+        "BAND2_RETRY_MAX_TOKENS": 128,
         "PROMPT_CACHE_TTL": "5m",
         "MODEL_CALL_EVENTS_PATH": Path("unused.jsonl"),
         "sha256_bytes": lambda data: hashlib.sha256(data).hexdigest(),
@@ -129,3 +133,16 @@ def test_cached_provider_adapter_warms_once_then_allows_overlap():
     sent = [join_text_content(row["messages"][0]["content"])
             for row in requests_seen]
     assert sorted(sent) == sorted(prompts)
+
+
+def test_provider_adapter_covers_the_real_empty_claim_response():
+    source = _cell_containing("def make_logged_anthropic_call")
+    event = REAL_FAILURES["empty_claim_extraction"]["provider_event"]
+    assert event["stage"] == "claim_extraction"
+    assert event["output_chars"] == 0
+    assert event["output_sha256"] == hashlib.sha256(b"").hexdigest()
+    assert '"empty_response"' in source
+    assert '"max_tokens"' in source
+    assert "BAND2_RETRY_MAX_TOKENS" in source
+    assert '"stop_reason"' in source
+    assert '"content_types"' in source

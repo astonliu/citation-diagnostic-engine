@@ -22,6 +22,7 @@ except ImportError:                               # pragma: no cover
     _PARSER = lambda p: etree.parse(p)            # noqa: E731
 
 from . import marker_scope
+from . import sentence_spans as sentence_segmenter
 from .schema import Reference, ClaimedRef
 from .titlefurniture import excise_leading_furniture
 
@@ -216,16 +217,11 @@ def _citation_node(ref):
 # (one with no nested block) so a <td> wrapping a <p> isn't counted twice.
 _BLOCK_TAGS = {"p", "title", "caption", "td", "th", "list-item", "disp-quote"}
 
-# Split into sentences while keeping each sentence's start offset (finditer).
-#
-# KNOWN DEFECT, logged not fixed (found while measuring marker clusters,
-# 2026-08-16; out of scope for that change and recorded so it is not re-found).
-# This splits on the period in "et al.", so an author-year document yields
-# sentence fragments like ", 2006)." -- and that fragment becomes the citance
-# every reference on it is judged against. ``sentence_spans.py`` protects
-# "Fig.", "Dr." and single-letter initials; neither guards "et al.". It affects
-# the three author-year documents of corpus_frozen_v1 (PMC12967000,
-# PMC13219232, PMC13295838) and no numeric-marker document.
+# Kept as a public compatibility constant for callers that imported it. Sentence
+# construction no longer uses this non-tiling regex; :func:`_sentence_spans`
+# delegates ordinary prose boundaries to ``sentence_spans`` and adds the one
+# parser-specific fact that module cannot know: exact JATS bibliography-marker
+# positions.
 _SENT_RE = re.compile(r"[^.!?]*[.!?]+(?:\s+|$)|[^.!?]+$")
 
 
@@ -255,51 +251,95 @@ def _serialize_with_markers(block):
     return "".join(parts), markers
 
 
-def _sentence_spans(text: str, diagnostics: list[dict] | None = None):
-    """Return the legacy sentence spans and attest whether they tile ``text``.
+def _marker_attached_boundaries(text: str, markers) -> list[int]:
+    """Boundaries after citations rendered immediately after a terminator.
 
-    The regex is intentionally unchanged: correcting segmentation changes the
-    citing sentence that governed existing F6 labels.  The additive diagnostic
-    turns any silent deletion into a durable, countable event without moving a
-    boundary or verdict.
+    PMC commonly serializes ``Sentence.<xref>1</xref> Next`` with no whitespace
+    between the period and marker. A prose-only segmenter cannot distinguish the
+    marker's digits from ordinary text, but this parser owns their exact offsets.
+    Include the complete adjacent marker cluster in the sentence it cites, then
+    split at the whitespace before the next sentence.
     """
+    boundaries: list[int] = []
+    for cluster in marker_scope.cluster_markers(text, markers):
+        first = markers[cluster[0]]
+        last = markers[cluster[-1]]
+        marker_start = first[0]
+        marker_end = last[0] + len(last[2] or "")
+
+        # Permit the wrapper punctuation that may sit between a sentence period
+        # and the first marker: ``.(1)`` / ``.[1]``. The period must be real and
+        # immediately adjacent modulo those wrappers.
+        prefix = text[:marker_start]
+        match = re.search(r"[.!?][\s\(\[\{]*$", prefix)
+        if match is None:
+            continue
+
+        # Consume closing wrappers, then require whitespace and a plausible next
+        # sentence. End-of-block also closes the sentence. We intentionally do
+        # not infer a boundary when prose continues immediately after the marker.
+        cursor = marker_end
+        while cursor < len(text) and text[cursor] in ")]}":
+            cursor += 1
+        if cursor == len(text):
+            boundaries.append(cursor)
+            continue
+        if not text[cursor].isspace():
+            continue
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        if cursor == len(text) or text[cursor].isupper() or text[cursor] in "\"'([“":
+            boundaries.append(cursor)
+    return boundaries
+
+
+def _sentence_spans(text: str, diagnostics: list[dict] | None = None,
+                    markers=(), *, whole_block: bool = False):
+    """Return deterministic spans that cover every character of ``text``.
+
+    Ordinary boundaries use the shared conservative segmenter. JATS-aware
+    boundaries additionally keep punctuation-adjacent bibliography markers with
+    the sentence they cite. Table rows are indivisible evidence units: their
+    claim-bearing cells and reference cell must travel together.
+    """
+    if not text:
+        return []
+    if whole_block:
+        return [(0, len(text), text)] if text.strip() else []
+
+    boundaries: set[int] = set(_marker_attached_boundaries(text, markers))
+    cursor = 0
+    for piece in sentence_segmenter.split_sentences(text):
+        start = text.find(piece, cursor)
+        if start < 0:  # defensive: the shared segmenter promises substrings
+            continue
+        end = start + len(piece)
+        boundaries.add(end)
+        cursor = end
+    boundaries.add(len(text))
+
     spans = []
-    for m in _SENT_RE.finditer(text):
-        if m.group().strip():
-            spans.append((m.start(), m.end(), m.group()))
-    try:
-        cursor = 0
-        for start, end, _segment in spans:
-            assert start == cursor
-            assert end >= start
-            cursor = end
-        assert cursor == len(text)
-    except AssertionError:
-        uncovered: list[list[int]] = []
-        cursor = 0
-        for start, end, _segment in spans:
-            if start > cursor:
-                uncovered.append([cursor, start])
-            cursor = max(cursor, end)
-        if cursor < len(text):
-            uncovered.append([cursor, len(text)])
-        diagnostic = {
-            "kind": "sentence_spans_do_not_tile_input",
-            "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            "text_length": len(text),
-            "span_count": len(spans),
-            "covered_chars": sum(end - start for start, end, _ in spans),
-            "uncovered_chars": sum(end - start for start, end in uncovered),
-            "uncovered_ranges": uncovered,
-        }
-        if diagnostics is not None:
-            diagnostics.append(diagnostic)
-        print(
-            "[sentence-partition-gap] "
-            f"sha256={diagnostic['text_sha256']} "
-            f"uncovered_chars={diagnostic['uncovered_chars']}",
-            file=sys.stderr,
-        )
+    start = 0
+    for end in sorted(boundaries):
+        if end <= start:
+            continue
+        # Whitespace between ordinary sentences belongs to the preceding span;
+        # marker-aware boundaries already point at the next non-whitespace byte.
+        while end < len(text) and text[end].isspace():
+            end += 1
+        segment = text[start:end]
+        if segment.strip():
+            spans.append((start, end, segment))
+        start = end
+    if start < len(text):
+        segment = text[start:]
+        if segment.strip():
+            spans.append((start, len(text), segment))
+
+    # This is now an invariant rather than a diagnostic-only observation.
+    if spans:
+        assert spans[0][0] == 0 and spans[-1][1] == len(text)
+        assert all(left[1] == right[0] for left, right in zip(spans, spans[1:]))
     return spans
 
 
@@ -344,6 +384,22 @@ def _source_section(block, parents) -> str:
     return " > ".join(reversed(titles))
 
 
+def _serialize_table_row(row):
+    """Serialize one table row with explicit cell separators and marker offsets."""
+    parts: list[str] = []
+    markers: list[tuple[int, list[str], str]] = []
+    cells = [child for child in row if _localname(child.tag) in {"td", "th"}]
+    for index, cell in enumerate(cells):
+        if index:
+            parts.append(" | ")
+        cell_text, cell_markers = _serialize_with_markers(cell)
+        offset = sum(len(part) for part in parts)
+        parts.append(cell_text)
+        markers.extend((offset + pos, rids, marker)
+                       for pos, rids, marker in cell_markers)
+    return "".join(parts), markers
+
+
 def _innermost_blocks(root):
     """Sentence-bearing blocks with no nested block, serialized once each.
 
@@ -353,7 +409,27 @@ def _innermost_blocks(root):
     twice."""
     parents = {child: parent for parent in root.iter() for child in parent}
     for block in root.iter():
-        if _localname(block.tag) not in _BLOCK_TAGS:
+        tag = _localname(block.tag)
+        # A reference in a table normally occupies its own final cell. Judging
+        # that cell alone manufactured citances such as ``(162)``. A row is the
+        # smallest unit that retains the claim and reference together. Yield in
+        # the same document-order traversal as prose so first-citance-wins does
+        # not change merely because an article contains a table.
+        if tag == "tr":
+            text, markers = _serialize_table_row(block)
+            if markers:
+                yield text, markers, _source_section(block, parents), "table_row"
+            continue
+        if tag not in _BLOCK_TAGS:
+            continue
+        node = block
+        inside_table_cell = False
+        while node is not None:
+            if _localname(node.tag) in {"td", "th"}:
+                inside_table_cell = True
+                break
+            node = parents.get(node)
+        if inside_table_cell:
             continue
         nested = 0
         for d in block.iter():
@@ -365,7 +441,7 @@ def _innermost_blocks(root):
             continue
         text, markers = _serialize_with_markers(block)
         if markers:
-            yield text, markers, _source_section(block, parents)
+            yield text, markers, _source_section(block, parents), "prose"
 
 
 def _positional_numbering(serialized, refs_by_id, ordered_ref_ids) -> dict:
@@ -387,7 +463,7 @@ def _positional_numbering(serialized, refs_by_id, ordered_ref_ids) -> dict:
     if not by_ordinal:
         return {}
     attested = 0
-    for _text, markers, _section in serialized:
+    for _text, markers, _section, _kind in serialized:
         for _pos, rids, mtext in markers:
             label = mtext.strip()
             if not label.isdigit() or len(rids) != 1:
@@ -556,13 +632,15 @@ def link_citances(root, refs_by_id: dict, ordered_ref_ids=()) -> None:
     # before any sentence is clustered -- same all-or-nothing discipline as
     # _positional_numbering, and for the same reason.
     style = marker_scope.detect_citation_style(
-        [mtext for _text, markers, _section in serialized
+        [mtext for _text, markers, _section, _kind in serialized
          for _pos, _rids, mtext in markers])
     clustering = style == marker_scope.CITATION_STYLE_NUMERIC
     group_seq = 0
-    for text, markers, source_section in serialized:
+    for text, markers, source_section, block_kind in serialized:
         partition_failures: list[dict] = []
-        spans = _sentence_spans(text, partition_failures)
+        spans = _sentence_spans(
+            text, partition_failures, markers,
+            whole_block=block_kind == "table_row")
         if partition_failures:
             # Attach the same immutable facts to every reference mentioned in
             # the affected block.  The list is copied per reference below so

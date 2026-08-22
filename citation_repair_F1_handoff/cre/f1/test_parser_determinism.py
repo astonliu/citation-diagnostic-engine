@@ -7,10 +7,18 @@ behaviours are preserved.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from lxml import etree
 
 from cre.f1.parser import (
     _SENT_RE, _authors_from, _sentence_spans, _surnames_under, parse_pmc_xml)
+
+
+_REAL_FAILURES = json.loads((
+    Path(__file__).with_name("testdata") / "natural_run_failures_20260821.json"
+).read_text(encoding="utf-8"))["cases"]
 
 
 _FOUR_AUTHOR = (
@@ -79,32 +87,63 @@ def test_parse_pmc_xml_multi_author_deterministic(tmp_path):
     assert runs == {("Phelps", "Huang", "Hoffman", "Selin")}
 
 
-def test_legacy_sentence_regex_is_unchanged_and_partition_gap_is_counted(capsys):
+def test_sentence_spans_tile_decimal_prose_without_losing_prefix(capsys):
     text = "Dose was 0.5 mg. Next."
     diagnostics = []
     spans = _sentence_spans(text, diagnostics)
+    # The exported compatibility regex remains stable, but is no longer used to
+    # construct citances because it silently dropped the prefix before ``5 mg``.
     assert _SENT_RE.pattern == r"[^.!?]*[.!?]+(?:\s+|$)|[^.!?]+$"
-    assert spans == [(11, 17, "5 mg. "), (17, 22, "Next.")]
-    assert diagnostics == [{
-        "kind": "sentence_spans_do_not_tile_input",
-        "text_sha256": "96cae425479f8888f234ef1a6ee52bfeee7cd3e1590329f5923703f16de14fb0",
-        "text_length": 22, "span_count": 2, "covered_chars": 11,
-        "uncovered_chars": 11, "uncovered_ranges": [[0, 11]],
-    }]
-    assert "sentence-partition-gap" in capsys.readouterr().err
+    assert spans == [(0, 17, "Dose was 0.5 mg. "), (17, 22, "Next.")]
+    assert diagnostics == []
+    assert capsys.readouterr().err == ""
 
 
-def test_parser_attaches_partition_gap_to_affected_reference(tmp_path):
+def test_real_pmc10908279_marker_keeps_complete_sentence(tmp_path):
+    case = _REAL_FAILURES["punctuation_adjacent_marker"]
+    doc = f"""<article><body><p>{case['paragraph_excerpt']}<xref
+    ref-type='bibr' rid='{case['rid']}'>{case['marker']}</xref></p></body>
+    <back><ref-list><ref id='{case['rid']}'><element-citation>
+    <article-title>{case['cited_title']}</article-title>
+    <pub-id pub-id-type='pmid'>{case['cited_pmid']}</pub-id>
+    </element-citation></ref></ref-list></back></article>""".encode()
+    path = tmp_path / f"{case['pmcid']}.xml"
+    path.write_bytes(doc)
+    ref = parse_pmc_xml(str(path), source_pmcid=case["pmcid"])[0]
+    assert ref.citation_id == case["citation_id"]
+    assert ref.citance == case["paragraph_excerpt"] + case["marker"]
+    assert ref.citance != case["old_citance"]
+    assert ref.citance_sentence_partition_failures == []
+
+
+def test_real_pmc12903921_table_reference_keeps_entire_row(tmp_path):
+    case = _REAL_FAILURES["table_reference_cell"]
+    cells = "".join(f"<td>{value}</td>" for value in case["cells"])
+    doc = f"""<article><body><sec><title>Dietary organic acids (DOAs)</title>
+    <table-wrap><table><tbody><tr>{cells}<td>(<xref ref-type='bibr'
+    rid='{case['rid']}'>{case['marker']}</xref>)</td></tr></tbody></table>
+    </table-wrap></sec></body><back><ref-list><ref id='{case['rid']}'>
+    <element-citation><article-title>{case['cited_title']}</article-title>
+    <pub-id pub-id-type='pmid'>{case['cited_pmid']}</pub-id>
+    </element-citation></ref></ref-list></back></article>""".encode()
+    path = tmp_path / f"{case['pmcid']}.xml"
+    path.write_bytes(doc)
+    ref = parse_pmc_xml(str(path), source_pmcid=case["pmcid"])[0]
+    assert ref.citation_id == case["citation_id"]
+    assert ref.citance == " | ".join(case["cells"] + [f"({case['marker']})"])
+    assert ref.citance != case["old_citance"]
+    assert any(ch.isalpha() for ch in ref.citance)
+
+
+def test_parser_no_longer_attaches_partition_gap_to_reference(tmp_path):
     doc = b"""<article><body><p>Dose was 0.5 mg <xref ref-type='bibr' rid='r1'>1</xref>.</p></body>
     <back><ref-list><ref id='r1'><element-citation><article-title>A study</article-title>
     <pub-id pub-id-type='pmid'>111</pub-id></element-citation></ref></ref-list></back></article>"""
     path = tmp_path / "PMC1.xml"
     path.write_bytes(doc)
     ref = parse_pmc_xml(str(path))[0]
-    assert ref.citance_sentence_partition_failures
-    failure = ref.citance_sentence_partition_failures[0]
-    assert failure["kind"] == "sentence_spans_do_not_tile_input"
-    assert failure["uncovered_chars"] > 0
+    assert ref.citance == "Dose was 0.5 mg 1."
+    assert ref.citance_sentence_partition_failures == []
 
 
 def test_two_consecutive_rebands_byte_identical(tmp_path):

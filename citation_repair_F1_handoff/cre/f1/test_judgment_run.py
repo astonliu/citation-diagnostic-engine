@@ -10,6 +10,7 @@ preservation).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +18,11 @@ from . import judgment_run as jr
 from . import preband_contract as pc
 from .f4_strength import F4Policy
 from .schema import Reference, ClaimedRef
+
+
+_REAL_FAILURES = json.loads((
+    Path(__file__).with_name("testdata") / "natural_run_failures_20260821.json"
+).read_text(encoding="utf-8"))["cases"]
 
 
 # --------------------------------------------------------------------------
@@ -92,7 +98,7 @@ CLEARED = {"c": "cleared"}
 # the three live coverage routes
 # --------------------------------------------------------------------------
 def test_coverage_gap_is_terminal_f6(tmp_path, monkeypatch):
-    _, rows = run(
+    manifest, rows = run(
         tmp_path, [make_ref("c")],
         extractor=extractor_of("Drug X reduces Y", "Drug X cures Z"),
         coverage_judge=judge_established(False, True),
@@ -138,16 +144,70 @@ def test_no_atomic_claims_is_held(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 # fail-closed behaviors
 # --------------------------------------------------------------------------
-def test_malformed_model_output_quarantines_and_continues(tmp_path, monkeypatch):
-    def bad_extractor(_s):
-        raise ValueError("```json fence / strict-schema failure")
+def test_malformed_claim_output_holds_and_keeps_pair_reviewable(tmp_path,
+                                                                 monkeypatch):
+    case = _REAL_FAILURES["empty_claim_extraction"]
 
-    _, rows = run(
-        tmp_path, [make_ref("c"), make_ref("c")],   # two pairs; first bad
+    def bad_extractor(_s):
+        raise ValueError(case["observed_error"])
+
+    manifest, rows = run(
+        tmp_path, [make_ref(
+            case["citation_id"], citance=case["citing_sentence"],
+            pmid=case["cited_pmid"], src=case["pmcid"])],
         extractor=bad_extractor, coverage_judge=judge_established(),
-        disposition={"c": "cleared"}, monkeypatch=monkeypatch)
-    assert all(r["disposition"] == jr.DISP_QUARANTINE_PARSE for r in rows)
-    assert "parse_error" in rows[0] and rows[0]["parse_error"]
+        disposition={case["citation_id"]: "cleared"}, monkeypatch=monkeypatch)
+    assert all(r["disposition"] == jr.DISP_HELD_CLAIM_EXTRACTION_FAILURE
+               for r in rows)
+    assert all(r["stage_failures"] == [{
+        "stage": "claim_extraction",
+        "error_type": "ValueError",
+        "message": case["observed_error"],
+    }] for r in rows)
+    queue = tmp_path / "out" / "judgment_band_annotation_queue.jsonl"
+    assert len(queue.read_text(encoding="utf-8").splitlines()) == 1
+    assert manifest["stage_failures"] == {
+        "affected_reference_records": 1,
+        "by_stage": {"claim_extraction": 1},
+        "note": (
+            "Per-stage model/evidence failures are held and human-queued; "
+            "they do not erase the rest of the citation-pair record."),
+    }
+
+
+def _covered_pair_for_stage_failure(case):
+    item = jr.jb.build_item(make_ref(
+        case["citation_id"], citance=case["citing_sentence"],
+        pmid=case["cited_pmid"], src=case["pmcid"]))
+    rec, claims, verdicts = jr.judge_pair_coverage(
+        item, extractor=extractor_of(case["citing_sentence"]),
+        coverage_judge=judge_established(True), fetch_abstract=abstract_ok)
+    return rec, item, claims, verdicts
+
+
+@pytest.mark.parametrize("stage,case_name", [
+    ("F5", "f5_table_hash"),
+    ("F7", "f7_span_binding"),
+])
+def test_real_late_stage_failure_preserves_the_judged_pair(stage, case_name):
+    case = _REAL_FAILURES[case_name]
+    rec, item, claims, verdicts = _covered_pair_for_stage_failure(case)
+
+    def broken_builder(_item):
+        raise ValueError(case["observed_error"])
+
+    extra = ({"f5_seams": {}, "f5_evidence_builder": broken_builder}
+             if stage == "F5" else
+             {"f7_seams": {}, "f7_evidence_builder": broken_builder})
+    row = jr.judge_pair_finish(
+        rec, item, claims, verdicts, fetch_abstract=abstract_ok, **extra)
+
+    assert row["atomic_claims"] == [case["citing_sentence"]]
+    assert row["coverage_verdicts"][0]["established"] is True
+    assert row["stage_failures"][0]["stage"] == stage
+    assert f"{stage} stage failed" in row["hold_reasons"]
+    assert row["disposition"] == jr.DISP_HELD_FULL_COVERAGE
+    assert "parse_error" not in row
 
 
 def test_preband_f2_is_excluded_without_coverage_call(tmp_path, monkeypatch):
@@ -892,6 +952,26 @@ def test_wired_f4_unjudgeable_holds_strength(tmp_path, monkeypatch):
     rows, _m = run_wired(tmp_path, monkeypatch, coverage=judge_established(True),
                          call=disc_llm(f4=f4_json(load="unknown")))
     assert rows[0]["disposition"] == jr.DISP_HELD_STRENGTH_UNJUDGEABLE
+
+
+def test_malformed_f4_schema_holds_only_f4_and_keeps_pair(tmp_path, monkeypatch):
+    case = _REAL_FAILURES["f4_invalid_dimensions"]
+
+    def replay_real_failure(*_args, **_kwargs):
+        raise ValueError(case["observed_error"])
+
+    monkeypatch.setattr(jr, "refine_support_strength", replay_real_failure)
+    rows, _m = run_wired(
+        tmp_path, monkeypatch, coverage=judge_established(True),
+        extractor=extractor_of(case["citing_sentence"]),
+        call=disc_llm(f4=None))
+    row = rows[0]
+    assert row["atomic_claims"] == [case["citing_sentence"]]
+    assert row["coverage_verdicts"][0]["established"] is True
+    assert row["stage_failures"][0]["stage"] == "F4"
+    assert row["stage_failures"][0]["message"] == case["observed_error"]
+    assert row["strength_records"][0]["reason"] == "stage_failure"
+    assert row["disposition"] == jr.DISP_HELD_STRENGTH_UNJUDGEABLE
 
 
 def test_wired_f4_verifier_disagreement_holds_strength(tmp_path, monkeypatch):

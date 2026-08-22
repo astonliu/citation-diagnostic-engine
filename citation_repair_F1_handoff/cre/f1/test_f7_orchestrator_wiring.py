@@ -305,7 +305,7 @@ def test_abstract_built_evidence_context_is_quarantined():
         SectionText("abstract", "text", f7t.WORK, f7t._sha("text"))
 
 
-def test_a_raising_evidence_builder_reaches_the_runner_quarantine(tmp_path, monkeypatch):
+def test_a_raising_evidence_builder_holds_f7_and_keeps_pair(tmp_path, monkeypatch):
     def abstract_context(_item):
         return EvidenceContext(
             paper_resolved=True, resolved_work_id=f7t.WORK,
@@ -328,12 +328,14 @@ def test_a_raising_evidence_builder_reaches_the_runner_quarantine(tmp_path, monk
 
     rows = [json.loads(l) for l in
             (out_dir / "judgment_predictions.jsonl").read_text().splitlines()]
-    assert rows[0]["disposition"] == jr.DISP_QUARANTINE_PARSE
-    assert "abstract" in rows[0]["parse_error"]
+    assert rows[0]["disposition"] == jr.DISP_HELD_PENDING_F5_F7
+    assert rows[0]["stage_failures"][0]["stage"] == "F7"
+    assert "abstract" in rows[0]["stage_failures"][0]["message"]
     assert rows[0]["label"] is None
-    # Quarantine is not scoreable: no blind annotation row was written.
+    # The evidence-builder defect is visible to a human instead of dropping the
+    # otherwise reasonable citation pair.
     queue = out_dir / "judgment_band_annotation_queue.jsonl"
-    assert queue.read_text() == ""
+    assert len(queue.read_text().splitlines()) == 1
 
 
 def test_a_config_defect_in_the_f7_seams_quarantines_the_pair(tmp_path, monkeypatch):

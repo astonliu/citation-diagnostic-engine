@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +20,11 @@ from .f5_supersession import (
     CandidateWork, ComparabilitySource, EvidenceTier, F5Policy, NoticeStatus,
     RetrievalResult, decide_f5,
 )
+
+
+_REAL_FAILURES = json.loads((
+    Path(__file__).with_name("testdata") / "natural_run_failures_20260821.json"
+).read_text(encoding="utf-8"))["cases"]
 from .judgment_engine import ClaimSupport, SupportState, TemporalState
 from . import judgment_run as jr
 from .f5_evidence_store import SOURCE_PACKET_SCHEMA_VERSION
@@ -97,6 +103,23 @@ def test_fulltext_identity_and_hash_mismatch_fail_closed():
     corrupt["sections"][0]["content_sha256"] = "0" * 64
     with pytest.raises(ValueError, match="does not match stored text"):
         adapt_fulltext_sections(corrupt, work_id="111")
+
+
+def test_real_pmid39077123_table_hash_is_checked_before_normalization():
+    case = _REAL_FAILURES["f5_table_hash"]
+    source_text = case["exact_excerpt"]
+    body = _fulltext()
+    body["pmid"] = case["section_work_id"]
+    body["sections"] = [{
+        "label": case["section_label"], "title": "", "text": source_text,
+        "content_sha256": _hash(source_text),
+    }]
+    body["sections_present"] = ["table"]
+    adapted = adapt_fulltext_sections(body, work_id=case["section_work_id"])
+    stored = adapted.provenance["sections"][0]
+    assert stored["text"] == source_text.strip()
+    assert stored["content_sha256"] == _hash(stored["text"])
+    assert stored["content_sha256"] != _hash(source_text)
 
 
 def test_packet_hashes_exact_stored_text_and_is_source_isolated():
