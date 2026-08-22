@@ -1189,6 +1189,31 @@ class TemporalAssessorRun:
         policy = self.policy
         cand = self._new_candidate_assessment(candidate)
 
+        # CLUSTER AND TIER ARE RECORDED FIRST, BEFORE ANY EARLY RETURN. Both are
+        # facts about this candidate's own identity and metadata: the clusters were
+        # computed over the whole retrieved set before this loop, and the tier is a
+        # deterministic function of the candidate's publication types. Neither
+        # depends on which gate the candidate leaves by.
+        #
+        # They used to be assigned AFTER the date-window and notice gates, so a
+        # candidate that exited at candidate_predates_cited,
+        # candidate_after_as_of_date or candidate_flagged_notice kept
+        # candidate_study_cluster_id=None while validate_f5_record replayed a real
+        # cluster for it -- every such row raised "candidate study cluster
+        # assignment drifted" and quarantined the pair. It never showed up on a
+        # hand-fed candidate bank, where every candidate is chosen to pass those
+        # gates; it appears the moment real retrieval returns a set containing one
+        # flagged or out-of-window paper, which is to say immediately.
+        cand["candidate_tier"] = self._candidate_tier(candidate).value
+        cited_cluster = (study_cluster_by_work or {}).get(cited_work_id)
+        candidate_cluster = (study_cluster_by_work or {}).get(candidate.id)
+        if cited_cluster is not None:
+            cand["cited_study_cluster_id"] = cited_cluster.cluster_id
+        if candidate_cluster is not None:
+            cand["candidate_study_cluster_id"] = candidate_cluster.cluster_id
+            cand["study_cluster_basis"] = candidate_cluster.basis
+            cand["study_cluster_uncertain"] = candidate_cluster.cluster_uncertain
+
         def finish(category: str, reason: str, disposition: str) -> _CandResult:
             cand["reason"] = reason
             cand["discovery_disposition"] = disposition
@@ -1225,16 +1250,6 @@ class TemporalAssessorRun:
                 or cand_notice.notice_resolution != "resolved_clear"
                 or cand_notice.lookup_status != "ok"):
             return finish(_UNASSESSABLE, "candidate_flagged_notice", "unassessable")
-
-        cand["candidate_tier"] = self._candidate_tier(candidate).value
-        cited_cluster = (study_cluster_by_work or {}).get(cited_work_id)
-        candidate_cluster = (study_cluster_by_work or {}).get(candidate.id)
-        if cited_cluster is not None:
-            cand["cited_study_cluster_id"] = cited_cluster.cluster_id
-        if candidate_cluster is not None:
-            cand["candidate_study_cluster_id"] = candidate_cluster.cluster_id
-            cand["study_cluster_basis"] = candidate_cluster.basis
-            cand["study_cluster_uncertain"] = candidate_cluster.cluster_uncertain
 
         # Contradiction judgment (strict-JSON; malformed -> ValueError quarantine).
         candidate_source = self.fetch_source(candidate.id, as_of_date=as_of_date)

@@ -560,6 +560,48 @@ def test_disjoint_authors_without_study_identity_remain_unknown():
     assert candidate_row["study_cluster_uncertain"] is True
 
 
+def test_early_exit_candidates_still_carry_their_study_cluster():
+    """A candidate that leaves by an EARLY gate must still record its cluster.
+
+    Cluster membership is computed over the whole retrieved set before the
+    per-candidate loop, and the tier is a pure function of the candidate's own
+    metadata -- neither depends on which gate the candidate exits by. They used
+    to be assigned only AFTER the date-window and notice gates, so any candidate
+    that exited at candidate_predates_cited / candidate_after_as_of_date /
+    candidate_flagged_notice kept candidate_study_cluster_id=None while
+    validate_f5_record replayed a real cluster for it, and the whole pair was
+    quarantined with "candidate study cluster assignment drifted".
+
+    This never fired on a hand-authored candidate bank, because every candidate
+    in one is chosen to pass those gates. It fires on the first REAL retrieval
+    that returns a flagged or out-of-window paper -- which is to say immediately:
+    the live PubMed finder returned one flagged paper in a set of 50.
+    """
+    policy = F5Policy()
+    # W2 qualifies; W3 predates the cited work; W4 carries a formal notice.
+    candidates = (candidate("W2"),
+                  candidate("W3", pub_date="1990-01-01"),
+                  candidate("W4", pub_date="2021-01-01"))
+    temporal, records, _ = run(
+        policy=policy,
+        candidates=candidates,
+        candidate_notices={"W4": NoticeStatus(
+            notice_kind="retraction", notice_resolution="flagged",
+            lookup_status="ok", source_role="retracted_article")})
+    record = records[0]
+    rows = {r["candidate_work_id"]: r for r in record["candidate_assessments"]}
+    assert set(rows) == {"W2", "W3", "W4"}
+    assert rows["W3"]["reason"] == "candidate_predates_cited"
+    assert rows["W4"]["reason"] == "candidate_flagged_notice"
+    # THE REGRESSION: every row, whichever gate it left by, carries a cluster id
+    # and a tier.
+    for work_id, row in rows.items():
+        assert row["candidate_study_cluster_id"], f"{work_id} lost its cluster id"
+        assert row["candidate_tier"], f"{work_id} lost its tier"
+    # ...and the replay guard therefore accepts the record.
+    validate_f5_record(record, policy)
+
+
 def test_shared_study_cluster_still_blocks_despite_the_exemption():
     """The exemption is about SHARED PEOPLE, never SHARED DATA.
 
