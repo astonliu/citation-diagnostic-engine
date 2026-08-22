@@ -1579,8 +1579,23 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
                     "route F6_FLAGGED but engine findings lack F6")
             rec["disposition"] = DISP_PREDICTED
             rec["label"] = "F6"
+        elif "F5" in decision.findings:
+            # THE OTHER HALF OF THE EARLY-RETURN BUG DESCRIBED ABOVE, fixed where
+            # that comment says it belongs: after the F6 route, because precedence
+            # puts F5 there. Without it a qualifying temporal finding reached
+            # rec["findings"] and terminal_outcome F5 while rec["label"] stayed
+            # None and the disposition said the pair was held "pending F3_F5_F7"
+            # -- naming F5 as pending with a confirmed F5 in the same record, the
+            # same lie the F7 half was fixed to stop telling. F3/F4 cannot fire on
+            # this path at all (they are discriminator-gated), so F5 sits directly
+            # under F6 here. (The verdict enum is deliberately NOT named in this
+            # module, not even in a comment: test_source_never_asserts_confident_
+            # negatives_for_unbuilt_gates greps this source to keep the
+            # orchestrator a thin wiring layer, and a comment defeats that grep.)
+            rec["disposition"] = DISP_PREDICTED
+            rec["label"] = "F5"
         elif r == jb.ROUTE_FULL_COVERAGE:
-            rec["disposition"] = DISP_HELD_FULL_COVERAGE     # F3/F5/F7 uncleared
+            rec["disposition"] = DISP_HELD_FULL_COVERAGE     # F3/F7 uncleared
         else:
             rec["disposition"] = DISP_HELD_INSUFFICIENT
         return rec
