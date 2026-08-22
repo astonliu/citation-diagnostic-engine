@@ -1,0 +1,63 @@
+{
+  "_README": [
+    "Copy this file, fill it in, delete the keys you do not need.",
+    "Every _comment key is ignored by the loader; the real keys are below them.",
+    "Validate for FREE first:  python -m cre.f1.sandbox_judge yourfile.json --dry-run",
+    "Then run for real (costs money):  ... yourfile.json",
+    "See docs/HOW_TO_TEST_A_CASE.md"
+  ],
+
+  "schema": "cre_sandbox_packet_v1",
+
+  "_comment_required": "These four are required for EVERY taxonomy.",
+  "citation_id": "MYCASE:bibr1",
+  "citing_sentence": "The claim as the citing paper actually words it.",
+  "cited_claimed": {
+    "title": "Exact title of the paper being cited",
+    "claimed_pmid": "11794169",
+    "claimed_doi": "10.1056/NEJMoa010307",
+    "journal": "N Engl J Med",
+    "year": "2001-11-08"
+  },
+  "cited_abstract": "The cited paper's REAL abstract, verbatim from PubMed.",
+
+  "_comment_taxonomies": "Which discriminators to run. Coverage/F6 always runs.",
+  "taxonomies": ["F5"],
+
+  "_comment_optional_common": "Useful everywhere.",
+  "citing_pmcid": "PMC9000001",
+  "citing_source_section": "introduction",
+
+  "_comment_F5": "F5 = was the cited work superseded by later evidence?",
+  "cited_pub_date": "2001-11-08",
+  "cited_mesh_terms": ["Shock, Septic", "Hospital Mortality"],
+  "cited_publication_types": ["Randomized Controlled Trial"],
+  "cited_authors": ["Rivers E"],
+  "cited_sections": [
+    {
+      "label": "results",
+      "title": "Primary outcome",
+      "text": "A sentence copied VERBATIM from the cited paper. F5 and F7 check spans character-for-character against this text, so a paraphrase will fail."
+    }
+  ],
+  "f5_as_of_date": "2026-08-22",
+  "f5_live_discovery": true,
+  "f5_mailto": "you@example.edu",
+
+  "_comment_F5_knobs": "Cost/recall knobs. Defaults: cap 50, no budget, screen on.",
+  "f5_candidate_cap": 200,
+  "f5_max_deep_comparisons": 25,
+  "f5_candidate_screen": true,
+
+  "_comment_F7": "F7 = does the sentence name a DIFFERENT entity than the paper studied? Needs --authorities. cited_sections labels must be methods|results|table|figure.",
+  "cited_pmcid": "PMC7921644",
+
+  "_comment_F3": "F3 = is the cited work the ORIGIN of the finding? Needs cited_pmcid, cited_is_review, the real reference list, and an abstracts map (pmid -> abstract) so candidates can be confirmed.",
+  "cited_is_review": true,
+  "cited_reference_list": [
+    {"title": "The primary paper the finding actually came from", "claimed_pmid": "17138955", "year": 2007}
+  ],
+  "abstracts": {
+    "17138955": "That primary paper's real abstract."
+  }
+}
