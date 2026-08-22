@@ -31,9 +31,28 @@ F6) always runs; F4 needs a discriminator callable; F3 additionally needs the
 cited work's reference list; F5 needs its seam bundle and evidence builder; F7
 needs its seam bundle, evidence builder, and the frozen SQLite authorities.
 
+F7 ALSO MOVES COVERAGE. Its body text is the same ``fetch_fulltext`` seam the
+full-text coverage path reads, so selecting F7 shifts coverage off the cited
+abstract and onto the retrieved body: the v3 judge, the ``coverage_v3`` prompt
+version and the full-text parser, one model call per claim. That is production's
+own coupling, not a sandbox convenience -- ``judge_pair_coverage`` branches on
+``fetch_fulltext`` alone. It is why F7 is the one selection that changes what a
+DIFFERENT taxonomy (F6, the coverage route) is asked.
+
 NO NETWORK IN THE DEFAULT PATH except the model calls the selected taxonomies
-make, each one receipted through the same ``AdapterReceipt`` production uses, so
-the paid-call count is visible per run.
+make, each one receipted through the same ``AdapterReceipt`` production uses.
+
+READ THE RECEIPT PER SEAM, NOT ITS TOTAL, AND DO NOT READ THE RECORD'S LEDGER AT
+ALL. ``receipt.summary()["total_calls"]`` counts every seam INVOCATION, including
+``fetch_abstract``, which this module serves from the packet and which costs
+nothing -- the paid count is the sum of the model-backed seams. The record's own
+``paid_calls`` ledger is worse than loose: ``judgment_run._count_paid_call`` has
+exactly two live call sites and both book ``"claim_extraction"`` (the third sits
+in ``_run_with_retry``, which nothing calls), so coverage, F3, F4, F5 and F7's
+assessor calls are never booked. On the F7 packet the ledger reports ``total: 1``
+against seven paid calls the receipt names one by one. That gap is production's
+and is left alone here; it is reported, not patched, because a sandbox that
+edited the engine to make its own output tidy would stop measuring the engine.
 
 Usage:
     python -m cre.f1.sandbox_judge packet.json --model claude-opus-5
@@ -54,6 +73,10 @@ from .band_prompts import (
     make_anthropic_call,
     make_coverage_judge,
     make_extractor,
+)
+from .coverage_prompts_v3 import (
+    COVERAGE_PROMPT_VERSION_V3,
+    make_coverage_judge_v3,
 )
 from .recording_adapter import AdapterReceipt
 from . import sandbox_wiring as sw
@@ -215,7 +238,16 @@ def judge(packet: dict, *, model: str, api_key: str = "",
         "model": model,
         "temperature_recorded": TEMPERATURE_RECORDED,
         "claim_extract_prompt_version": CLAIM_EXTRACT_PROMPT_VERSION,
-        "coverage_prompt_version": COVERAGE_PROMPT_VERSION,
+        # NAME THE VERSION THE RUN WILL ACTUALLY STAMP. F7 supplies a retrieved
+        # body, which moves coverage off the cited abstract and onto the full
+        # text: judgment_run OVERWRITES both the prompt and the parser version on
+        # that path. A plan printing the abstract version for a full-text run
+        # would be the same false provenance stamp that overwrite exists to
+        # prevent -- and the plan is the only thing --dry-run gives a reader.
+        "coverage_prompt_version": (COVERAGE_PROMPT_VERSION_V3 if "F7" in picked
+                                    else COVERAGE_PROMPT_VERSION),
+        "coverage_evidence_scope": ("cited full text (F7 supplies the body)"
+                                    if "F7" in picked else "cited abstract"),
         "coverage_and_F6": "always on",
         "selected": list(picked),
         "silent_unwired": [t for t in SELECTABLE if t not in picked],
@@ -263,6 +295,15 @@ def judge(packet: dict, *, model: str, api_key: str = "",
     seams = {
         "extractor": make_extractor(call_llm),
         "coverage_judge": make_coverage_judge(call_llm),
+        # THE FULL-TEXT COVERAGE JUDGE, PAIRED WITH fetch_fulltext ABOVE. Wiring
+        # a body without the judge that reads it is not a degraded run, it is a
+        # crash: judge_pair_coverage takes the full-text branch on fetch_fulltext
+        # alone and calls coverage_judge_v3 unconditionally, so a None arrives at
+        # judgment_band.coverage_verdicts as `None(claims, evidence)`. Derived
+        # from the SAME condition as fetch_fulltext so the two cannot diverge;
+        # the gate below is the backstop if a later edit separates them.
+        "coverage_judge_v3": (make_coverage_judge_v3(call_llm)
+                              if fetch_fulltext is not None else None),
         "fetch_abstract": _abstract_fetcher(packet),
         "fetch_reflist": fetch_reflist,
         # F4 and F3 share the discriminator callable, exactly as run_band wires
@@ -274,10 +315,24 @@ def judge(packet: dict, *, model: str, api_key: str = "",
     receipt = jr_receipt(model)
     wired = receipt.wrap_all(seams)
 
+    # THE PAIRING GATE run_natural_judgment APPLIES, applied here too. The bench
+    # calls judge_pair DIRECTLY, and judge_pair takes coverage_judge_v3=None
+    # without complaint -- every guard against half-enabling the full-text path
+    # lives in the launchers this module deliberately skips. Same rule and same
+    # wording as run_band's and run_natural_judgment's gate, because the failure
+    # it prevents is identical: judging full text with the abstract-scoped
+    # prompt, or fetching a body nothing reads.
+    if (extra.get("fetch_fulltext") is None) != (wired["coverage_judge_v3"] is None):
+        raise PacketError(
+            "the full-text path needs BOTH fetch_fulltext and coverage_judge_v3; "
+            "supplying one alone would silently judge full text with the "
+            "abstract-scoped prompt, or fetch a body nothing reads")
+
     record = jr.judge_pair(
         item,
         extractor=wired["extractor"],
         coverage_judge=wired["coverage_judge"],
+        coverage_judge_v3=wired["coverage_judge_v3"],
         fetch_abstract=wired["fetch_abstract"],
         fetch_reflist=wired["fetch_reflist"],
         discriminator_call_llm=(
