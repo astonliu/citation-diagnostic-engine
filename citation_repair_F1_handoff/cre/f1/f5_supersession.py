@@ -112,7 +112,13 @@ F5_REPORTABLE = True
 # `relation: neutral` alongside two clear disagreeing directions -- a rejected
 # response, which quarantines the stage and loses the pair silently. Observed on
 # both CAPS(1988)->CAST(1991) and Stampfer(1991)->HERS(1998)/WHI(2002).
-F5_CONTRADICTION_PROMPT_VERSION = "f5_contradiction_v4"
+# v5: the prompt now also states the scope_mismatch_axis <-> relation-fields
+# rule that _parse_contradiction enforces ("comparable relation axes require
+# scope_mismatch_axis='none'"). v4 had told the model to abstain with
+# axis="unclear" while saying nothing about that constraint, so a comparable
+# judgment carrying any axis was rejected and the pair quarantined. Hit on the
+# first live-retrieval run of Stampfer(1991).
+F5_CONTRADICTION_PROMPT_VERSION = "f5_contradiction_v5"
 F5_RESPONSE_PARSER_VERSION = "strict_f5_relation_spanids_v2"
 F5_VERIFIER_PROMPT_VERSION = "f5_positive_verifier_v1"
 F5_POLICY_VERSION = "f5_policy_v2_formal_path_b"

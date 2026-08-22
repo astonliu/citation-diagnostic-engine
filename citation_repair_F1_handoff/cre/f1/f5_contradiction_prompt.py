@@ -243,15 +243,23 @@ rule is strictly worse than abstaining. Treating "increase", "decrease" and
               the cited work reports an effect and the candidate reports
               "no_effect", which opposes a claim that the effect exists. If you
               believe the papers are nonetheless not comparable, say so through
-              outcome_relation / population_relation / scope_mismatch_axis, or
-              report a direction as unclear -- do not record it as "neutral" while
-              also reporting two clear disagreeing directions.
+              outcome_relation or population_relation, or report a direction as
+              unclear -- do not record it as "neutral" while also reporting two
+              clear disagreeing directions.
+
+THE AXIS MUST AGREE WITH THE RELATION FIELDS. scope_mismatch_axis names WHICH
+axis makes the two papers not comparable. So if claim_match, outcome_relation and
+population_relation together say the papers ARE comparable, the axis MUST be
+"none" -- there is no mismatch left for it to name, and any other value is a
+self-contradiction that is REJECTED OUTRIGHT, quarantining the pair. Name an axis
+only when you are also reporting a mismatch through those three fields.
 
 ABSTAINING IS A FIRST-CLASS ANSWER, and it is measurably worth using. Where the
 evidence does not settle it, use "uncertain" for claim_match and outcome_relation,
-and "unclear" for population_relation and scope_mismatch_axis. Do not force a
-decision to seem decisive; an abstention is recorded and reviewed by a human, a
-wrong confident answer is not caught.
+and "unclear" for population_relation. Use "unclear" for scope_mismatch_axis only
+when you are NOT reporting comparable relation fields -- when they are comparable
+the axis is "none". Do not force a decision to seem decisive; an abstention is
+recorded and reviewed by a human, a wrong confident answer is not caught.
 
 EVIDENCE SPANS -- POINT, DO NOT RETYPE. Each source below is shown as labelled blocks
 with numbered sentences. Cite evidence by naming the label and exactly one sentence

@@ -67,6 +67,11 @@ EXPECTED_AUTHORITIES = {
 F7_SECTION_LABELS = ("methods", "results", "table", "figure")
 
 BENCH_F5_CANDIDATE_SOURCE = "bench_paper_bank"
+#: Live discovery mode. The packet supplies NO candidates and the PRODUCTION
+#: PubMed finder runs, so the bench is exercising real retrieval. Named
+#: differently in provenance because the two answer different questions: the bank
+#: asks "can F5 judge this pair", live asks "can F5 FIND the pair at all".
+LIVE_F5_CANDIDATE_SOURCE = "live_pubmed_candidate_finder"
 
 
 class WiringError(ValueError):
@@ -460,6 +465,41 @@ def build_f5(*, packet: dict, model: str, api_key: str = "") -> dict:
         # cannot mutate the bank between claims.
         return tuple(dict(bank[key]) for key in retrieved)
 
+    live_discovery = bool(packet.get("f5_live_discovery"))
+    if live_discovery:
+        if raw_candidates:
+            raise WiringError(
+                "f5_live_discovery with a nonempty f5_candidates would judge a "
+                "mixture of discovered and hand-fed papers and the record could "
+                "not say which was which; supply one or the other")
+        from .f5_candidate_finder import PubMedCandidateFinder
+        from .ncbi_meta import DEFAULT_EMAIL
+        finder = PubMedCandidateFinder(
+            email=str(packet.get("f5_mailto") or "").strip() or DEFAULT_EMAIL,
+            cache_dir=str(packet.get("f5_cache_dir") or "") or None)
+
+        def search_candidates(cited_meta, claim, *, after_date, as_of_date,
+                              cap: int = 50):
+            """Production finder, with every hit ADMITTED TO THE BANK.
+
+            ``fetch_meta``/``fetch_abstract`` above answer only from the bank, and
+            the assessor needs both for each candidate it deep-compares. A
+            discovered PMID would otherwise resolve to None and the pair would
+            die as unassessable for a reason that has nothing to do with the
+            science. The real CandidateSearchResult is returned UNCHANGED so its
+            ok/partial/failure status and query_hash still reach the record --
+            the bank path had no notion of a partial search, and a partial search
+            is exactly what must not become a confident negative.
+            """
+            result = finder.search_candidates(
+                cited_meta, claim, after_date=after_date, as_of_date=as_of_date,
+                cap=cap)
+            for hit in result.hits:
+                key = str((hit or {}).get("id") or "").strip()
+                if key and key not in bank:
+                    bank[key] = dict(hit)
+            return result
+
     # F5 NEEDS A BIGGER OUTPUT BUDGET THAN THE 1024 DEFAULT. Its contradiction
     # judgment returns TWO verbatim spans (the cited finding and the candidate's
     # contradiction) plus a rationale, and a clinical-trial abstract sentence is
@@ -490,15 +530,24 @@ def build_f5(*, packet: dict, model: str, api_key: str = "") -> dict:
         "f5_evidence_builder": make_f5_evidence_builder(fetch_meta, as_of_date=as_of),
         "f5_policy": policy,
         "provenance": {
-            "f5_candidate_source": BENCH_F5_CANDIDATE_SOURCE,
+            "f5_candidate_source": (LIVE_F5_CANDIDATE_SOURCE if live_discovery
+                                    else BENCH_F5_CANDIDATE_SOURCE),
             "f5_as_of_date": as_of,
             "bank_papers": len(bank),
-            "candidates_retrieved": len(retrieved),
+            # In live mode the count is not known at wiring time -- the finder has
+            # not run yet -- and reporting the bank's 0 would read as "retrieval
+            # returned nothing", which is the exact false negative this bench
+            # already produced once. `None` says "ask the record".
+            "candidates_retrieved": (None if live_discovery else len(retrieved)),
             "cited_work_from_packet": cited_pmid,
             "production_validator_called": False,
             "reportable": False,
-            "note": ("Candidates came from the hand-authored paper bank, not "
-                     "PubMed. Every other seam is the production one. Nothing "
-                     "from this run is reportable."),
+            "note": (("Candidates came from the PRODUCTION PubMed finder over "
+                      "live HTTP; the paper bank held only the cited work. Every "
+                      "other seam is the production one. Nothing from this run "
+                      "is reportable.") if live_discovery else
+                     ("Candidates came from the hand-authored paper bank, not "
+                      "PubMed. Every other seam is the production one. Nothing "
+                      "from this run is reportable.")),
         },
     }
