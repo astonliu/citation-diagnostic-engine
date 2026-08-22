@@ -86,9 +86,17 @@ from .band_prompts import (
     CLAIM_EXTRACT_PROMPT_VERSION,
     COVERAGE_PROMPT_VERSION,
     make_anthropic_call,
-    make_coverage_judge,
     make_extractor,
 )
+# THE TRI-STATE JUDGE, AND NOT band_prompts' BOOLEAN ONE. Both factories exist
+# and both are named make_coverage_judge, which is the whole trap: the frozen
+# band_prompts version collapses "the abstract does not say" into established
+# False, and False at abstract scope IS a coverage gap, so it routes F6 exactly
+# where the band HOLDS. A bench that reported a finding production would have
+# held would be answering about a different engine than the one it claims to
+# run. coverage_aggregate.py:35 states the rule and test_coverage_aggregate
+# locks it; every production path already obeys it.
+from .coverage_aggregate import make_coverage_judge
 from .coverage_prompts_v3 import (
     COVERAGE_PROMPT_VERSION_V3,
     make_coverage_judge_v3,

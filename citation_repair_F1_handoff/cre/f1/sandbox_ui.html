@@ -243,6 +243,14 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
     <button type="button" data-t="F7" aria-pressed="false">F7</button>
   </div>
   <p class="note" id="wiring"></p>
+  <p class="note" style="border-top:1px solid var(--rule-soft);padding-top:11px">
+    <strong>F1, F2 and F8 never run here, and they do not run in the band either.</strong>
+    They are existence and metadata faults &mdash; a dead or mismatched PMID, a retracted
+    source &mdash; decided upstream, and the band only ever sees a row they already cleared.
+    This bench skips that pre-band gate on purpose, so <em>every packet you author is treated
+    as already cleared</em>. Give it a cited work that production would have excluded and it
+    will still answer, with an F3&ndash;F7 verdict that could never have been asked for.
+  </p>
 </section>
 
 <section>

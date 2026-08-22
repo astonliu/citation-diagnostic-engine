@@ -229,6 +229,12 @@ def pick_port(preferred: int) -> int:
     """``preferred`` if it is free, else the next free port above it."""
     for port in range(preferred, preferred + 40):
         with socket.socket() as s:
+            # SAME OPTION THE SERVER ITSELF USES. HTTPServer sets
+            # allow_reuse_address, so a port left in TIME_WAIT by the previous
+            # run is bindable by the real listener; a probe socket without the
+            # option would refuse it and silently move the URL one port along on
+            # every restart, which is a papercut with a bookmark attached.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind(("127.0.0.1", port))
                 return port
