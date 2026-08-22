@@ -163,7 +163,17 @@ def summarize(log_records: list[dict],
                 f1_quarantine_exception += 1
         if label == SAME_WORK:
             same_work_by_reason[lg.get("same_work_reason") or "unspecified"] += 1
-        if label == UNSCOREABLE or lg.get("unscoreable_reason"):
+        # KEYED ON THE LABEL, NOT ON THE LEFTOVER REASON. These two could not
+        # diverge while decide()'s UNSCOREABLE branch ran first: a row carrying an
+        # unscoreable_reason always got the UNSCOREABLE label, so the `or` was
+        # belt-and-braces. Now that a POSITIVE retraction outranks an unscoreable
+        # title, an F8 row can carry `no_claimed_title` on its log -- measured, and
+        # deliberately not erased. Tallying it here counted one reference twice
+        # (once as F8, once as "no judgeable title") and understated `scoreable`
+        # by one, reporting an UNSCOREABLE total that disagreed with the label
+        # census. A row that received a terminal fault label left the F2 frame
+        # because of that fault, not because its title was unparseable.
+        if label == UNSCOREABLE:
             unscoreable_by_reason[lg.get("unscoreable_reason") or "unspecified"] += 1
             continue                       # excluded from numerator AND denominator
         if label == UNVERIFIABLE:

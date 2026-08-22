@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from .f5_notice import resolve_formal_notice
+from .ncbi_meta import is_retracted
 
 
 F8_TIMING_VERSION = "f8_pubmed_timing_v1"
@@ -121,6 +122,43 @@ def assess_f8_timing(cited_pmid: str, citing_pmid: str, *, fetch_meta
         return F8TimingAssessment(
             F8_CLEAR, citing_date_earliest=citing_day_raw,
             reason="no_retraction_in_force_at_citation")
+    # A RESOLVED NOTICE THAT IS NOT A RETRACTION IS AN ANSWER, NOT AN OUTAGE.
+    #
+    # ``resolve_formal_notice`` returns exactly ONE chosen notice, selected by
+    # ``_SEVERITY`` -- retraction 0, expression-of-concern 1, correction 2 --
+    # with a flagged row preferred over an unresolved one at equal severity. A
+    # retraction link therefore always outranks a correction or an EoC, so a
+    # chosen notice of any other kind means no retraction relationship was
+    # actionable at all. That is a determination, and F8's question ("was this
+    # work retracted before it was cited") has been answered: no.
+    #
+    # Falling through to the ``retraction_notice_or_date_unresolved`` return
+    # below reported a MISSING BOUNDARY instead, which is a different and false
+    # claim -- nothing was missing. Because ``decide`` routes F8_UNRESOLVED to
+    # UNSCOREABLE with ``f8_timing_boundary_unresolved``, every cited work
+    # carrying a pre-citation erratum and no retraction was dropped from the
+    # scoreable set and terminated UNJUDGEABLE in Band 2. It also produced the
+    # inverted behaviour that a work with NO linked notices resolved CLEAR while
+    # the same work with one resolved erratum did not: more metadata made the
+    # citation less judgeable.
+    #
+    # THE PUBTYPE GUARD IS LOAD-BEARING. The severity argument holds only for
+    # the RELATIONSHIP list. A work whose PubMed record carries the
+    # ``Retracted Publication`` publication type but links no ``RetractionIn``
+    # relationship never reaches ``resolve_formal_notice``'s direct-pubtype
+    # fallback, because that fallback runs only when no subject relationship was
+    # relevant at all -- one erratum link is enough to pre-empt it. Clearing on
+    # the erratum would then be a false negative on a work PubMed marks
+    # retracted. Such a work stays UNRESOLVED: retracted, with no datable
+    # notice, which is a genuine missing boundary. ``is not True`` keeps an
+    # unknown pubtype list on the clearing side, matching the ``resolved_clear``
+    # branch above, which attests no pubtype either.
+    if (notice.notice_resolution == "flagged"
+            and notice.notice_kind != "retraction"
+            and is_retracted(cited_meta.get("publication_types")) is not True):
+        return F8TimingAssessment(
+            F8_CLEAR, citing_date_earliest=citing_day_raw,
+            reason="only_non_retraction_notice_in_force")
     if (notice.notice_kind != "retraction"
             or notice.notice_resolution != "flagged" or not notice.date):
         return F8TimingAssessment(

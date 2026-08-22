@@ -40,6 +40,61 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
            db_hits: dict | None, match_threshold: float = 85.0) -> Reference:
     log = ref.log
 
+    # F8: the citation points at a RETRACTED source (RESEARCH_PLAN_v2.2 §4.3 --
+    # "F8 is deterministic (retraction flag from PubMed / Retraction Watch) and is
+    # routed through the existence-check layer with F1/F2, never reaching the human
+    # classifier"). ``log.retracted`` is the tri-state the existence layer recorded
+    # in run.process_reference; this branch is a pure read of it, so decide() makes
+    # no network call.
+    #
+    # FIRST, AND THAT IS THE FIX. This branch used to sit BELOW the UNSCOREABLE
+    # one, on the reasoning that "a non-title comparison carries no citation to
+    # judge at all". That reasoning is about TITLE COMPARABILITY, which is what F2
+    # needs; F8 needs a resolved PMID and two dates and nothing else. A reference
+    # printed as an unstructured ``mixed-citation`` carries no ``<article-title>``
+    # and so earns ``unscoreable_reason = no_claimed_title`` -- and that alone was
+    # enough to suppress a row on which the timing gate had already returned
+    # QUALIFIED against a ``Retracted Publication`` record with a resolved,
+    # pre-citation notice date. Verified on PMC7474863, which cites two retracted
+    # Surgisphere papers 93 and 94 days after their notices: the ``element-citation``
+    # one was labelled F8 and the ``mixed-citation`` one was booked
+    # ``unscoreable/no_claimed_title``, making F8 recall a function of the
+    # publisher's XML markup rather than of the citation.
+    #
+    # Nothing that reached UNSCOREABLE for a real reason loses its label to this
+    # reordering: F8 fires only on the POSITIVE determination ``retracted is True``,
+    # and the one unscoreable reason that could co-occur without a resolved PMID --
+    # ``non_article_reference`` -- returns from ``run.process_reference`` before the
+    # F8 gate ever runs, so it cannot arrive here with a retraction.
+    #
+    # It also stays ABOVE the same-work quarantine and every F1/F2 path: a resolved
+    # record marked retracted is F8 regardless of what the same-work rule concluded
+    # about title identity, and regardless of whether the metadata comparison
+    # flagged.
+    #
+    # ``is True`` is mandatory. False means "types fetched, not retracted"; None
+    # means "we never learned" (no resolved PMID, or the lookup failed) and is NOT
+    # an accusation -- precision-first, an unknown falls through to the normal path.
+    if log.retracted is True:
+        ref.label, ref.confidence = F8, "HIGH"
+        if log.f8_timing_status:
+            log.retraction_reason = "retracted_before_citation_31_day_floor_met"
+            ref.rationale = (
+                "The resolved work was formally retracted before citation and "
+                f"the conservative publication-date gap is "
+                f"{log.f8_timing_gap_days} days, meeting the registered 31-day "
+                "F8 floor.")
+            log.decided_by = "f8_retracted_before_citation_timing_met"
+        else:
+            # Legacy/development path retained for byte-compatible direct calls.
+            # production_launcher.launch_full always supplies the timing seam.
+            log.retraction_reason = "retracted_publication"
+            ref.rationale = (
+                "Resolved record carries the PubMed publication type "
+                "'Retracted Publication': the cited source has been retracted.")
+            log.decided_by = "retracted_publication_pubtype"
+        return ref
+
     # UNSCOREABLE: the (claimed, resolved) pair is not a scoreable title
     # comparison -- a non-title input (journal name / regulatory code), a
     # placeholder ("[Not Available]"), or a book/container record cited as a
@@ -86,41 +141,6 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
         log.unscoreable_reason = F8_TIMING_BOUNDARY_UNRESOLVED
         return ref
 
-    # F8: the citation points at a RETRACTED source (RESEARCH_PLAN_v2.2 §4.3 --
-    # "F8 is deterministic (retraction flag from PubMed / Retraction Watch) and is
-    # routed through the existence-check layer with F1/F2, never reaching the human
-    # classifier"). ``log.retracted`` is the tri-state the existence layer recorded
-    # in run.process_reference; this branch is a pure read of it, so decide() makes
-    # no network call.
-    #
-    # Placement is load-bearing in BOTH directions. It sits BELOW the UNSCOREABLE
-    # branch (a non-title comparison carries no citation to judge at all) and ABOVE
-    # the same-work quarantine and every F1/F2 path: a resolved record marked
-    # retracted is F8 regardless of what the same-work rule concluded about title
-    # identity, and regardless of whether the metadata comparison flagged.
-    #
-    # ``is True`` is mandatory. False means "types fetched, not retracted"; None
-    # means "we never learned" (no resolved PMID, or the lookup failed) and is NOT
-    # an accusation -- precision-first, an unknown falls through to the normal path.
-    if log.retracted is True:
-        ref.label, ref.confidence = F8, "HIGH"
-        if log.f8_timing_status:
-            log.retraction_reason = "retracted_before_citation_31_day_floor_met"
-            ref.rationale = (
-                "The resolved work was formally retracted before citation and "
-                f"the conservative publication-date gap is "
-                f"{log.f8_timing_gap_days} days, meeting the registered 31-day "
-                "F8 floor.")
-            log.decided_by = "f8_retracted_before_citation_timing_met"
-        else:
-            # Legacy/development path retained for byte-compatible direct calls.
-            # production_launcher.launch_full always supplies the timing seam.
-            log.retraction_reason = "retracted_publication"
-            ref.rationale = (
-                "Resolved record carries the PubMed publication type "
-                "'Retracted Publication': the cited source has been retracted.")
-            log.decided_by = "retracted_publication_pubtype"
-        return ref
 
     # A deterministic identity rule found evidence of a translation, correction,
     # revision, or malformed rendering of the resolved work.  Keep the row

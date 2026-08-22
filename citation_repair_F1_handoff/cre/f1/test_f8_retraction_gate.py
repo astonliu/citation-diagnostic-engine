@@ -224,17 +224,44 @@ def test_f8_precedes_the_same_work_quarantine():
     assert out.log.retraction_reason == "retracted_publication"
 
 
-def test_unscoreable_still_wins_over_f8():
-    """A non-title comparison carries no citation to judge at all. The retraction
-    state stays on the log (it was measured); the ROUTE reason does not, because
-    the row did not take the F8 route."""
+def test_f8_now_wins_over_an_unscoreable_title():
+    """REVERSED, deliberately. This test previously asserted the opposite, on the
+    reasoning that "a non-title comparison carries no citation to judge at all".
+
+    That reasoning is about TITLE COMPARABILITY, which is what F2 needs. F8 needs
+    a resolved PMID and two dates; a missing or unparseable claimed title says
+    nothing about whether the cited work was retracted before it was cited.
+    Verified on PMC7474863, which cites two retracted Surgisphere papers 94 and
+    93 days after their notices: the ``element-citation`` one was labelled F8 and
+    the ``mixed-citation`` one -- no ``<article-title>``, hence
+    ``no_claimed_title`` -- was booked UNSCOREABLE. F8 recall was a function of
+    the publisher's XML markup rather than of the citation.
+    """
     ref = _resolved(_ref())
     ref.log.retracted = True
     ref.log.unscoreable_reason = "journal_as_title"
     out = decide(ref, False, None, None)
-    assert out.label == S.UNSCOREABLE
+    assert out.label == S.F8
     assert out.log.retracted is True
-    assert out.log.retraction_reason == ""
+    assert out.log.retraction_reason == "retracted_publication"
+    # The unscoreable reason is NOT erased. It was measured and it stays on the
+    # log; it simply no longer decides the label.
+    assert out.log.unscoreable_reason == "journal_as_title"
+
+
+def test_unscoreable_still_wins_when_there_is_no_retraction():
+    """The other half of the reordering, and the one that keeps it honest: only a
+    POSITIVE ``retracted is True`` outranks UNSCOREABLE. False (types fetched,
+    not retracted) and None (never learned) must both leave the row unscoreable
+    rather than promoting an unknown into an accusation."""
+    for state in (False, None):
+        ref = _resolved(_ref())
+        ref.log.retracted = state
+        ref.log.unscoreable_reason = "journal_as_title"
+        out = decide(ref, False, None, None)
+        assert out.label == S.UNSCOREABLE, state
+        assert out.log.decided_by == "unscoreable", state
+        assert out.log.retraction_reason == "", state
 
 
 def test_f8_fires_on_an_unflagged_reference():
