@@ -127,6 +127,7 @@ from .f7_entity import (
 # The opt-in full-text coverage path (DEC-030/032). Both live OUTSIDE the frozen
 # substrate for the same reason coverage_aggregate does: band_prompts.py cannot be
 # edited without drifting its pinned blob OID.
+from . import fulltext_reader as ftr
 from .coverage_aggregate import no_usable_fulltext_dict
 from .coverage_prompts_v3 import (
     COVERAGE_PROMPT_VERSION_V3,
@@ -1000,7 +1001,34 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
                 # present abstract throws away evidence we hold and calls the
                 # citation unjudgeable on the strength of a retrieval failure.
                 rec["fulltext_incomplete_hold"] = True
-                if jb.evidence_is_usable(item["evidence"]):
+                # WHICH KIND OF "INCOMPLETE" DECIDES WHETHER THE ABSTRACT IS AN
+                # ANSWER OR A DOWNGRADE.
+                #
+                # `no_pmcid` / `no_body`: the resolver answered and this article
+                # has no retrievable body. Retrying returns the same answer
+                # forever, so the abstract is not a lesser scope -- it is the
+                # whole of the evidence that will ever exist, and judging at
+                # abstract scope is the right and only answer.
+                #
+                # `resolver_error` / `body_unparseable` / `body_too_small`: the
+                # body may well exist and WE failed to get or read it. Judging
+                # the abstract here would silently downgrade the evidence scope
+                # of a row that was entitled to full text, and the record would
+                # carry an honest-looking abstract-scope verdict for a paper we
+                # merely failed to fetch. That row holds, and the retry gets its
+                # chance.
+                # `fulltext` is whatever the injected reader returned and may be
+                # any shape at all -- None, a string, an int. Read it defensively:
+                # a non-dict is an unretrieved body, not a crash, and certainly
+                # not a licence to judge at abstract scope.
+                reasons = (fulltext.get("incomplete_reasons") or []
+                           if isinstance(fulltext, dict) else [])
+                body_absent = ftr.body_is_permanently_absent(reasons)
+                rec["fulltext_incomplete_class"] = {
+                    "reasons": [str(r) for r in reasons],
+                    "body_permanently_absent": body_absent,
+                }
+                if body_absent and jb.evidence_is_usable(item["evidence"]):
                     verdicts = jb.coverage_verdicts(
                         claims, item["evidence"], judge=coverage_judge)
                     rec["abstract_scope_fallback"] = {

@@ -186,6 +186,42 @@ INCOMPLETE_REASONS = frozenset({
     REASON_BODY_TOO_SMALL, REASON_RESOLVER_ERROR,
 })
 
+# --- WHY the body is missing, split by WHAT A CONSUMER SHOULD DO ABOUT IT ----
+# The same distinction this module already draws between `no_pmcid` and
+# `resolver_error` -- "one is about the article, the other is about the wire" --
+# generalized, because a downstream scope decision turns on it.
+
+#: THE ARTICLE HAS NO RETRIEVABLE BODY. The resolver answered and there is no PMC
+#: full text, or there is a record with no body. Retrying returns the same answer
+#: forever, so the abstract is not a downgrade -- it is the whole of the evidence
+#: that will ever exist for this work, and judging at abstract scope is the right
+#: and only answer.
+BODY_ABSENT_REASONS = frozenset({REASON_NO_PMCID, REASON_NO_BODY})
+
+#: WE FAILED TO GET OR READ A BODY THAT MAY WELL EXIST. A transport failure, XML
+#: we could not parse, or a body that came back too small to be the real thing.
+#: A retry may return it. Falling back to abstract scope here would SILENTLY
+#: DOWNGRADE THE EVIDENCE SCOPE of a row that was entitled to full text, and the
+#: record would carry an honest-looking abstract-scope verdict for a paper whose
+#: body we simply failed to fetch. Hold instead, and let the retry happen.
+BODY_RETRIEVAL_FAILED_REASONS = frozenset({
+    REASON_RESOLVER_ERROR, REASON_BODY_UNPARSEABLE, REASON_BODY_TOO_SMALL})
+
+
+def body_is_permanently_absent(incomplete_reasons) -> bool:
+    """True only when EVERY reason says the article itself has no body.
+
+    Fails closed in both directions that matter. An empty or unrecognised reason
+    list is NOT "permanently absent": we do not know why the body is missing, and
+    guessing "the article has none" is exactly the downgrade this function exists
+    to prevent. A mixed list is treated as a retrieval failure, because one
+    unfetched body is enough to make full text the scope the row was entitled to.
+    """
+    reasons = [str(r) for r in (incomplete_reasons or [])]
+    if not reasons:
+        return False
+    return all(r in BODY_ABSENT_REASONS for r in reasons)
+
 SOURCE_CACHE = "cache"
 SOURCE_LIVE = "live"
 
