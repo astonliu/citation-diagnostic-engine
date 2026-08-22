@@ -106,7 +106,13 @@ CallVerifyContradiction = Callable[..., str]
 # Individual discovery records remain non-reportable; use ``record['reportable']``
 # and the manifest's F5 block for the effective run configuration.
 F5_REPORTABLE = True
-F5_CONTRADICTION_PROMPT_VERSION = "f5_contradiction_v3"
+# v4: the prompt now STATES the relation<->direction consistency rules that
+# _parse_contradiction has always enforced (see the `confirms`/`opposes`/`neutral`
+# checks below). It did not, so on real reversal data the model returned
+# `relation: neutral` alongside two clear disagreeing directions -- a rejected
+# response, which quarantines the stage and loses the pair silently. Observed on
+# both CAPS(1988)->CAST(1991) and Stampfer(1991)->HERS(1998)/WHI(2002).
+F5_CONTRADICTION_PROMPT_VERSION = "f5_contradiction_v4"
 F5_RESPONSE_PARSER_VERSION = "strict_f5_relation_spanids_v2"
 F5_VERIFIER_PROMPT_VERSION = "f5_positive_verifier_v1"
 F5_POLICY_VERSION = "f5_policy_v2_formal_path_b"
@@ -237,7 +243,18 @@ class F5Policy:
     tier_rule: Optional[str] = "equal_or_higher"  # agreed rule; mapping deferred
     require_attestation_for_path_a: bool = True
     attestation_types: frozenset = _ATTESTATION_TYPES
-    independence_rule: Optional[str] = None       # Lock D combinator: UNFROZEN
+    # Lock D combinator. ``None`` keeps the original fail-closed cell, where an
+    # unprovable independence HOLDS a directional contradiction as borderline.
+    # ``"contradiction_exempt_v1"`` implements the decision that independence is
+    # a guard against a group SUPERSEDING ITSELF WITH AGREEMENT -- a
+    # confirmatory re-analysis dressed as replication. It is not a reason to
+    # discount a group CONTRADICTING its own prior finding, which is if anything
+    # harder-won evidence than a stranger's. The gates it relaxes are reached
+    # only after ``directional_contradiction is True``, so the exemption applies
+    # to opposition and nothing else. SHARED STUDY CLUSTER still blocks: one
+    # dataset re-reported cannot supersede itself, and that is an identity fact,
+    # not an authorship one.
+    independence_rule: Optional[str] = "contradiction_exempt_v1"
     comparability_rule: Optional[str] = "v1"      # Sec 18a recommended v1
     confidence_floor: Optional[float] = 0.25      # discovery: low / high-recall
     eoc_caps_at_path_b: bool = True
@@ -315,11 +332,11 @@ def validate_f5_policy(policy: F5Policy) -> None:
         raise ValueError(
             "policy.tier_rule: only 'equal_or_higher' is implemented (the tier "
             "MAPPING is deferred to the classify_evidence_tier seam)")
-    if policy.independence_rule is not None:
+    if policy.independence_rule not in (None, "contradiction_exempt_v1"):
         raise ValueError(
-            "policy.independence_rule must be None: the Lock-D AND/OR combinator "
-            "is unfrozen and no alternative is implemented (the detector fails "
-            "closed at the combinator cell)")
+            "policy.independence_rule must be None or 'contradiction_exempt_v1': "
+            "no other Lock-D AND/OR combinator is implemented (the detector "
+            "fails closed at the combinator cell)")
     if policy.comparability_rule != "v1":
         raise ValueError(
             "policy.comparability_rule: only 'v1' (blueprint Sec 18a) is implemented")
@@ -1340,7 +1357,14 @@ class TemporalAssessorRun:
         # Ordinary uncertainty (borderline; blocks a confident negative; may surface).
         if comparability == "uncertain":
             return finish(_BORDERLINE, "comparability_uncertain", "surface")
-        if independence == "unknown":
+        if (independence == "unknown"
+                and policy.independence_rule != "contradiction_exempt_v1"):
+            # Reachable only past `directional_contradiction is True`, so what is
+            # being held here is a candidate that OPPOSES the cited finding and
+            # merely shares (or cannot disprove sharing) authorship. Under
+            # contradiction_exempt_v1 that is not a hold -- see independence_rule.
+            # `not_independent` above is untouched: it is only ever set from a
+            # shared study cluster, which is the same data, not the same people.
             return finish(_BORDERLINE, "independence_unknown", "surface")
 
         # QUALIFYING: full detector contract passes. Both engine booleans are
@@ -2470,7 +2494,12 @@ def validate_f5_record(
         elif expected == "uncertain":
             expected_reason, expected_disposition = \
                 "comparability_uncertain", "surface"
-        elif cand.get("independent") == "unknown":
+        elif (cand.get("independent") == "unknown"
+              and policy.independence_rule != "contradiction_exempt_v1"):
+            # MIRRORS the live gate. This ladder is a replay of the decision, so
+            # the exemption has to be applied in both places or a run that
+            # legitimately proceeded past unknown independence reads back as
+            # "reason/disposition drifted from stored decision facts".
             expected_reason, expected_disposition = \
                 "independence_unknown", "surface"
         elif (cand.get("verifier_response") is None
@@ -2737,16 +2766,43 @@ def validate_f5_record(
         if selected.get("comparability_decision") != "comparable":
             raise ValueError("QUALIFYING selected candidate is not comparable")
         independence_basis = selected.get("independence_basis")
-        if (selected.get("independent") != "independent"
+        if policy.independence_rule == "contradiction_exempt_v1":
+            # The THIRD independence gate, and the one that actually decides
+            # whether F5 can ever fire without proven-distinct data. Under
+            # contradiction_exempt_v1 an unprovable independence no longer sinks
+            # a directional contradiction (see independence_rule), so the
+            # invariant here is narrowed to what the exemption still forbids:
+            # the SAME STUDY reported twice. Shared authorship is not shared data.
+            if selected.get("independent") == "not_independent":
+                raise ValueError(
+                    "QUALIFYING selected candidate is the same study as the cited work")
+        elif (selected.get("independent") != "independent"
                 or independence_basis not in {
                     "explicit_distinct_data", "source_bound_distinct_data"}):
             raise ValueError("QUALIFYING selected candidate is not proven independent")
+        # The FOURTH independence gate: it replays the identity inputs and demands
+        # that a qualifying candidate's independence be BACKED -- either explicit
+        # distinct-data evidence or a source-bound span. Under
+        # contradiction_exempt_v1 a candidate may qualify with independence
+        # "unknown", and there is then no independence claim to back: requiring a
+        # distinct-data span for a record that never asserted independence is the
+        # old contract, and it fails every exempted pair. Records that DO assert
+        # independence are still validated in full below.
+        independence_exempted = (
+            policy.independence_rule == "contradiction_exempt_v1"
+            and selected.get("independent") == "unknown")
         cited_identity = identity_by_work.get(str(cited_work_id))
         candidate_identity = identity_by_work.get(str(selected_id))
         if cited_identity is None or candidate_identity is None:
             raise ValueError("QUALIFYING independence lacks stored identity inputs")
         replayed_relation = compare_studies(cited_identity, candidate_identity)
-        if independence_basis == "explicit_distinct_data":
+        # The one thing the exemption never waives: the replay must not have
+        # PROVEN these are the same study behind the recorded "unknown".
+        if independence_exempted:
+            if replayed_relation.independence == "not_independent":
+                raise ValueError(
+                    "QUALIFYING candidate replays as the same study as the cited work")
+        elif independence_basis == "explicit_distinct_data":
             if (replayed_relation.independence != "independent"
                     or replayed_relation.basis != "explicit_distinct_data"):
                 raise ValueError(

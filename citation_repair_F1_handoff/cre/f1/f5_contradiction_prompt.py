@@ -229,6 +229,24 @@ claim, the same primary/main outcome, a comparable population, and compatible re
 directions. ``mixed`` is not a clean directional contradiction. If the relation is
 confirms, mixed, neutral, or uncertain, directional_contradiction MUST be false.
 
+THE RELATION MUST AGREE WITH THE TWO DIRECTIONS YOU REPORT. These are hard
+consistency rules, not preferences, and a response breaking one is REJECTED
+OUTRIGHT -- the pair is then quarantined and no human ever sees it, so breaking a
+rule is strictly worse than abstaining. Treating "increase", "decrease" and
+"no_effect" as the CLEAR directions:
+
+  * confirms  requires cited_direction and candidate_direction to be THE SAME
+              clear direction.
+  * opposes   requires both to be clear AND DIFFERENT from each other.
+  * neutral   may NOT be used when both are clear and different. Two clear
+              directions that disagree ARE opposition -- including the case where
+              the cited work reports an effect and the candidate reports
+              "no_effect", which opposes a claim that the effect exists. If you
+              believe the papers are nonetheless not comparable, say so through
+              outcome_relation / population_relation / scope_mismatch_axis, or
+              report a direction as unclear -- do not record it as "neutral" while
+              also reporting two clear disagreeing directions.
+
 ABSTAINING IS A FIRST-CLASS ANSWER, and it is measurably worth using. Where the
 evidence does not settle it, use "uncertain" for claim_match and outcome_relation,
 and "unclear" for population_relation and scope_mismatch_axis. Do not force a

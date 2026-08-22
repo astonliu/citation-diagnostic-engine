@@ -510,16 +510,24 @@ def test_same_cohort_reanalysis_is_not_f5():
 # --------------------------------------------------------------------------
 # Row 5: independence unknown -> UNJUDGEABLE.
 # --------------------------------------------------------------------------
-def test_independence_unknown_holds():
-    # Missing candidate author info -> unknown -> borderline hold.
+# INDEPENDENCE NO LONGER HOLDS A CONTRADICTION (independence_rule
+# "contradiction_exempt_v1"). These three cases pinned the fail-closed Lock-D
+# cell, where an unprovable independence held a candidate that OPPOSES the cited
+# finding. Independence guards against a group superseding itself with
+# AGREEMENT -- a confirmatory re-analysis passed off as replication -- and a
+# group contradicting its own earlier result is not that. The `independent`
+# field is still assessed and still recorded; it just no longer vetoes.
+def test_independence_unknown_does_not_hold_a_contradiction():
+    # Missing candidate author info -> unknown -> no longer a hold.
     temporal, records, _ = run(candidates=(candidate(
         authors=(), registry_ids=(), demonstrably_distinct_from=()),))
-    assert temporal.state is TemporalState.UNJUDGEABLE
+    assert temporal.state is TemporalState.QUALIFYING_CONTRADICTION
     cand = records[0]["candidate_assessments"][0]
     assert cand["independent"] == "unknown"
+    assert cand["independence_basis"] == "author_info_missing"
 
 
-def test_author_overlap_open_combinator_holds():
+def test_author_overlap_does_not_hold_a_contradiction():
     # Shared author, no confirmed same cohort -> the OPEN Lock-D cell -> unknown.
     evidence = dict(EVIDENCE)
     evidence["cited_meta"] = {
@@ -529,7 +537,7 @@ def test_author_overlap_open_combinator_holds():
         candidates=(candidate(
             authors=("Smith",), registry_ids=(),
             demonstrably_distinct_from=()),))
-    assert temporal.state is TemporalState.UNJUDGEABLE
+    assert temporal.state is TemporalState.QUALIFYING_CONTRADICTION
     cand = records[0]["candidate_assessments"][0]
     assert cand["independent"] == "unknown"
     assert cand["independence_basis"] == "author_overlap_open_combinator"
@@ -544,12 +552,34 @@ def test_disjoint_authors_without_study_identity_remain_unknown():
         candidates=(candidate(
             authors=("Jones",), registry_ids=(),
             demonstrably_distinct_from=()),))
-    assert temporal.state is TemporalState.UNJUDGEABLE
+    assert temporal.state is TemporalState.QUALIFYING_CONTRADICTION
     candidate_row = records[0]["candidate_assessments"][0]
     assert candidate_row["independent"] == "unknown"
     assert candidate_row["independence_basis"] == \
         "disjoint_authorship_insufficient"
     assert candidate_row["study_cluster_uncertain"] is True
+
+
+def test_shared_study_cluster_still_blocks_despite_the_exemption():
+    """The exemption is about SHARED PEOPLE, never SHARED DATA.
+
+    One dataset re-reported cannot supersede itself, so `not_independent` from a
+    shared study cluster must still be a hard negative under
+    contradiction_exempt_v1.
+    """
+    evidence = dict(EVIDENCE)
+    evidence["cited_meta"] = {
+        "id": "W1", "authors": ["Smith"], "cited_tier": "rct",
+        "same_cohort_work_ids": ["W2"]}
+    temporal, records, _ = run(
+        evidence=evidence,
+        candidates=(candidate(
+            authors=("Smith",), registry_ids=(),
+            demonstrably_distinct_from=()),))
+    assert temporal.state is not TemporalState.QUALIFYING_CONTRADICTION
+    cand = records[0]["candidate_assessments"][0]
+    assert cand["independent"] == "not_independent"
+    assert cand["independence_basis"] == "shared_study_cluster"
 
 
 def test_explicitly_distinct_data_record_distinct_clusters():

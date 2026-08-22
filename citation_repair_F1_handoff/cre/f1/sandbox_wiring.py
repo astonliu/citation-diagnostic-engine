@@ -293,6 +293,24 @@ def fulltext_from_packet(packet: dict):
 # ==========================================================================
 # F5
 # ==========================================================================
+def _bench_date_precision(date_text: str) -> str:
+    """``day``/``month``/``year`` for a bench bank row, from the date's OWN shape.
+
+    ``f5_evidence_store`` requires a precision and refuses a blank one, and
+    ``build_f5`` never set it -- so every F5 run through the sandbox died at
+    ``invalid publication_date_precision`` before the first judgment. The
+    precision is DERIVED, never defaulted: claiming day precision for a packet
+    that only gave a year would tell the recency comparison it knows a day it
+    does not, and F5's whole question is which paper came later.
+    """
+    parts = str(date_text or "").strip().split("-")
+    if len(parts) >= 3 and all(parts[:3]):
+        return "day"
+    if len(parts) == 2 and all(parts):
+        return "month"
+    return "year"
+
+
 def build_f5(*, packet: dict, model: str, api_key: str = "") -> dict:
     """F5 seams and evidence builder, with candidates served from the bank.
 
@@ -341,6 +359,19 @@ def build_f5(*, packet: dict, model: str, api_key: str = "") -> dict:
             "abstract": paper.get("abstract") or "",
             "journal": paper.get("journal") or "",
             "pub_date": str(paper.get("year") or "")[:10],
+            "pub_date_precision": _bench_date_precision(
+                str(paper.get("year") or "")[:10]),
+            # classify_evidence_tier reads THESE two and nothing else. Without
+            # them every bench paper lands on UNCLASSIFIED_TIER, which stores as
+            # "preprint_unreviewed" -- a floor that can never outrank anything,
+            # so a real RCT superseder silently loses its standing.
+            "publication_types": list(paper.get("publication_types") or []),
+            "mesh_terms": list(paper.get("mesh_terms") or []),
+            # Independence is judged from author overlap. Without authors every
+            # candidate comes back independent="unknown" /
+            # "author_info_missing", and F5 requires an INDEPENDENT superseder --
+            # so the gate could never be exercised either way.
+            "authors": list(paper.get("authors") or []),
             "doi": paper.get("doi") or "",
             "bench_paper_id": paper_id,
         }
@@ -374,6 +405,10 @@ def build_f5(*, packet: dict, model: str, api_key: str = "") -> dict:
         "abstract": (packet.get("cited_abstract") or ""),
         "journal": cited.get("journal") or "",
         "pub_date": cited_date[:10],
+        "pub_date_precision": _bench_date_precision(cited_date[:10]),
+        "publication_types": list(packet.get("cited_publication_types") or []),
+        "mesh_terms": list(packet.get("cited_mesh_terms") or []),
+        "authors": list(packet.get("cited_authors") or []),
         "doi": str(cited.get("claimed_doi") or ""),
         "bench_paper_id": None,
         "bench_role": "cited_work",
@@ -417,12 +452,26 @@ def build_f5(*, packet: dict, model: str, api_key: str = "") -> dict:
         here that means nothing. The cited work's own bank row is never
         returned -- it is there for ``fetch_meta``, not as a candidate.
         """
-        return retrieved
+        # BANK ROWS, NOT BANK KEYS. make_retrieve_superseding_candidates skips
+        # every hit that is `not isinstance(hit, dict)`, so returning ids here
+        # dropped all candidates silently and every F5 run reported
+        # retrieval_empty -- a CONFIDENT-LOOKING "no later evidence exists" for a
+        # search that never examined one row. The rows are copied so a seam
+        # cannot mutate the bank between claims.
+        return tuple(dict(bank[key]) for key in retrieved)
 
+    # F5 NEEDS A BIGGER OUTPUT BUDGET THAN THE 1024 DEFAULT. Its contradiction
+    # judgment returns TWO verbatim spans (the cited finding and the candidate's
+    # contradiction) plus a rationale, and a clinical-trial abstract sentence is
+    # long. At 1024 the response came back empty and the stage died on
+    # JSONDecodeError "Expecting value: line 1 column 1", which reads like a
+    # malformed model rather than a truncated budget.
     generator = make_anthropic_call(
-        Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")), model)
+        Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")), model,
+        max_tokens=8192)
     verifier = make_anthropic_call(
-        Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")), model)
+        Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")), model,
+        max_tokens=8192)
 
     seams = build_f5_seams(
         fetch_meta=fetch_meta, fetch_abstract=fetch_abstract,
