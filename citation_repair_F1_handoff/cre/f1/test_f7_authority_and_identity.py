@@ -95,7 +95,7 @@ def test_legacy_path_keeps_a_confirmed_f7_label():
     rec = pair(f7_seams=seams(), f7_evidence_builder=builder(),
                f7_policy=f7t.policy())
     assert "F7" in rec["findings"]
-    assert rec["label"] == "F7"
+    assert rec["label"] == ["F7"]
     assert rec["disposition"] == jr.DISP_PREDICTED
 
 
@@ -107,7 +107,7 @@ def test_legacy_path_without_an_f7_finding_is_unchanged():
                    relation="equivalent")),
                f7_evidence_builder=builder(), f7_policy=f7t.policy())
     assert "F7" not in rec["findings"]
-    assert rec.get("label") is None
+    assert rec.get("label") == []
     assert rec["disposition"] == jr.DISP_HELD_FULL_COVERAGE
 
 

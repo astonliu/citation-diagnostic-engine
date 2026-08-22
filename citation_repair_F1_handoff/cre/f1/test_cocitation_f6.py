@@ -783,7 +783,7 @@ def test_orchestrator_holds_a_cocitation_covered_pair(tmp_path, monkeypatch):
     for cid in ("PMC1000:B1", "PMC1000:B2"):
         rec = rows[cid]
         assert rec["disposition"] == jr.DISP_HELD_COCITATION_COVERED
-        assert rec["label"] is None                 # never predicted F6
+        assert rec["label"] == []                 # never predicted F6
         assert rec["citance_group_members"] == ["PMC1000:B1", "PMC1000:B2"]
         assert rec["cocitation"]["size"] == 2
     # Held is still SCOREABLE: it stays in the annotation queue, never dropped.
@@ -860,7 +860,7 @@ def test_orchestrator_still_predicts_f6_when_no_sibling_covers(tmp_path,
     rows = [json.loads(line) for line in
             (out / "judgment_predictions.jsonl").read_text().splitlines()]
     # Both members contradict claim B, so no sibling can suppress either F6.
-    assert {r["label"] for r in rows} == {"F6"}
+    assert {tuple(r["label"]) for r in rows} == {("F6",)}
     assert {r["disposition"] for r in rows} == {jr.DISP_PREDICTED}
 
 

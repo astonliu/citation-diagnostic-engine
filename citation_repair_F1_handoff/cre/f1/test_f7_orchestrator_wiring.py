@@ -170,7 +170,7 @@ def test_unwired_f7_reproduces_the_base_commit_exactly(
         name, kwargs, disposition, label, route, findings):
     rec = pair(**kwargs)
     assert rec["disposition"] == disposition
-    assert rec["label"] == label
+    assert rec["label"] == ([label] if label else [])
     assert rec["route"] == route
     assert rec["findings"] == findings
     assert "f7_records" not in rec
@@ -213,7 +213,7 @@ def test_wired_different_entity_supported_is_a_predicted_f7(monkeypatch):
     assert [a.state for a in seen["entity_assessments"]] == [
         EntityState.DIFFERENT_ENTITY_SUPPORTED]
     assert rec["disposition"] == jr.DISP_PREDICTED
-    assert rec["label"] == "F7"
+    assert rec["label"] == ["F7"]
     assert "F7" in rec["findings"]
     assert len(rec["f7_records"]) == 1
 
@@ -224,7 +224,7 @@ def test_wired_same_entity_emits_no_f7_and_falls_through_the_ladder(monkeypatch)
                 f7_evidence_builder=builder(), f7_policy=f7t.policy())
     assert [a.state for a in seen["entity_assessments"]] == [EntityState.SAME_ENTITY]
     assert "F7" not in rec["findings"]
-    assert rec["label"] is None
+    assert rec["label"] == []
     # Falls through to the pre-existing ladder: full coverage, NOT_F4, proper origin.
     assert rec["disposition"] == jr.DISP_HELD_PENDING_F5_F7
 
@@ -236,7 +236,7 @@ def test_wired_unjudgeable_holds_and_never_fabricates_a_negative(monkeypatch):
         f7_evidence_builder=builder(), f7_policy=f7t.policy())
     assert [a.state for a in seen["entity_assessments"]] == [EntityState.UNJUDGEABLE]
     assert "F7" not in rec["findings"]
-    assert rec["label"] is None
+    assert rec["label"] == []
     assert "entity evidence is unjudgeable" in rec["hold_reasons"]
     # An unjudgeable entity is a HOLD, never a confident SAME_ENTITY.
     assert rec["f7_records"][0]["derived"] == "UNJUDGEABLE"
@@ -251,8 +251,12 @@ def test_f7_outranks_f6_when_both_fire():
                 f7_policy=f7t.policy())
     assert set(rec["findings"]) == {"F7", "F6"}
     assert rec["findings"][0] == "F7"          # engine order: F7, F6, F4, F3, F5
+    # PRECEDENCE STILL DECIDES ROUTING, not the label. The disposition is the
+    # single-valued thing F7 outranks F6 for; the label records both faults,
+    # because both were established and hiding one behind the other undercounts
+    # it in every rate derived from the label.
     assert rec["disposition"] == jr.DISP_PREDICTED
-    assert rec["label"] == "F7"
+    assert rec["label"] == ["F7", "F6"]
 
 
 # One wiring per SupportState member. WEAKER_STRENGTH cannot come from a coverage
@@ -289,7 +293,10 @@ def test_f7_runs_under_every_support_state(state, monkeypatch):
     assert [row.state for row in seen["claim_support"]] == [state]
     assert gen.calls, "F7 seams must be called regardless of support state"
     assert "F7" in rec["findings"]
-    assert rec["label"] == "F7"
+    # Every finding the pair established, in engine order -- under UNESTABLISHED
+    # that is F6 alongside F7, and under WEAKER_STRENGTH it is F4.
+    assert rec["label"] == list(rec["findings"])
+    assert rec["label"][0] == "F7"
     assert rec["f7_records"][0]["derived"] == "DIFFERENT_ENTITY_SUPPORTED"
 
 
@@ -331,7 +338,7 @@ def test_a_raising_evidence_builder_holds_f7_and_keeps_pair(tmp_path, monkeypatc
     assert rows[0]["disposition"] == jr.DISP_HELD_PENDING_F5_F7
     assert rows[0]["stage_failures"][0]["stage"] == "F7"
     assert "abstract" in rows[0]["stage_failures"][0]["message"]
-    assert rows[0]["label"] is None
+    assert rows[0]["label"] == []
     # The evidence-builder defect is visible to a human instead of dropping the
     # otherwise reasonable citation pair.
     queue = out_dir / "judgment_band_annotation_queue.jsonl"
@@ -398,7 +405,7 @@ def test_f7_records_never_leak_into_the_blind_annotation_payload(
 
     rows = [json.loads(l) for l in
             (out_dir / "judgment_predictions.jsonl").read_text().splitlines()]
-    assert rows[0]["label"] == "F7"            # an F7 record IS present
+    assert rows[0]["label"] == ["F7"]            # an F7 record IS present
     assert rows[0]["f7_records"]
 
     payloads = [json.loads(l) for l in

@@ -387,6 +387,7 @@ def decide_judgment(
     provenance: Optional[ProvenanceAssessment],
     temporal: Optional[TemporalAssessment],
     cogroup_covered: Sequence[bool] = (),
+    coverage_support: Sequence[ClaimSupport] = (),
 ) -> JudgmentDecision:
     """Apply the reviewed F3--F7 hierarchy to typed assessments.
 
@@ -408,18 +409,30 @@ def decide_judgment(
         untouched. A cited paper making a weaker claim than the citing sentence
         is F4 whether or not siblings exist, and a paper about a different entity
         is F7 the same way.
-      * ``all_supported`` still requires every claim strictly SUPPORTED by THIS
-        reference, so the F3 provenance gate is unchanged: a claim covered only
-        by a sibling never opens provenance on this paper.
+      * the provenance gate still requires every claim established by THIS
+        reference, so a claim covered only by a sibling never opens provenance
+        on this paper.
 
     Empty (the default) means no co-citation context and reproduces the previous
-    behaviour exactly."""
+    behaviour exactly.
+
+    ``coverage_support`` is the support tuple BEFORE F4's strength refinement.
+    When supplied it, not ``claim_support``, opens the provenance gate -- F3's
+    precondition is a COVERAGE fact ("the cited work establishes every atomic
+    claim"), whereas WEAKER_STRENGTH and a strength-UNJUDGEABLE are F4's
+    verdicts ABOUT an already-established claim. Gating F3 on the refined tuple
+    let F4 silently swallow F3: a sentence that both overstated its source and
+    cited the wrong origin reported only the overstatement, and one whose F4
+    verifier merely disagreed reported neither. UNESTABLISHED still closes the
+    gate -- that is F6's, and F3 is never inferred from lack of support."""
     if type(preband_cleared) is not bool:
         raise DiscriminatorContractError("preband_cleared must be an exact bool")
     claim_values = _validate_claims(claims)
     support = _validate_support(claim_values, claim_support)
     entities = _validate_entities(claim_values, entity_assessments)
     covered = _validate_cogroup_covered(claim_values, cogroup_covered)
+    coverage = (_validate_support(claim_values, coverage_support)
+                if coverage_support else support)
     if provenance is not None and not isinstance(provenance, ProvenanceAssessment):
         raise DiscriminatorContractError("provenance has the wrong contract type")
     if temporal is not None and not isinstance(temporal, TemporalAssessment):
@@ -463,8 +476,11 @@ def decide_judgment(
     if any(row.state is SupportState.WEAKER_STRENGTH for row in support):
         findings.append("F4")
 
-    all_supported = bool(support) and all(
-        row.state is SupportState.SUPPORTED for row in support
+    # COVERAGE, not the F4-refined tuple: an overstated claim is still an
+    # established one, and a citing sentence can be wrong about strength and
+    # about origin at once. Both findings are reachable together now.
+    all_supported = bool(coverage) and all(
+        row.state is SupportState.SUPPORTED for row in coverage
     )
     if all_supported:
         if provenance is None:

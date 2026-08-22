@@ -146,7 +146,7 @@ def test_genuine_same_type_sibling_mismatch_emits_source_bound_replay_valid_f7(
     normalizer = make_normalizer(tmp_path / "auth")
     manifest, rows, _ = _run(tmp_path / "run", monkeypatch, normalizer)
     row = rows[0]
-    assert row["label"] == "F7"
+    assert row["label"] == ["F7"]
     assert row["findings"][0] == "F7"
     assert manifest["seam_status"]["F7"]["fired"] == 1
     item = {
@@ -213,7 +213,8 @@ def test_production_f7_runs_under_coverage_support_states(
     normalizer = make_normalizer(tmp_path / "auth")
     _manifest, rows, _ = _run(
         tmp_path / "run", monkeypatch, normalizer, coverage_state=support)
-    assert rows[0]["label"] == "F7"
+    assert rows[0]["label"] == list(rows[0]["findings"])
+    assert rows[0]["label"][0] == "F7"
 
 
 def test_parallel_and_serial_f7_results_order_and_counters_are_identical(

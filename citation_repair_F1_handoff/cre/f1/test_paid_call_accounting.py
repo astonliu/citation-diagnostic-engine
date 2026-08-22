@@ -232,7 +232,7 @@ def test_f7_generator_and_verifier_are_booked_as_distinct_stages():
     one record cost, and only it separates the two roles per record."""
     rec = _f7_pair(f7_seams=seams())
 
-    assert rec["label"] == "F7"                     # the path really ran
+    assert rec["label"] == ["F7"]                     # the path really ran
     assert _stage(rec, "F7") == 3
     assert _stage(rec, "F7_verifier") == 1
     assert _ledger(rec)["total"] == sum(_ledger(rec)["by_stage"].values())

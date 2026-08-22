@@ -64,7 +64,7 @@ def test_judge_pair_routes_true_false_and_none_without_truthiness(
     )
     assert record["coverage_verdicts"][0]["established"] is established
     assert record["disposition"] == expected_disposition
-    assert record["label"] == expected_label
+    assert record["label"] == ([expected_label] if expected_label else [])
 
 
 def _forbidden_paths(value, path=()):

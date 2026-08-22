@@ -106,7 +106,7 @@ def test_coverage_gap_is_terminal_f6(tmp_path, monkeypatch):
     assert len(rows) == 1
     r = rows[0]
     assert r["disposition"] == jr.DISP_PREDICTED
-    assert r["label"] == "F6"
+    assert r["label"] == ["F6"]
     assert "F6" in r["findings"]
     assert r["route"] == "F6_FLAGGED"
 
@@ -119,7 +119,7 @@ def test_full_coverage_is_held_never_accurate(tmp_path, monkeypatch):
         disposition=CLEARED, monkeypatch=monkeypatch)
     r = rows[0]
     assert r["disposition"] == jr.DISP_HELD_FULL_COVERAGE
-    assert r["label"] is None
+    assert r["label"] == []
     assert r["label"] != "accurate"
 
 
@@ -916,7 +916,7 @@ def test_wired_f4_fires_weaker_strength(tmp_path, monkeypatch):
     rows, _m = run_wired(tmp_path, monkeypatch,
                          coverage=judge_established(True), call=disc_llm(f4=f4_fires()))
     assert rows[0]["disposition"] == jr.DISP_PREDICTED
-    assert rows[0]["label"] == "F4"
+    assert rows[0]["label"] == ["F4"]
     assert "F4" in rows[0]["findings"]
 
 
@@ -926,7 +926,7 @@ def test_wired_proper_origin_holds_pending_f5_f7(tmp_path, monkeypatch):
                          call=disc_llm(f4=f4_json(), v2=json.dumps(
                              {"verdict": "originates", "evidence_span": "", "rationale": "x"})))
     assert rows[0]["disposition"] == jr.DISP_HELD_PENDING_F5_F7
-    assert rows[0]["label"] is None
+    assert rows[0]["label"] == []
     assert rows[0]["provenance"]["state"] == "PROPER_ORIGIN"
 
 
@@ -943,7 +943,7 @@ def test_wired_f3_confirmed_misattribution(tmp_path, monkeypatch):
         f3_fetch_reflist=lambda pmcid: ([{"title": "Primary", "claimed_pmid": "222", "year": 2010}], True),
         f3_resolve_pmcid=lambda pmid: "PMC999")
     assert rows[0]["disposition"] == jr.DISP_PREDICTED
-    assert rows[0]["label"] == "F3"
+    assert rows[0]["label"] == ["F3"]
     assert rows[0]["provenance"]["state"] == "MISATTRIBUTED_CONFIRMED"
     assert len(rows[0]["provenance"]["origin_chain"]) == 2
 
@@ -991,7 +991,7 @@ def test_wired_f6_still_dominant(tmp_path, monkeypatch):
                          extractor=extractor_of("c1", "c2"),
                          coverage=judge_established(False, True), call=disc_llm(f4=f4_json()))
     assert rows[0]["disposition"] == jr.DISP_PREDICTED
-    assert rows[0]["label"] == "F6"
+    assert rows[0]["label"] == ["F6"]
 
 
 # --------------------------------------------------------------------------
@@ -1019,7 +1019,7 @@ def test_wired_formal_mode_is_reportable_with_model_ids(tmp_path, monkeypatch):
                         call=disc_llm(f4=f4_fires()),
                         f4_verifier_call_llm=distinct_verifier,
                         f4_verifier_model_id="ver-model")
-    assert rows[0]["label"] == "F4"
+    assert rows[0]["label"] == ["F4"]
     assert verifier_calls["n"] == 1                # the distinct verifier ran
     assert m["f4"]["mode"] == "formal"
     assert m["f4"]["reportable"] is True

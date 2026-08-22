@@ -55,7 +55,8 @@ from typing import Optional
 import requests
 
 from .band_prompts import _MISSING_ABSTRACT_SENTINELS
-from .ncbi_meta import EFETCH, TOOL, DEFAULT_EMAIL, NCBI, request_with_retry
+from .ncbi_meta import (EFETCH, TOOL, DEFAULT_EMAIL, NCBI,
+                        RetrievalUnavailable, request_with_retry)
 
 
 def _cache_path(cache_dir: str, pmid: str) -> str:
@@ -111,8 +112,16 @@ def _parse_abstract(xml_text: str) -> "str | None":
 
 
 def fetch_abstract(pmid, *, api_key: str = "", email: str = DEFAULT_EMAIL,
-                   session=None, cache_dir: "str | None" = None) -> Optional[str]:
+                   session=None, cache_dir: "str | None" = None,
+                   strict: bool = False) -> Optional[str]:
     """Fetch the cited paper's abstract text for ``pmid``, or None on any failure.
+
+    ``strict`` splits that "any failure" in two. Without it the contract is
+    unchanged: None means anything went wrong. With it, None means PubMed
+    ANSWERED and the record carries no usable abstract, while a lookup that did
+    not answer raises :class:`~.ncbi_meta.RetrievalUnavailable`. Callers whose
+    verdict depends on the difference -- an F3 origin candidate holds either way,
+    but only one of the two is evidence about the paper -- pass ``strict=True``.
 
     See the module docstring for the full contract, the sentinel guard, the
     structured-abstract join convention, and the drive-first cache."""
@@ -132,9 +141,16 @@ def fetch_abstract(pmid, *, api_key: str = "", email: str = DEFAULT_EMAIL,
 
     try:
         r = request_with_retry(session, EFETCH, params, limiter=NCBI, timeout=20)
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        if strict:
+            raise RetrievalUnavailable(
+                f"abstract transport failure for {pmid}: {exc}") from exc
         return None
     if r is None or r.status_code != 200 or not r.text.strip():
+        if strict:
+            raise RetrievalUnavailable(
+                f"abstract lookup did not answer for {pmid}: "
+                f"status={getattr(r, 'status_code', None)}")
         return None
 
     abstract = _parse_abstract(r.text)

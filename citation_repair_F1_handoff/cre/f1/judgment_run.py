@@ -96,7 +96,7 @@ from .judgment_engine import (
 from .parser import parse_pmc_xml
 from .band_prompts import CLAIM_EXTRACT_PROMPT_VERSION, COVERAGE_PROMPT_VERSION
 from .recording_adapter import paid_call_meter
-from .ncbi_meta import DEFAULT_EMAIL
+from .ncbi_meta import DEFAULT_EMAIL, RetrievalUnavailable
 from .f4_strength import (
     F4Policy,
     F4_STRENGTH_PROMPT,
@@ -214,8 +214,14 @@ _SCOREABLE = frozenset(
 )
 
 
-def _record_stage_failure(rec: dict, stage: str, exc: ValueError) -> None:
-    """Keep a model/schema failure local to its taxonomy stage."""
+def _record_stage_failure(rec: dict, stage: str, exc: BaseException) -> None:
+    """Keep a model/schema failure local to its taxonomy stage.
+
+    ``error_type`` is what separates a malformed model reply (``ValueError``)
+    from a lookup that never answered (``RetrievalUnavailable``). Both hold the
+    pair; only the first is a statement about the citation. A reader computing a
+    rate must be able to subtract the second, and before this they read the same.
+    """
     rec.setdefault("stage_failures", []).append({
         "stage": stage,
         "error_type": type(exc).__name__,
@@ -830,7 +836,7 @@ def _new_record(item: dict) -> dict:
         "preband_label": None,
         "route": None,
         "disposition": None,
-        "label": None,                 # taxonomy label; only F6 is emitted live
+        "label": [],                   # taxonomy labels; only F6 is emitted live
         "findings": [],
         "hold_reasons": [],
         "atomic_claims": [],
@@ -883,7 +889,7 @@ def _excluded_record(ref, disposition: str, preband_label=None,
         "preband_label": preband_label,
         "route": None,
         "disposition": disposition,
-        "label": None,
+        "label": [],
         "findings": [],
         "hold_reasons": [],
         "atomic_claims": [],
@@ -1038,7 +1044,7 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
                 rec.get("claim_input_status") == tox.CLAIM_INPUT_PROSE
                 and int(rec.get("claim_extraction_attempts") or 0)
                 >= tox.CLAIM_EXTRACTION_ATTEMPTS)
-    except ValueError as exc:
+    except (ValueError, RetrievalUnavailable) as exc:
         _record_stage_failure(rec, "claim_extraction", exc)
         _record_attempt(rec, stage="claim_extraction",
                         attempt=int(rec.get("claim_extraction_attempts") or 1),
@@ -1152,7 +1158,7 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
                                                for _ in cl],
                         prompt_version=COVERAGE_PROMPT_VERSION_V3,
                         parser_version=RESPONSE_PARSER_VERSION_V3)
-    except ValueError as exc:
+    except (ValueError, RetrievalUnavailable) as exc:
         _record_stage_failure(rec, "coverage", exc)
         verdicts = _coverage_failure_verdicts(
             claims, item["evidence"], exc, fulltext_path=fulltext_path)
@@ -1352,7 +1358,7 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
                 verifier_call_llm=f4_verify,
                 policy=policy)
             rec["strength_records"] = list(strength_records)
-        except ValueError as exc:
+        except (ValueError, RetrievalUnavailable) as exc:
             _record_stage_failure(rec, "F4", exc)
             support = tuple(
                 ClaimSupport(
@@ -1376,16 +1382,30 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
             } for row in coverage_support
                 if row.state is SupportState.SUPPORTED]
 
-    all_supported = bool(support) and all(
-        s.state is SupportState.SUPPORTED for s in support)
+    # COVERAGE-level support opens F3, not the F4-refined tuple. F4 rewrites a
+    # SUPPORTED claim to WEAKER_STRENGTH when it overstates, and to UNJUDGEABLE
+    # when generator and verifier disagree -- neither says the cited work failed
+    # to establish the claim, which is the only thing F3's gate is about. Reading
+    # the refined tuple here meant an F4 finding, or even an unresolved F4,
+    # suppressed the provenance question entirely and F3 never ran.
+    all_supported = bool(coverage_support) and all(
+        s.state is SupportState.SUPPORTED for s in coverage_support)
 
     # F3 (provenance) only under full support (engine requires provenance=None
     # otherwise). Unwired -> UNJUDGEABLE seam (not evaluated, honest hold).
     provenance = None
     if all_supported:
         if discriminator_call_llm is not None:
-            cited_pmcid = (f3_resolve_pmcid(item["cited_pmid"])
-                           if f3_resolve_pmcid is not None else None)
+            # INSIDE the stage's own error handling. This lookup is a seam like
+            # any other and, under `strict`, raises when NCBI does not answer --
+            # unwrapped, that outage escaped judge_pair and killed the whole run
+            # instead of holding one pair with a named reason.
+            try:
+                cited_pmcid = (f3_resolve_pmcid(item["cited_pmid"])
+                               if f3_resolve_pmcid is not None else None)
+            except (ValueError, RetrievalUnavailable) as exc:
+                _record_stage_failure(rec, "F3", exc)
+                cited_pmcid = None
             # BOOKED SEPARATELY FROM F4 even though it is the same transport.
             # The receipt cannot separate them -- both are
             # `discriminator_call_llm` -- so this ledger is the only place a
@@ -1398,8 +1418,13 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
                 cited_is_review=item.get("cited_is_review"),
                 policy=f3_policy or DEFAULT_F3_POLICY)
             try:
-                provenance = assessor(claims, support)
-            except ValueError as exc:
+                # COVERAGE support, matching the gate above and the engine's.
+                # The assessor uses this tuple for exactly one thing -- the
+                # index-aligned all-SUPPORTED precondition -- so handing it the
+                # F4-refined states made it refuse, without a single model call,
+                # every pair F4 had touched.
+                provenance = assessor(claims, coverage_support)
+            except (ValueError, RetrievalUnavailable) as exc:
                 _record_stage_failure(rec, "F3", exc)
                 provenance = ProvenanceAssessment(
                     ProvenanceState.UNJUDGEABLE,
@@ -1456,7 +1481,7 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
                     validate_f5_record(
                         f5_record, effective_f5_policy, packet_map)
             rec["f5_records"] = list(f5_records)
-        except ValueError as exc:
+        except (ValueError, RetrievalUnavailable) as exc:
             _record_stage_failure(rec, "F5", exc)
             temporal = TemporalAssessment(
                 TemporalState.UNJUDGEABLE,
@@ -1471,7 +1496,7 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
     if f7_seams is not None and f7_evidence_builder is not None:
         try:
             evidence_context = f7_evidence_builder(item)
-        except ValueError as exc:
+        except (ValueError, RetrievalUnavailable) as exc:
             _record_stage_failure(rec, "F7", exc)
             entities = tuple(EntityAssessment(
                 index, EntityState.UNJUDGEABLE,
@@ -1501,7 +1526,7 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
                 for record in entity_assessor.records:
                     validate_f7_record(record, evidence_context)
                 rec["f7_records"] = list(entity_assessor.records)
-            except ValueError as exc:
+            except (ValueError, RetrievalUnavailable) as exc:
                 _record_stage_failure(rec, "F7", exc)
                 entities = tuple(EntityAssessment(
                     index, EntityState.UNJUDGEABLE,
@@ -1516,7 +1541,8 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
     decision = decide_judgment(
         preband_cleared=True, claims=claims, claim_support=support,
         entity_assessments=entities, provenance=provenance,
-        temporal=temporal, cogroup_covered=effective_cogroup_covered)
+        temporal=temporal, cogroup_covered=effective_cogroup_covered,
+        coverage_support=coverage_support)
     rec["findings"] = list(decision.findings)
     rec["hold_reasons"] = list(decision.hold_reasons)
     for failure in rec.get("stage_failures") or []:
@@ -1552,7 +1578,7 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
         # precedence puts it there.
         if "F7" in decision.findings:
             rec["disposition"] = DISP_PREDICTED
-            rec["label"] = "F7"
+            rec["label"] = list(decision.findings)
             return rec
         if r == cocitation.ROUTE_UNSUPPORTED_MEMBER:
             rec["disposition"] = DISP_HELD_UNSUPPORTED_COCITATION_MEMBER
@@ -1578,7 +1604,7 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
                 raise DiscriminatorContractError(
                     "route F6_FLAGGED but engine findings lack F6")
             rec["disposition"] = DISP_PREDICTED
-            rec["label"] = "F6"
+            rec["label"] = list(decision.findings)
         elif "F5" in decision.findings:
             # THE OTHER HALF OF THE EARLY-RETURN BUG DESCRIBED ABOVE, fixed where
             # that comment says it belongs: after the F6 route, because precedence
@@ -1593,7 +1619,7 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
             # negatives_for_unbuilt_gates greps this source to keep the
             # orchestrator a thin wiring layer, and a comment defeats that grep.)
             rec["disposition"] = DISP_PREDICTED
-            rec["label"] = "F5"
+            rec["label"] = list(decision.findings)
         elif r == jb.ROUTE_FULL_COVERAGE:
             rec["disposition"] = DISP_HELD_FULL_COVERAGE     # F3/F7 uncleared
         else:
@@ -1604,14 +1630,20 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
     # seams are wired. Precedence follows the engine ordering (F7, F6, F4, F3, F5):
     # F7 rides highest, F5 lowest and only owns the label when it is the sole fault.
     findings = decision.findings
+    # THE LABEL CARRIES EVERY ESTABLISHED FINDING, not only the precedence
+    # winner. F4 (strength) and F3 (provenance) are independent axes and one
+    # sentence can be wrong on both at once, so collapsing to a single label hid
+    # a confirmed fault behind another and undercounted it in every rate derived
+    # from `label`. DISPOSITION stays single-valued below -- that decides
+    # routing, which genuinely has to pick one.
     if "F7" in findings:
         rec["disposition"] = DISP_PREDICTED
-        rec["label"] = "F7"
+        rec["label"] = list(findings)
     elif "F6" in findings:
         if solo_route != jb.ROUTE_F6_FLAGGED:
             raise DiscriminatorContractError("F6 finding without an F6 coverage route")
         rec["disposition"] = DISP_PREDICTED
-        rec["label"] = "F6"
+        rec["label"] = list(findings)
     elif (solo_route == jb.ROUTE_F6_FLAGGED
           and r == cocitation.ROUTE_GROUP_COVERED
           and cogroup_covered and not findings):
@@ -1624,13 +1656,13 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
         rec["disposition"] = DISP_HELD_COCITATION_COVERED
     elif "F4" in findings:
         rec["disposition"] = DISP_PREDICTED
-        rec["label"] = "F4"
+        rec["label"] = list(findings)
     elif "F3" in findings:
         rec["disposition"] = DISP_PREDICTED
-        rec["label"] = "F3"
+        rec["label"] = list(findings)
     elif "F5" in findings:
         rec["disposition"] = DISP_PREDICTED
-        rec["label"] = "F5"
+        rec["label"] = list(findings)
     elif r == cocitation.ROUTE_UNSUPPORTED_MEMBER:
         rec["disposition"] = DISP_HELD_UNSUPPORTED_COCITATION_MEMBER
     elif any(s.state is SupportState.UNJUDGEABLE for s in support):
@@ -1767,7 +1799,7 @@ def _module_hashes(fulltext_path: bool, f5_seams, f7_seams) -> dict:
     return out
 
 
-def _f3_manifest_block(f3_policy, discriminator_wired: bool) -> dict:
+def _f3_manifest_block(f3_policy, f3_wired: bool) -> dict:
     """The ``"f3"`` block: the EFFECTIVE policy, not the default it may not be.
 
     F3's hop limit, trace sources and unresolved state govern whether a claim
@@ -1776,7 +1808,7 @@ def _f3_manifest_block(f3_policy, discriminator_wired: bool) -> dict:
     """
     policy = f3_policy if f3_policy is not None else DEFAULT_F3_POLICY
     return {
-        "wired": discriminator_wired,
+        "wired": f3_wired,
         "origin_sensitive_prompt_version": policy.origin_sensitive_prompt_version,
         "v3_select_prompt_version": policy.v3_select_prompt_version,
         "v4_prompt_version": policy.v4_prompt_version,
@@ -2611,6 +2643,17 @@ def run_natural_judgment(
     # and seam_status.F7 so the two cannot disagree. It is the same condition
     # judge_pair_finish actually branches on.
     f7_wired = f7_seams is not None and f7_evidence_builder is not None
+    # THE SAME RULE FOR F3, and for the same reason -- but F3 needs THREE seams,
+    # not one. `discriminator_call_llm` alone only buys the model calls; without
+    # `f3_resolve_pmcid` the cited PMCID is None and without `f3_fetch_reflist`
+    # the candidate list is empty, and each of those returns a flat hold from
+    # f3_provenance (:453, :458) with no model consulted. Reporting wired=True on
+    # the discriminator alone told every reader that a run had assessed F3 when
+    # it was structurally incapable of emitting one -- an F3 count of 0 that
+    # meant "not asked", printed as if it meant "asked and found none".
+    f3_wired = (discriminator_call_llm is not None
+                and f3_fetch_reflist is not None
+                and f3_resolve_pmcid is not None)
     f7_reachability_report = None
     if f7_seams is not None:
         from .f7_entity import validate_f7_policy
@@ -2915,8 +2958,8 @@ def run_natural_judgment(
              "link": prev_link}, ensure_ascii=False) + "\n")
         side_fh.flush()
         bump(rec["disposition"])
-        if rec.get("label"):
-            emitted_labels[rec["label"]] = emitted_labels.get(rec["label"], 0) + 1
+        for _label in rec.get("label") or ():
+            emitted_labels[_label] = emitted_labels.get(_label, 0) + 1
         for finding in rec.get("findings") or []:
             finding_labels[finding] = finding_labels.get(finding, 0) + 1
         # Mechanical F4 counters, derived from the audit records themselves.
@@ -3452,7 +3495,7 @@ def run_natural_judgment(
             **({"stop_sequences": list(stop_sequences)} if stop_sequences else {}),
             **({"temperature": temperature} if temperature is not None else {}),
         },
-        "f3": _f3_manifest_block(f3_policy, discriminator_call_llm is not None),
+        "f3": _f3_manifest_block(f3_policy, f3_wired),
         # ONE expression feeds both this block's "wired" and seam_status.F7's,
         # so the two can no longer contradict each other inside one manifest.
         # The block is still emitted on f7_seams alone -- "seams supplied, no
@@ -3569,9 +3612,14 @@ def run_natural_judgment(
                                .get("F2") or {}).get("performed")),
                 "gate": "canonical pre-band F2 attestation",
             },
-            "F3": {"wired": discriminator_call_llm is not None,
+            "F3": {"wired": f3_wired,
                    "fired": emitted_labels.get("F3", 0),
-                   "gate": "discriminator_call_llm"},
+                   "gate": ("discriminator_call_llm + f3_resolve_pmcid "
+                            "+ f3_fetch_reflist"),
+                   "seams": {"discriminator_call_llm":
+                             discriminator_call_llm is not None,
+                             "f3_resolve_pmcid": f3_resolve_pmcid is not None,
+                             "f3_fetch_reflist": f3_fetch_reflist is not None}},
             "F4": {"wired": discriminator_call_llm is not None,
                    "fired": emitted_labels.get("F4", 0),
                    "findings": finding_labels.get("F4", 0),

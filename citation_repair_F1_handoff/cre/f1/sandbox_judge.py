@@ -197,9 +197,52 @@ def _abstract_fetcher(packet: dict):
     put in front of the judge.
     """
     abstract = (packet.get("cited_abstract") or "").strip()
+    # PER-PMID, because this seam serves TWO different works. F3's V4 step calls
+    # it with the CANDIDATE PRIMARY's pmid and then requires its origin span to
+    # appear verbatim in what comes back (f3_provenance.py:468-475). A pmid-blind
+    # fetcher handed V4 the cited review's abstract for every candidate, so a
+    # confirmed misattribution could carry an origin span quoted from the very
+    # work it was accusing -- a wrong verdict wearing a real chain, not a hold.
+    abstracts = packet.get("abstracts") or {}
+    if not isinstance(abstracts, dict):
+        raise PacketError("abstracts must be an object keyed by PMID")
+    abstracts = {str(k).strip(): (v or "").strip() for k, v in abstracts.items()}
+    cited_pmid = str((packet.get("cited_claimed") or {}).get("claimed_pmid") or "").strip()
 
-    def fetch_abstract(_pmid):
-        return abstract or None
+    # LIVE DISCOVERY MODE. Without it the packet must name every abstract V4
+    # could ask for, which means the author has already decided which reference
+    # is the rightful primary -- the bench would be checking that the engine
+    # agrees with an answer it was handed. With it, the packet supplies only the
+    # claim and the CITED work, and V3/V4 must find the origin in the cited
+    # work's own bibliography unaided. Named in the record because the two answer
+    # different questions.
+    live = bool(packet.get("live_abstract_lookup"))
+    cache: dict = {}
+
+    def fetch_abstract(pmid):
+        key = str(pmid or "").strip()
+        if key and key in abstracts:
+            return abstracts[key] or None
+        # The cited work keeps its dedicated field. When the packet names no
+        # cited pmid there is nothing to disambiguate, so the old behaviour
+        # stands; when it does, an unknown pmid returns None and the caller
+        # holds -- which is the honest answer to "I have no text for that work".
+        if not cited_pmid or key == cited_pmid or not key:
+            return abstract or None
+        if live:
+            if key not in cache:
+                from .evidence_reader import fetch_abstract as _live_abstract
+                # strict: a lookup that ANSWERS "no abstract on record" caches
+                # "" and holds; one that DID NOT ANSWER raises, and the run books
+                # it as an F3 stage failure. Swallowing both into "" made an
+                # outage look like a paper with no abstract -- the same
+                # conflation this mode exists to avoid, one layer down. Not
+                # cached, so a retry can still succeed.
+                cache[key] = _live_abstract(
+                    key, api_key=os.environ.get("NCBI_API_KEY", ""),
+                    strict=True) or ""
+            return cache[key] or None
+        return None
 
     return fetch_abstract
 
@@ -218,8 +261,15 @@ def _reflist_fetcher(packet: dict):
     if not isinstance(rows, list):
         raise PacketError("cited_reference_list must be a list")
 
+    # (candidates, available) -- ncbi_pmc_reflist's shape, which BOTH consumers
+    # destructure. Returning the bare rows was wrong twice over:
+    # f3_provenance._assemble_candidates requires a 2-tuple and yields [] for
+    # anything else (so F3 held UNJUDGEABLE with a full bibliography in hand),
+    # and judgment_band:369 does `prov, avail = fetch_reflist(...)`, which
+    # RAISES for any list whose length is not exactly 2 and silently misbinds
+    # prov/avail when it is.
     def fetch_reflist(_pmid):
-        return tuple(rows)
+        return tuple(rows), True
 
     return fetch_reflist
 
@@ -255,6 +305,28 @@ def judge(packet: dict, *, model: str, api_key: str = "",
             "F3 selected but the packet carries no cited_reference_list; F3 is "
             "provenance-only and cannot be asked without the cited work's own "
             "bibliography")
+
+    # THE SECOND HALF OF THE SAME PRECONDITION. The provenance assessor keys the
+    # reference list by the cited work's PMCID and returns None -- a flat hold --
+    # when it is blank (f3_provenance.py:453). Wiring the bibliography without
+    # the id that opens it produced UNJUDGEABLE on every F3 packet ever run,
+    # while the manifest recorded F3 as wired. Refuse at load like the reflist
+    # gate above rather than hold at judgment: the packet is incomplete, and a
+    # hold is indistinguishable from "the model looked and was unsure".
+    if ("F3" in picked and not (packet.get("abstracts") or {})
+            and not packet.get("live_abstract_lookup")):
+        raise PacketError(
+            "F3 selected but the packet carries no abstracts map; V4 confirms a "
+            "candidate primary by finding the origin span in THAT work's "
+            "abstract, so without one every candidate holds and no F3 can be "
+            "confirmed")
+
+    cited_pmcid = str(packet.get("cited_pmcid") or "").strip()
+    if "F3" in picked and not cited_pmcid:
+        raise PacketError(
+            "F3 selected but the packet carries no cited_pmcid; the provenance "
+            "assessor addresses the cited work's reference list by PMCID and "
+            "cannot reach it without one")
 
     plan = {
         "citation_id": item["citation_id"],
@@ -304,8 +376,18 @@ def judge(packet: dict, *, model: str, api_key: str = "",
         plan["wiring_provenance"] = prov
 
     if dry_run:
+        # THE BAND SEAMS BELONG IN THE DRY RUN TOO. `extra` carries only the
+        # F5/F7 additions, so an F3 or F4 packet reported `wired_seams: []` --
+        # the one artifact a reader gets before paying for a run, saying the
+        # taxonomy they selected was not wired when it was. Named here from the
+        # same conditions the real wiring below uses.
+        dry_seams = set(extra)
+        if picked:
+            dry_seams.add("discriminator_call_llm")
+        if "F3" in picked:
+            dry_seams.update(("f3_fetch_reflist", "f3_resolve_pmcid"))
         return {"dry_run": True, "plan": plan, "item": item,
-                "wired_seams": sorted(extra)}
+                "wired_seams": sorted(dry_seams)}
 
     # ONE receipt for the whole run, constructed exactly as the launcher does:
     # the model is fixed at construction and the resolved temperature is the
@@ -334,6 +416,12 @@ def judge(packet: dict, *, model: str, api_key: str = "",
         # reflist/pmcid seams below.
         "discriminator_call_llm": call_llm if picked else None,
         "f3_fetch_reflist": fetch_reflist if "F3" in picked else None,
+        # The packet IS the resolution. A bench that called ncbi_pmid_to_pmcid
+        # would answer a question about today's PMC rather than about the pair
+        # the user hand-authored, and would fail closed ("" on any error) in a
+        # way indistinguishable from a genuine no-PMC-full-text answer.
+        "f3_resolve_pmcid": ((lambda _pmid: cited_pmcid)
+                             if "F3" in picked else None),
     }
     receipt = jr_receipt(model)
     wired = receipt.wrap_all(seams)
@@ -362,6 +450,7 @@ def judge(packet: dict, *, model: str, api_key: str = "",
             wired["discriminator_call_llm"]
             if ("F4" in picked or "F3" in picked) else None),
         f3_fetch_reflist=wired["f3_fetch_reflist"],
+        f3_resolve_pmcid=wired["f3_resolve_pmcid"],
         **extra,
     )
 

@@ -64,7 +64,25 @@ TOOL = "cre-ncbi-meta"
 DEFAULT_EMAIL = "aston.hliu@gmail.com"
 
 
-class ResolverError(RuntimeError):
+class RetrievalUnavailable(RuntimeError):
+    """A lookup DID NOT ANSWER: transport failure, non-200, unparseable payload.
+
+    THE ONE DISTINCTION THAT CORRUPTED A NUMBER, given a name every taxonomy can
+    raise. Every NCBI helper here fails closed to a falsy value, which reads
+    identically whether the resolver answered "this article has no PMC full
+    text" or never answered at all. The first is a fact about the article and is
+    a legitimate hold; the second is a fact about the network, and counting it as
+    the first turns an outage into evidence about the corpus.
+
+    ``fulltext_reader`` already drew this line for F6 with its ``no_pmcid`` vs
+    ``resolver_error`` reasons. This is the same line, raised rather than
+    returned, so F3/F5/F7 -- whose seams have no reason vocabulary of their own
+    -- get it without each inventing one. Callers that want the old
+    swallow-everything contract simply do not pass ``strict``.
+    """
+
+
+class ResolverError(RetrievalUnavailable):
     """The PMID -> PMCID resolver did not answer.
 
     Transport failure, non-200, an unparseable body, or a payload whose top-level
@@ -247,7 +265,7 @@ def ncbi_pmids_to_pmcids(pmids, api_key: str = "", email: str = "",
 
 
 def ncbi_pmid_to_pmcid(pmid: str, api_key: str = "", email: str = "",
-                       session=None) -> str:
+                       session=None, strict: bool = False) -> str:
     """Resolve ONE PMID to the PMCID of its own PMC full text. ``""`` when the
     article has no PMC full text, AND ``""`` on any failure.
 
@@ -265,12 +283,18 @@ def ncbi_pmid_to_pmcid(pmid: str, api_key: str = "", email: str = "",
     try:
         return ncbi_pmids_to_pmcids([pmid], api_key, email,
                                     session=session).get(str(pmid).strip(), "")
-    except (ResolverError, requests.RequestException):
+    except (ResolverError, requests.RequestException) as exc:
+        # strict: the resolver DID NOT ANSWER, and "" would be indistinguishable
+        # from it answering that this article has no PMC full text.
+        if strict:
+            raise ResolverError(
+                f"PMID->PMCID resolver failed for {pmid}: "
+                f"{type(exc).__name__}: {exc}") from exc
         return ""
 
 
 def ncbi_pmc_reflist(pmcid: str, api_key: str = "", email: str = "",
-                     session=None):
+                     session=None, strict: bool = False):
     """Fetch + parse a PMC review's own reference list (EFetch db=pmc, xml).
 
     Returns ``(provenance_candidates, review_fulltext_available)`` where
@@ -283,14 +307,23 @@ def ncbi_pmc_reflist(pmcid: str, api_key: str = "", email: str = "",
     confirms PMC-OA status per the F3 requirements. Do not over-claim OA."""
     digits = re.sub(r"\D", "", pmcid or "")
     if not digits:
+        # ABSENCE, and the only one this function can be sure of: the caller
+        # named no PMCID, so there is nothing to fetch. Never an outage.
         return None, None
     params = _ncbi_params({"db": "pmc", "id": digits, "retmode": "xml"},
                           api_key, email)
     try:
         r = request_with_retry(session, EFETCH, params, limiter=NCBI, timeout=30)
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        if strict:
+            raise RetrievalUnavailable(
+                f"PMC reflist transport failure for {digits}: {exc}") from exc
         return None, None
     if r is None or r.status_code != 200 or not r.text.strip():
+        if strict:
+            raise RetrievalUnavailable(
+                f"PMC reflist did not answer for {digits}: "
+                f"status={getattr(r, 'status_code', None)}")
         return None, None
     tmp = None
     try:
@@ -299,7 +332,11 @@ def ncbi_pmc_reflist(pmcid: str, api_key: str = "", email: str = "",
             tf.write(r.text)
             tmp = tf.name
         refs = parse_pmc_xml(tmp, source_pmcid=pmcid)
-    except Exception:                                 # noqa: BLE001 - best-effort
+    except Exception as exc:                          # noqa: BLE001 - best-effort
+        if strict:
+            raise RetrievalUnavailable(
+                f"PMC reflist unparseable for {digits}: "
+                f"{type(exc).__name__}: {exc}") from exc
         return None, None
     finally:
         if tmp:

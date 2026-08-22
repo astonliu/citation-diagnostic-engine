@@ -717,6 +717,36 @@ def _require_full_launch_wiring(*, out_dir: str, run_kwargs: dict,
             f"full launch output root already exists: {out_dir}; use a fresh path")
 
 
+def _ncbi_f3_seams(ncbi_key: str, email: str):
+    """``(resolve_pmcid, fetch_reflist)`` for F3, bound to one polite session.
+
+    F3 needs two NCBI reads the other taxonomies do not: the cited work's PMCID,
+    and that work's own reference list. Both helpers already existed
+    (``ncbi_meta.ncbi_pmid_to_pmcid`` / ``ncbi_pmc_reflist``) and nothing ever
+    composed them, so ``FULL_LAUNCH_REQUIRED_SEAMS`` refused every full launch it
+    was added to guard -- the refusal was correct and unsatisfiable at once.
+
+    Both run ``strict``: a resolver that ANSWERS "this article has no PMC full
+    text" still returns the falsy value and provenance holds, but a lookup that
+    DID NOT ANSWER raises ``RetrievalUnavailable``, which the run books as an F3
+    stage failure. So a hold now means the corpus, an outage is named as an
+    outage, and neither can be mistaken for the other in the rate.
+    """
+    import requests as _requests
+    from .ncbi_meta import ncbi_pmid_to_pmcid, ncbi_pmc_reflist
+    session = _requests.Session()
+
+    def resolve_pmcid(pmid: str) -> str:
+        return ncbi_pmid_to_pmcid(pmid, ncbi_key, email, session=session,
+                                  strict=True)
+
+    def fetch_reflist(pmcid: str):
+        return ncbi_pmc_reflist(pmcid, ncbi_key, email, session=session,
+                                strict=True)
+
+    return resolve_pmcid, fetch_reflist
+
+
 def _openalex_abstract_seam(mailto: str):
     """``doi -> abstract`` bound to one session and the polite-pool mailto."""
     import requests as _requests
@@ -767,6 +797,22 @@ def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         raise LaunchRefused(
             "launch_full builds its own Band-1 disposition; an injected "
             "preband_disposition would bypass the current F1/F2/F8 code")
+    # THE TWO NCBI F3 SEAMS, supplied before the wiring gate below because both
+    # are in FULL_LAUNCH_REQUIRED_SEAMS -- defaulting them beside the OpenAlex
+    # seam (which is not gated) would refuse the launch several hundred lines
+    # before the default was ever reached. Caller-supplied values win, so a
+    # replay or an offline test can still inject its own.
+    if not callable(run_kwargs.get("f3_resolve_pmcid")) and not callable(
+            run_kwargs.get("f3_fetch_reflist")):
+        from .ncbi_meta import DEFAULT_EMAIL as _NCBI_DEFAULT_EMAIL
+        # The run's OWN NCBI contact, not crossref_mailto -- that is a different
+        # politeness pool, and a caller who set only openalex_mailto would have
+        # sent NCBI an empty identity.
+        _resolve_pmcid, _fetch_reflist = _ncbi_f3_seams(
+            ncbi_key, str(run_kwargs.get("email") or _NCBI_DEFAULT_EMAIL))
+        run_kwargs.setdefault("f3_resolve_pmcid", _resolve_pmcid)
+        run_kwargs.setdefault("f3_fetch_reflist", _fetch_reflist)
+
     _require_full_launch_wiring(
         out_dir=out_dir, run_kwargs=run_kwargs,
         f5_seams=f5_seams, f5_evidence_builder=f5_evidence_builder,

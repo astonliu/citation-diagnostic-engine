@@ -1,0 +1,550 @@
+{
+  "plan": {
+    "citation_id": "BENCH_F3_YAMANAKA_HEDGED:bibr1",
+    "model": "claude-opus-5",
+    "temperature_recorded": "unsupported",
+    "claim_extract_prompt_version": "claim_extract_v3",
+    "coverage_prompt_version": "coverage_v2",
+    "coverage_evidence_scope": "cited abstract",
+    "coverage_and_F6": "always on",
+    "selected": [
+      "F3"
+    ],
+    "silent_unwired": [
+      "F4",
+      "F5",
+      "F7"
+    ],
+    "evidence_from": "packet (no network fetch)"
+  },
+  "record": {
+    "citation_id": "BENCH_F3_YAMANAKA_HEDGED:bibr1",
+    "citing_pmcid": "",
+    "citing_pmid": "",
+    "citing_sentence": "Expression of OCT3/4, SOX2, KLF4, and c-MYC appears sufficient to reprogram fibroblasts into induced pluripotent stem cells.",
+    "claim_input_status": "prose",
+    "cited_in_body": null,
+    "cited_pmid": "25691818",
+    "cited_claimed": {
+      "title": "Molecular mechanisms of induced pluripotency",
+      "authors": [
+        "Kulcenty K",
+        "Wroblewska JP",
+        "Rucinski M",
+        "Kozlowska E",
+        "Jopek K",
+        "Suchorska WM"
+      ],
+      "year": 2015,
+      "journal": "Contemporary Oncology (Pozn)",
+      "claimed_pmid": "25691818",
+      "claimed_doi": ""
+    },
+    "cited_is_review": true,
+    "preband_cleared": true,
+    "preband_label": null,
+    "route": "FULL_COVERAGE",
+    "disposition": "predicted",
+    "label": "F3",
+    "findings": [
+      "F3"
+    ],
+    "hold_reasons": [
+      "temporal evidence is unjudgeable"
+    ],
+    "atomic_claims": [
+      "Expression of OCT3/4, SOX2, KLF4, and c-MYC appears sufficient to reprogram fibroblasts into induced pluripotent stem cells"
+    ],
+    "coverage_verdicts": [
+      {
+        "claim": "Expression of OCT3/4, SOX2, KLF4, and c-MYC appears sufficient to reprogram fibroblasts into induced pluripotent stem cells",
+        "established": true,
+        "rationale": "The abstract explicitly states that overexpression of Oct3/4, Sox2, Klf4, and c-Myc in fibroblasts appears sufficient to generate induced pluripotent stem cells.",
+        "evidence_span": "Overexpression of just four pluripotency-related transcription factors, namely Oct3/4, Sox2, Klf4, and c-Myc (Yamanaka factors, OKSM), in fibroblasts appears sufficient to produce this new cell type.",
+        "engages_subject": true,
+        "contradicts": false,
+        "unconfirmed_specifics": [],
+        "prompt_version": "coverage_v2"
+      }
+    ],
+    "evidence": {
+      "cited_pmid": "25691818",
+      "cited_abstract": "Growing knowledge concerning transcriptional control of cellular pluripotency has led to the discovery that the fate of differentiated cells can be reversed, which has resulted in the generation, by means of genetic manipulation, of induced pluripotent stem cells. Overexpression of just four pluripotency-related transcription factors, namely Oct3/4, Sox2, Klf4, and c-Myc (Yamanaka factors, OKSM), in fibroblasts appears sufficient to produce this new cell type. Currently, we know that these factors induce several changes in genetic program of differentiated cells that can be divided in two general phases: the initial one is stochastic, and the subsequent one is highly hierarchical and organised. This review briefly discusses the molecular events leading to induction of pluripotency in response to forced presence of OKSM factors in somatic cells. We also discuss other reprogramming strategies used thus far as well as the advantages and disadvantages of laboratory approaches towards pluripotency induction in different cell types.",
+      "cited_is_review": true,
+      "review_reflist": [
+        {
+          "title": "Induction of pluripotent stem cells from mouse embryonic and adult fibroblast cultures by defined factors",
+          "claimed_pmid": "16904174",
+          "year": 2006
+        },
+        {
+          "title": "Stoichiometric and temporal requirements of Oct4, Sox2, Klf4, and c-Myc expression for efficient human iPSC induction and differentiation",
+          "claimed_pmid": "19549847",
+          "year": 2009
+        },
+        {
+          "title": "Induced pluripotent stem cell lines derived from human somatic cells",
+          "claimed_pmid": "18029452",
+          "year": 2007
+        },
+        {
+          "title": "Different flavors of pluripotency, molecular mechanisms, and practical implications",
+          "claimed_pmid": "21040897",
+          "year": 2010
+        },
+        {
+          "title": "A high-efficiency system for the generation and study of human induced pluripotent stem cells",
+          "claimed_pmid": "18786420",
+          "year": 2008
+        },
+        {
+          "title": "Functional recapitulation of smooth muscle cells via induced pluripotent stem cells from human aortic smooth muscle cells",
+          "claimed_pmid": "19959777",
+          "year": 2010
+        },
+        {
+          "title": "Enhanced efficiency of generating induced pluripotent stem (iPS) cells from human somatic cells by a combination of six transcription factors",
+          "claimed_pmid": "18414447",
+          "year": 2008
+        },
+        {
+          "title": "An efficient nonviral method to generate integration-free human-induced pluripotent stem cells from cord blood and peripheral blood cells",
+          "claimed_pmid": "23193063",
+          "year": 2013
+        },
+        {
+          "title": "Rapid and efficient reprogramming of human amnion-derived cells into pluripotency by three factors OCT4/SOX2/NANOG",
+          "claimed_pmid": "20510497",
+          "year": 2010
+        },
+        {
+          "title": "Generation of induced pluripotent stem cells from human cord blood using OCT4 and SOX2",
+          "claimed_pmid": "19796614",
+          "year": 2009
+        },
+        {
+          "title": "Sox2 is dispensable for the reprogramming of melanocytes and melanoma cells into induced pluripotent stem cells",
+          "claimed_pmid": "19723802",
+          "year": 2009
+        },
+        {
+          "title": "Direct reprogramming of human neural stem cells by OCT4",
+          "claimed_pmid": "19718018",
+          "year": 2009
+        },
+        {
+          "title": "A p53-mediated DNA damage response limits reprogramming to ensure iPS cell genomic integrity",
+          "claimed_pmid": "19668189",
+          "year": 2009
+        },
+        {
+          "title": "Linking the p53 tumour suppressor pathway to somatic cell reprogramming",
+          "claimed_pmid": "19668186",
+          "year": 2009
+        },
+        {
+          "title": "Reprogramming of postnatal neurons into induced pluripotent stem cells by defined factors",
+          "claimed_pmid": "21563275",
+          "year": 2011
+        },
+        {
+          "title": "Two supporting factors greatly improve the efficiency of human iPSC generation",
+          "claimed_pmid": "18983962",
+          "year": 2008
+        },
+        {
+          "title": "Roles of Sall4 in the generation of pluripotent stem cells from blastocysts and fibroblasts",
+          "claimed_pmid": "19476507",
+          "year": 2009
+        },
+        {
+          "title": "Generation of human-induced pluripotent stem cells",
+          "claimed_pmid": "18600223",
+          "year": 2008
+        },
+        {
+          "title": "Generation of induced pluripotent stem cells by efficient reprogramming of adult bone marrow cells",
+          "claimed_pmid": "19558219",
+          "year": 2010
+        },
+        {
+          "title": "Technological overview of iPS induction from human adult somatic cells",
+          "claimed_pmid": "23320476",
+          "year": 2013
+        },
+        {
+          "title": "Generation of induced pluripotent stem cells without Myc from mouse and human fibroblasts",
+          "claimed_pmid": "18059259",
+          "year": 2008
+        },
+        {
+          "title": "Reprogramming of human fibroblasts to induced pluripotent stem cells under xeno-free conditions",
+          "claimed_pmid": "19890879",
+          "year": 2010
+        },
+        {
+          "title": "Molecular analyses of human induced pluripotent stem cells and embryonic stem cells",
+          "claimed_pmid": "20682452",
+          "year": 2010
+        },
+        {
+          "title": "Polycistronic lentiviral vector for “hit and run” reprogramming of adult skin fibroblasts to induced pluripotent stem cells",
+          "claimed_pmid": "19415770",
+          "year": 2009
+        },
+        {
+          "title": "Protein transduction from retroviral Gag precursors",
+          "claimed_pmid": "20385817",
+          "year": 2010
+        },
+        {
+          "title": "Virus-free induction of pluripotency and subsequent excision of reprogramming factors",
+          "claimed_pmid": "19252477",
+          "year": 2009
+        },
+        {
+          "title": "Sleeping Beauty transposon-based system for cellular reprogramming and targeted gene insertion in induced pluripotent stem cells",
+          "claimed_pmid": "23275558",
+          "year": 2013
+        },
+        {
+          "title": "Reprogramming of somatic cells via TAT-mediated protein transduction of recombinant factors",
+          "claimed_pmid": "22494883",
+          "year": 2012
+        },
+        {
+          "title": "Generation of human induced pluripotent stem cells by direct delivery of reprogramming proteins",
+          "claimed_pmid": "19481515",
+          "year": 2009
+        },
+        {
+          "title": "Generation of induced pluripotent stem cells using recombinant proteins",
+          "claimed_pmid": "19398399",
+          "year": 2009
+        },
+        {
+          "title": "Highly efficient reprogramming to pluripotency and directed differentiation of human cells with synthetic modified mRNA",
+          "claimed_pmid": "20888316",
+          "year": 2010
+        },
+        {
+          "title": "Innate immune suppression enables frequent transfection with RNA encoding reprogramming proteins",
+          "claimed_pmid": "20668695",
+          "year": 2010
+        },
+        {
+          "title": "The cytotoxic and immunogenic hurdles associated with non-viral mRNA-mediated reprogramming of human fibroblasts",
+          "claimed_pmid": "22381475",
+          "year": 2012
+        },
+        {
+          "title": "Induction of pluripotent stem cells from adult human fibroblasts by defined factors",
+          "claimed_pmid": "18035408",
+          "year": 2007
+        },
+        {
+          "title": "Molecular insights into reprogramming-initiation events mediated by the OSKM gene regulatory network",
+          "claimed_pmid": "21909390",
+          "year": 2011
+        },
+        {
+          "title": "A molecular roadmap of reprogramming somatic cells into iPS cells",
+          "claimed_pmid": "23260147",
+          "year": 2012
+        },
+        {
+          "title": "Dynamic single-cell imaging of direct reprogramming reveals an early specifying event",
+          "claimed_pmid": "20436460",
+          "year": 2010
+        },
+        {
+          "title": "Direct cell reprogramming is a stochastic process amenable to acceleration",
+          "claimed_pmid": "19898493",
+          "year": 2009
+        },
+        {
+          "title": "Single-cell expression analyses during cellular reprogramming reveal an early stochastic and a late hierarchic phase",
+          "claimed_pmid": "22980981",
+          "year": 2012
+        },
+        {
+          "title": "Facilitators and impediments of the pluripotency reprogramming factors’ initial engagement with the genome",
+          "claimed_pmid": "23159369",
+          "year": 2012
+        },
+        {
+          "title": "The KLF4 tumour suppressor is a transcriptional repressor of p53 that acts as a context-dependent oncogene",
+          "claimed_pmid": "16244670",
+          "year": 2005
+        },
+        {
+          "title": "p53 induces differentiation of mouse embryonic stem cells by suppressing Nanog expression",
+          "claimed_pmid": "15619621",
+          "year": 2005
+        },
+        {
+          "title": "Transcriptional regulatory networks in embryonic stem cells",
+          "claimed_pmid": "19022762",
+          "year": 2008
+        },
+        {
+          "title": "Wdr5 mediates self-renewal and reprogramming via the embryonic stem cell core transcriptional network",
+          "claimed_pmid": "21477851",
+          "year": 2011
+        },
+        {
+          "title": "The Oct4 and Nanog transcription network regulates pluripotency in mouse embryonic stem cells",
+          "claimed_pmid": "16518401",
+          "year": 2006
+        },
+        {
+          "title": "Zfp281 functions as a transcriptional repressor for pluripotency of mouse embryonic stem cells",
+          "claimed_pmid": "21915945",
+          "year": 2011
+        },
+        {
+          "title": "A novel octamer binding transcription factor is differentially expressed in mouse embryonic cells",
+          "claimed_pmid": "1967980",
+          "year": 1990
+        },
+        {
+          "title": "Concise review: Oct4 and more: the reprogramming expressway",
+          "claimed_pmid": "22009686",
+          "year": 2012
+        },
+        {
+          "title": "Reprogramming of human fibroblasts to pluripotency with lineage specifiers",
+          "claimed_pmid": "23871606",
+          "year": 2013
+        },
+        {
+          "title": "Induction of pluripotency in mouse somatic cells with lineage specifiers",
+          "claimed_pmid": "23706735",
+          "year": 2013
+        },
+        {
+          "title": "Chromatin-Remodeling Components of the BAF Complex Facilitate Reprogramming",
+          "claimed_pmid": "20550931",
+          "year": 2010
+        },
+        {
+          "title": "Functional genomics reveals a BMP-driven mesenchymal-to-epithelial transition in the initiation of somatic cell reprogramming",
+          "claimed_pmid": "20621051",
+          "year": 2010
+        },
+        {
+          "title": "Requirement of Nanog dimerization for stem cell self-renewal and pluripotency",
+          "claimed_pmid": "18436640",
+          "year": 2008
+        },
+        {
+          "title": "The pluripotency rheostat Nanog functions as a dimer",
+          "claimed_pmid": "18290762",
+          "year": 2008
+        },
+        {
+          "title": "Blastocyst lineage formation, early embryonic asymmetries and axis patterning in the mouse",
+          "claimed_pmid": "19201946",
+          "year": 2009
+        },
+        {
+          "title": "Nanog is the gateway to the pluripotent ground state",
+          "claimed_pmid": "19703398",
+          "year": 2009
+        },
+        {
+          "title": "A protein interaction network for pluripotency of embryonic stem cells",
+          "claimed_pmid": "17093407",
+          "year": 2006
+        },
+        {
+          "title": "The functions of microRNAs in pluripotency and reprogramming",
+          "claimed_pmid": "23131918",
+          "year": 2012
+        },
+        {
+          "title": "How microRNAs facilitate reprogramming to pluripotency",
+          "claimed_pmid": "23077173",
+          "year": 2012
+        },
+        {
+          "title": "Dicer-deficient mouse embryonic stem cells are defective in differentiation and centromeric silencing",
+          "claimed_pmid": "15713842",
+          "year": 2005
+        },
+        {
+          "title": "Highly efficient miRNA-mediated reprogramming of mouse and human somatic cells to pluripotency",
+          "claimed_pmid": "21474102",
+          "year": 2011
+        },
+        {
+          "title": "STAT3 activation is sufficient to maintain an undifferentiated state of mouse embryonic stem cells",
+          "claimed_pmid": "10428964",
+          "year": 1999
+        },
+        {
+          "title": "A parallel circuit of LIF signalling pathways maintains pluripotency of mouse ES cells",
+          "claimed_pmid": "19571885",
+          "year": 2009
+        },
+        {
+          "title": "Signaling roadmap modulating naive and primed pluripotency",
+          "claimed_pmid": "24147644",
+          "year": 2014
+        },
+        {
+          "title": "Signaling mechanisms regulating self-renewal and differentiation of pluripotent embryonic stem cells",
+          "claimed_pmid": "10592385",
+          "year": 1999
+        },
+        {
+          "title": "LIF/STAT3 signaling fails to maintain self-renewal of human embryonic stem cells",
+          "claimed_pmid": "15342941",
+          "year": 2004
+        },
+        {
+          "title": "Molecular mechanisms of fibroblast growth factor signaling in physiology and pathology",
+          "claimed_pmid": "23732477",
+          "year": 2013
+        },
+        {
+          "title": "FGF signalling: diverse roles during early vertebrate embryogenesis",
+          "claimed_pmid": "20978071",
+          "year": 2010
+        },
+        {
+          "title": "Death pathways triggered by activated Ras in cancer cells",
+          "claimed_pmid": "21196257",
+          "year": 2011
+        },
+        {
+          "title": "Human embryonic stem cells with biological and epigenetic characteristics similar to those of mouse ESCs",
+          "claimed_pmid": "20442331",
+          "year": 2010
+        },
+        {
+          "title": "Reconciling the different roles of Gsk3beta in “naive” and “primed” pluripotent stem cells",
+          "claimed_pmid": "22825252",
+          "year": 2012
+        },
+        {
+          "title": "Signaling network crosstalk in human pluripotent cells: a Smad2/3-regulated switch that controls the balance between self-renewal and differentiation",
+          "claimed_pmid": "22385658",
+          "year": 2012
+        },
+        {
+          "title": "Characterization of the phosphoinositide 3-kinase-dependent transcriptome in murine embryonic stem cells: identification of novel regulators of pluripotency",
+          "claimed_pmid": "19350676",
+          "year": 2009
+        },
+        {
+          "title": "mTOR supports long-term self-renewal and suppresses mesoderm and endoderm activities of human embryonic stem cells",
+          "claimed_pmid": "19416884",
+          "year": 2009
+        }
+      ],
+      "review_fulltext_available": true,
+      "cited_abstract_source": "pubmed"
+    },
+    "evidence_usable": true,
+    "strength_records": [
+      {
+        "claim_index": 0,
+        "assessed": true,
+        "subject_addressed": "yes",
+        "dimensions": {
+          "causal_force": {
+            "citing": "causation",
+            "cited": "causation"
+          },
+          "epistemic_certainty": {
+            "citing": "hedged",
+            "cited": "hedged"
+          },
+          "recommendation_force": {
+            "citing": "none",
+            "cited": "none"
+          },
+          "qualitative_scope": {
+            "citing": "general",
+            "cited": "general"
+          }
+        },
+        "population_relation": "equivalent",
+        "load_bearing_dimension": "none",
+        "f6_owned_escalation": false,
+        "citing_strength_span": "",
+        "citing_anchor_source": "model_generated_atomic_claim",
+        "citing_anchor_note": "No source-side span attestation is available in this build; the exact-match gate proves only that the generator quoted its own atomic claim.",
+        "cited_strength_span": "",
+        "derived": "NOT_F4",
+        "reason": "none_consistent",
+        "model_rationale": "The citing claim mirrors the abstract's hedged causal statement that overexpression of OKSM in fibroblasts \"appears sufficient\" to produce iPSCs, with matching population and scope.",
+        "generator_response": "{\"subject_addressed\": \"yes\", \"dimensions\": {\"causal_force\": {\"citing\": \"causation\", \"cited\": \"causation\"}, \"epistemic_certainty\": {\"citing\": \"hedged\", \"cited\": \"hedged\"}, \"recommendation_force\": {\"citing\": \"none\", \"cited\": \"none\"}, \"qualitative_scope\": {\"citing\": \"general\", \"cited\": \"general\"}}, \"population_relation\": \"equivalent\", \"load_bearing_dimension\": \"none\", \"f6_owned_escalation\": false, \"citing_strength_span\": \"\", \"cited_strength_span\": \"\", \"rationale\": \"The citing claim mirrors the abstract's hedged causal statement that overexpression of OKSM in fibroblasts \\\"appears sufficient\\\" to produce iPSCs, with matching population and scope.\"}",
+        "generator_prompt_sha256": "12397a6358e00f807491b9ced133e6a6bf7993efdc6bd6d220a481da3695a3f9",
+        "generator_model_id": "",
+        "verifier_model_id": "",
+        "strength_prompt_version": "f4_strength_v1",
+        "verifier_prompt_version": "f4_verifier_v1",
+        "mode": "development",
+        "reportable": false,
+        "f4_evidence_scope": "abstract",
+        "coverage_evidence_scope": "abstract",
+        "evidence_scopes_match": true,
+        "record_sha256": "0b3160aeb704f3f1441bbfdd72fa3d867bff40389a421373bc78de110d9c6efd"
+      }
+    ],
+    "provenance": {
+      "state": "MISATTRIBUTED_CONFIRMED",
+      "origin_chain": [
+        "PMID:25691818",
+        "PMID:16904174"
+      ],
+      "evidence_spans": [
+        "This review briefly discusses the molecular events leading to induction of pluripotency in response to forced presence of OKSM factors in somatic cells.",
+        "Here, we demonstrate induction of pluripotent stem cells from mouse embryonic or adult fibroblasts by introducing four factors, Oct3/4, Sox2, c-Myc, and Klf4, under ES cell culture conditions."
+      ],
+      "rationale": "[F3 policy origin_sensitive_prompt_version=f3_v2_origin_v1 v3_select_prompt_version=f3_v3_select_v1 v4_prompt_version=f3_v4_loopclose_v1 trace_sources=['cited_reflist'] max_hop_count=1 unresolved_state=UNJUDGEABLE] V2=restatement; rightful primary PMID:16904174 selected from the cited reflist and V4-confirmed to originate the finding."
+    },
+    "retry_history": [],
+    "paid_calls": {
+      "total": 6,
+      "retries": 0,
+      "by_stage": {
+        "claim_extraction": 1,
+        "coverage": 1,
+        "F4": 1,
+        "F3": 3
+      }
+    },
+    "stage_failures": [],
+    "claim_extract_prompt_version": "claim_extract_v3",
+    "coverage_prompt_version": "coverage_v2",
+    "ts": 1787386652,
+    "citance_group_id": "",
+    "citance_group_members": [],
+    "citance_group_inferred_members": [],
+    "citance_marker_inferred": false,
+    "cited_text_retrievable": true,
+    "evidence_scope": "abstract",
+    "evidence_status": "retrievable",
+    "claim_extraction_attempts": 1,
+    "solo_route": "FULL_COVERAGE",
+    "terminal_outcome": "F3",
+    "terminal_reason": "taxonomy_finding",
+    "human_review_required": false
+  },
+  "receipt": {
+    "total_calls": 12,
+    "calls_by_seam": {
+      "coverage_judge": 1,
+      "discriminator_call_llm": 4,
+      "extractor": 1,
+      "f3_fetch_reflist": 1,
+      "f3_resolve_pmcid": 1,
+      "fetch_abstract": 3,
+      "fetch_reflist": 1
+    },
+    "model": "claude-opus-5"
+  }
+}

@@ -1001,9 +1001,48 @@ def test_an_unwired_discriminator_is_marked_wired_false(tmp_path, monkeypatch):
 
 
 def test_a_wired_discriminator_is_marked_wired_true(tmp_path, monkeypatch):
+    """The discriminator alone wires F4 -- and NOT F3.
+
+    F4 needs the model call and nothing else. F3 additionally needs the two
+    trace seams, and without them f3_provenance returns a flat hold before any
+    model is consulted. Reporting F3 wired=True here would assert the run
+    assessed provenance when it could not have, which is the very defect the
+    unwired test above names.
+    """
     call = disc_llm(f4=f4_json(), v2=ORIGINATES)
     manifest, _ = _f4_run(tmp_path, monkeypatch, discriminator_call_llm=call)
     st = manifest["seam_status"]
-    assert st["F3"]["wired"] is True
     assert st["F4"]["wired"] is True
     assert st["F4"]["assessed_claims"] >= 0
+    assert st["F3"]["wired"] is False
+    assert st["F3"]["seams"] == {"discriminator_call_llm": True,
+                                 "f3_resolve_pmcid": False,
+                                 "f3_fetch_reflist": False}
+
+
+def test_f3_is_wired_only_when_all_three_seams_are_supplied(tmp_path, monkeypatch):
+    """F3 reachability is a conjunction, and the manifest must say which part is
+    missing -- a bare wired=False sent the last reader hunting the discriminator,
+    which was supplied all along."""
+    call = disc_llm(f4=f4_json(), v2=ORIGINATES)
+    seams = dict(f3_fetch_reflist=lambda _p: ([{"title": "P",
+                                                "claimed_pmid": "222",
+                                                "year": 2010}], True),
+                 f3_resolve_pmcid=lambda _p: "PMC999")
+    for drop in ("f3_fetch_reflist", "f3_resolve_pmcid"):
+        (tmp_path / drop).mkdir()
+        partial = {k: (None if k == drop else v) for k, v in seams.items()}
+        manifest, _ = _f4_run(tmp_path / drop, monkeypatch,
+                              discriminator_call_llm=call, **partial)
+        st = manifest["seam_status"]["F3"]
+        assert st["wired"] is False, drop
+        assert st["seams"][drop] is False
+
+    (tmp_path / "all").mkdir()
+    manifest, _ = _f4_run(tmp_path / "all", monkeypatch,
+                          discriminator_call_llm=call, **seams)
+    st = manifest["seam_status"]["F3"]
+    assert st["wired"] is True
+    assert st["seams"] == {"discriminator_call_llm": True,
+                           "f3_resolve_pmcid": True, "f3_fetch_reflist": True}
+    assert manifest["f3"]["wired"] is True
