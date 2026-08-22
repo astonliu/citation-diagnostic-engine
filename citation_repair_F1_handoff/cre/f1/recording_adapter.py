@@ -31,9 +31,15 @@ from __future__ import annotations
 import functools
 import threading
 
+from . import model_pricing
+
 #: Mirrors production_launcher's sentinels without importing it (the launcher
 #: imports judgment_run, and this module must stay usable on its own).
 UNSUPPORTED = "unsupported"
+
+#: Mirrors judgment_run's cost_counters sentinel. An absent measurement and a
+#: measured zero are different claims and must not share a value.
+NOT_COLLECTED = "not_collected"
 
 
 class AdapterReceipt:
@@ -143,6 +149,138 @@ def wrap_run_seams(receipt: AdapterReceipt, **seams):
             f"UNWRAPPED and its calls would be missing from the receipt. "
             f"Known seams: {list(RUN_SEAMS)}")
     return receipt.wrap_all(seams)
+
+
+class TokenLedger:
+    """A thread-safe running total of what one transport actually billed.
+
+    WHY THIS EXISTS AT ALL. ``judgment_run``'s F5 block has carried
+    ``cost_counters.input_tokens`` / ``output_tokens`` / ``cost_usd`` as the
+    literal string ``"not_collected"`` since it was written. The slots are a
+    declared contract nothing ever filled, so every cost statement about this
+    system to date has been a model built on an ASSUMED output length. This
+    fills them from ``response.usage``, which is the only honest source.
+
+    WHY IT ALSO CARRIES THE TWO CACHE FIELDS. ``cache_read_input_tokens`` is the
+    single piece of evidence that prompt caching is working. Without it a
+    breakpoint that silently stopped matching looks identical to one that never
+    stopped, except that the run is paying the 1.25x write premium on every
+    request and reading nothing back. A caching change that cannot be verified
+    is not a saving, it is a claim.
+
+    WHY THREAD-SAFE BUT NOT THREAD-LOCAL, unlike ``PaidCallMeter``. The meter is
+    thread-local because a per-RECORD count has to be attributed to the worker
+    that produced that record. This is a per-RUN total over one transport, so
+    every thread's spend belongs in it; a lock is what that needs.
+
+    ``stage`` names which transport this is (``f5_generator``, ``f5_verifier``,
+    ``band``...) so a merged report can say where the money went instead of only
+    how much there was.
+    """
+
+    __slots__ = ("stage", "model", "calls", "input_tokens", "output_tokens",
+                 "cache_creation_input_tokens", "cache_read_input_tokens",
+                 "usage_missing_calls", "_lock")
+
+    def __init__(self, *, stage: str = "", model: str = ""):
+        self.stage = str(stage or "")
+        self.model = str(model or "")
+        self.calls = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.cache_creation_input_tokens = 0
+        self.cache_read_input_tokens = 0
+        # A response whose usage block was absent or unreadable. Counted, not
+        # skipped: a ledger that silently dropped it would understate spend and
+        # read as a complete measurement.
+        self.usage_missing_calls = 0
+        self._lock = threading.Lock()
+
+    def record_usage(self, usage) -> None:
+        """Add one response's ``usage`` block. Never raises on a odd shape."""
+        def field(name: str) -> "int | None":
+            value = getattr(usage, name, None)
+            if value is None and isinstance(usage, dict):
+                value = usage.get(name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                return None
+            return value
+
+        prompt_side = [field(name) for name in (
+            "input_tokens", "cache_creation_input_tokens",
+            "cache_read_input_tokens")]
+        completion = field("output_tokens")
+        with self._lock:
+            self.calls += 1
+            if all(value is None for value in prompt_side) and completion is None:
+                self.usage_missing_calls += 1
+                return
+            self.input_tokens += prompt_side[0] or 0
+            self.cache_creation_input_tokens += prompt_side[1] or 0
+            self.cache_read_input_tokens += prompt_side[2] or 0
+            self.output_tokens += completion or 0
+
+    def snapshot(self) -> dict:
+        """The ledger as a dict, with ``cost_usd`` priced from the table.
+
+        ``cost_usd`` is ``"not_collected"`` -- never 0.0 -- when the model id is
+        absent or unpriced, or when any call came back without usage. A partial
+        total presented as a total is worse than no total.
+        """
+        with self._lock:
+            row = {
+                "stage": self.stage,
+                "model": self.model,
+                "calls": self.calls,
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "cache_creation_input_tokens": self.cache_creation_input_tokens,
+                "cache_read_input_tokens": self.cache_read_input_tokens,
+                "usage_missing_calls": self.usage_missing_calls,
+            }
+        row["prompt_tokens_total"] = (
+            row["input_tokens"] + row["cache_creation_input_tokens"]
+            + row["cache_read_input_tokens"])
+        priced = None
+        if not row["usage_missing_calls"]:
+            priced = model_pricing.cost_usd(
+                model=row["model"],
+                input_tokens=row["input_tokens"],
+                output_tokens=row["output_tokens"],
+                cache_creation_input_tokens=row["cache_creation_input_tokens"],
+                cache_read_input_tokens=row["cache_read_input_tokens"])
+        row["cost_usd"] = NOT_COLLECTED if priced is None else round(priced, 6)
+        row["prices_read_on"] = model_pricing.PRICES_READ_ON
+        return row
+
+
+def merge_token_ledgers(ledgers) -> dict:
+    """``{"total": {...}, "by_stage": {...}}`` over an iterable of ledgers.
+
+    Mirrors ``paid_calls.by_stage``: the same shape, so a reader who already
+    knows how to read the call ledger can read the token ledger. ``cost_usd``
+    on the total is ``"not_collected"`` if ANY contributing stage could not be
+    priced -- a sum missing one term is not a smaller sum, it is an unknown one.
+    """
+    rows = [ledger.snapshot() for ledger in ledgers if ledger is not None]
+    by_stage: dict = {}
+    for row in rows:
+        key = row["stage"] or "unnamed"
+        if key in by_stage:
+            raise ValueError(
+                f"two token ledgers claim the stage name {key!r}; a merged "
+                f"report would silently drop one of them")
+        by_stage[key] = row
+    counters = ("calls", "input_tokens", "output_tokens",
+                "cache_creation_input_tokens", "cache_read_input_tokens",
+                "usage_missing_calls", "prompt_tokens_total")
+    total = {name: sum(row[name] for row in rows) for name in counters}
+    costs = [row["cost_usd"] for row in rows]
+    total["cost_usd"] = (
+        NOT_COLLECTED if any(value == NOT_COLLECTED for value in costs)
+        else round(sum(costs), 6))
+    total["prices_read_on"] = model_pricing.PRICES_READ_ON
+    return {"total": total, "by_stage": dict(sorted(by_stage.items()))}
 
 
 class PaidCallMeter:

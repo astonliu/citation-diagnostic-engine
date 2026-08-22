@@ -15,8 +15,8 @@ is authored by hand, so the population it belongs to is "one", and no rate can b
 computed from it. Use it to interrogate the engine's behavior, never to produce a
 figure.
 
-ADAPTER IDENTITY IS PRODUCTION'S. ``band_prompts.make_anthropic_call`` sends no
-temperature parameter, because the pinned Opus model rejects one --
+ADAPTER IDENTITY IS PRODUCTION'S. ``anthropic_transport.make_anthropic_call``
+sends no temperature parameter, because the pinned Opus model rejects one --
 ``production_launcher`` records that first-party measurement as the string
 ``"unsupported"`` (DEC-070), never as ``0``. This module inherits that exactly.
 Pinning ``temperature=0`` here would make the sandbox answer a question about a
@@ -82,10 +82,10 @@ import sys
 
 from . import judgment_run as jr
 from . import terminal_outcome as tox
+from .anthropic_transport import make_anthropic_call
 from .band_prompts import (
     CLAIM_EXTRACT_PROMPT_VERSION,
     COVERAGE_PROMPT_VERSION,
-    make_anthropic_call,
     make_extractor,
 )
 # THE TRI-STATE JUDGE, AND NOT band_prompts' BOOLEAN ONE. Both factories exist
@@ -101,7 +101,7 @@ from .coverage_prompts_v3 import (
     COVERAGE_PROMPT_VERSION_V3,
     make_coverage_judge_v3,
 )
-from .recording_adapter import AdapterReceipt
+from .recording_adapter import AdapterReceipt, merge_token_ledgers
 from . import sandbox_wiring as sw
 
 #: ONE receipt per run, shared by the coverage seams and the F7 bundle. F7's
@@ -360,11 +360,13 @@ def judge(packet: dict, *, model: str, api_key: str = "",
     # after it would make a mistyped section label cost minutes to learn about.
     # Same reason F5 (two clients, no disk) is wired before F7, not after it.
     fetch_fulltext = sw.fulltext_from_packet(packet) if "F7" in picked else None
+    token_ledgers = []
     if "F5" in picked:
         f5 = sw.build_f5(packet=packet, model=model, api_key=api_key)
         extra.update({k: f5[k] for k in
                       ("f5_seams", "f5_evidence_builder", "f5_policy")})
         prov["f5"] = f5["provenance"]
+        token_ledgers.extend(f5["token_ledgers"])
     if "F7" in picked:
         f7 = sw.build_f7(root=authorities_root, model=model, api_key=api_key,
                          receipt=jr_receipt(model), verify=verify)
@@ -372,6 +374,7 @@ def judge(packet: dict, *, model: str, api_key: str = "",
                       ("f7_seams", "f7_evidence_builder", "f7_policy")})
         extra["fetch_fulltext"] = fetch_fulltext
         prov["f7"] = f7["provenance"]
+        token_ledgers.extend(f7["token_ledgers"])
     if prov:
         plan["wiring_provenance"] = prov
 
@@ -395,7 +398,8 @@ def judge(packet: dict, *, model: str, api_key: str = "",
     # would show up as unauthorized rather than being absorbed.
     from anthropic import Anthropic
     client = Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
-    call_llm = make_anthropic_call(client, model)
+    call_llm = make_anthropic_call(client, model, stage="band")
+    token_ledgers.append(call_llm.token_ledger)
 
     seams = {
         "extractor": make_extractor(call_llm),
@@ -459,7 +463,13 @@ def judge(packet: dict, *, model: str, api_key: str = "",
     record["terminal_outcome"] = outcome
     record["terminal_reason"] = reason
     record["human_review_required"] = tox.is_human_review(outcome)
-    return {"plan": plan, "record": record, "receipt": receipt.summary()}
+    # WHAT THE RUN ACTUALLY COST, read off response.usage rather than modelled.
+    # Snapshotted here because the ledgers are live objects that were empty when
+    # the plan was built. `cache_read_input_tokens` is the only evidence that the
+    # F5 deep comparison's cached cited-work prefix is being read back rather
+    # than merely rewritten on every candidate.
+    return {"plan": plan, "record": record, "receipt": receipt.summary(),
+            "token_usage": merge_token_ledgers(token_ledgers)}
 
 
 def main(argv=None) -> int:

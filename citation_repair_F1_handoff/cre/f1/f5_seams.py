@@ -612,6 +612,15 @@ def make_judge_contradiction(
     judge_contradiction.cache = cache
     judge_contradiction.model_id = resolved_model_id
     judge_contradiction.model_settings = resolved_settings
+    # CARRIED, NOT COPIED. judgment_run reads its F5 counters off this seam by
+    # attribute (``_judge_counter_source``), and the token ledger lives on the
+    # transport this closure captured -- unreachable from the call site. Exposing
+    # the same object here is what lets the manifest's declared
+    # ``cost_counters.input_tokens`` / ``output_tokens`` / ``cost_usd`` slots be
+    # filled from response.usage instead of holding "not_collected" forever.
+    # None when the transport carries no ledger, which the manifest records as
+    # "not_collected" rather than as zero.
+    judge_contradiction.token_ledger = getattr(complete, "token_ledger", None)
     return judge_contradiction
 
 

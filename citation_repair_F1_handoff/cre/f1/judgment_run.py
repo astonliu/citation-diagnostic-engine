@@ -2249,6 +2249,28 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
         "model_calls", "judge_model_calls")
     judge_cache_hits = observed_judge_counter(
         "cache_hits", "judge_cache_hits")
+    judge_token_counters = {
+        "model_calls": judge_model_calls,
+        "model_calls_avoided_by_cache": judge_cache_hits,
+        "input_tokens": "not_collected",
+        "output_tokens": "not_collected",
+        "cost_usd": "not_collected",
+    }
+    judge_ledger = getattr(judge_source, "token_ledger", None)
+    if judge_ledger is not None:
+        usage = judge_ledger.snapshot()
+        judge_token_counters.update({
+            "input_tokens": usage["input_tokens"],
+            "output_tokens": usage["output_tokens"],
+            "cache_creation_input_tokens": usage["cache_creation_input_tokens"],
+            "cache_read_input_tokens": usage["cache_read_input_tokens"],
+            "prompt_tokens_total": usage["prompt_tokens_total"],
+            "billed_calls": usage["calls"],
+            "calls_missing_usage": usage["usage_missing_calls"],
+            "cost_usd": usage["cost_usd"],
+            "prices_read_on": usage["prices_read_on"],
+            "priced_model": usage["model"],
+        })
     evidence_counters = dict(
         (f5_runtime or {}).get("evidence_store_counters") or {})
     protocol_caps = {
@@ -2359,13 +2381,18 @@ def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
                 "candidates_budget_skipped"),
             "candidates_aggregated": stage_total("candidates_aggregated"),
         },
-        "cost_counters": {
-            "model_calls": judge_model_calls,
-            "model_calls_avoided_by_cache": judge_cache_hits,
-            "input_tokens": "not_collected",
-            "output_tokens": "not_collected",
-            "cost_usd": "not_collected",
-        },
+        # FILLED FROM response.usage, not modelled. These three slots held the
+        # literal string "not_collected" from the day this block was written, so
+        # every cost statement about F5 rested on an ASSUMED output length. The
+        # ledger is carried on the judge seam by make_judge_contradiction; when
+        # the injected seam carries none the sentinel stays, because an
+        # unmeasured spend is not a zero spend.
+        #
+        # THE TWO CACHE FIELDS ARE THE EVIDENCE, not decoration.
+        # cache_read_input_tokens > 0 across a claim's deep comparisons is the
+        # only proof that the cited-work prefix is being read back rather than
+        # rewritten at a 1.25x premium on every candidate.
+        "cost_counters": judge_token_counters,
         "production_evidence_builder": True,
         "real_data_runs_completed": 0,
         "audit_convergence": "formal_positive_requires_independent_verifier",

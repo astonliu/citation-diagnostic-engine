@@ -42,8 +42,8 @@ this builds two distinct callables over the same model. The self-verification
 that implies is a documented limitation of the production design, not something
 the bench introduces; the launch receipt's scope ruling names it.
 
-NO TEMPERATURE. ``make_anthropic_call`` omits the parameter because the pinned
-model rejects it (DEC-070). Inherited, not re-decided.
+NO TEMPERATURE. ``anthropic_transport.make_anthropic_call`` omits the parameter
+because the pinned model rejects it (DEC-070). Inherited, not re-decided.
 """
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ import hashlib
 import json
 import os
 
-from .band_prompts import make_anthropic_call
+from .anthropic_transport import make_anthropic_call
 
 #: entity_type -> authority, mirroring f7_seams.SUPPORTED_AUTHORITIES. Repeated
 #: here only so a manifest naming a different pairing fails loudly rather than
@@ -218,9 +218,11 @@ def build_f7(*, root: str, model: str, api_key: str = "", receipt,
     # client would still be two objects -- but separate clients also keep the
     # two roles' connection state independent, which is what production does.
     generator = make_anthropic_call(
-        Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")), model)
+        Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")), model,
+        stage="f7_generator")
     verifier = make_anthropic_call(
-        Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")), model)
+        Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")), model,
+        stage="f7_verifier")
 
     policy = make_production_f7_policy(
         normalizer, generator_model_id=model, verifier_model_id=model)
@@ -236,7 +238,13 @@ def build_f7(*, root: str, model: str, api_key: str = "", receipt,
         adapter_receipt=receipt)
 
     return {"f7_seams": seams, "f7_evidence_builder": builder,
-            "f7_policy": policy, "provenance": provenance}
+            "f7_policy": policy, "provenance": provenance,
+            # F7's evidence prompt gained a cache breakpoint after its body
+            # sections (f7_evidence_v3), and one claim makes one evidence request
+            # PER CLAIMED TUPLE over the same sections. Whether the second
+            # request actually reads the first one's write is only knowable from
+            # cache_read_input_tokens, so the transports' ledgers come back too.
+            "token_ledgers": [generator.token_ledger, verifier.token_ledger]}
 
 
 def fulltext_from_packet(packet: dict):
@@ -316,6 +324,24 @@ def _bench_date_precision(date_text: str) -> str:
     return "year"
 
 
+def _bench_positive_int(packet: dict, key: str, default,
+                        *, allow_zero: bool = False):
+    """A packet integer knob, or ``default`` when absent. Refuses junk loudly.
+
+    A mistyped cap that fell back to the default silently would make two runs
+    look comparable when one of them searched a different depth -- the exact
+    class of quiet substitution this module's docstring is about.
+    """
+    if key not in packet or packet[key] is None:
+        return default
+    value = packet[key]
+    floor = 0 if allow_zero else 1
+    if isinstance(value, bool) or not isinstance(value, int) or value < floor:
+        raise WiringError(
+            f"{key} must be an integer >= {floor}, not {value!r}")
+    return value
+
+
 def build_f5(*, packet: dict, model: str, api_key: str = "") -> dict:
     """F5 seams and evidence builder, with candidates served from the bank.
 
@@ -325,7 +351,9 @@ def build_f5(*, packet: dict, model: str, api_key: str = "") -> dict:
     production validator is deliberately not called.
     """
     from anthropic import Anthropic
-    from .f5_seams import build_f5_seams, make_f5_evidence_builder
+    from .f5_candidate_screen import (
+        CANDIDATE_SCREEN_PROMPT_VERSION, make_candidate_screen)
+    from .f5_seams import CANDIDATE_CAP, build_f5_seams, make_f5_evidence_builder
     from .f5_supersession import F5Policy
 
     as_of = str(packet.get("f5_as_of_date") or "").strip()
@@ -474,12 +502,22 @@ def build_f5(*, packet: dict, model: str, api_key: str = "") -> dict:
                 "not say which was which; supply one or the other")
         from .f5_candidate_finder import PubMedCandidateFinder
         from .ncbi_meta import DEFAULT_EMAIL
+        # `f5_ranking` selects how the three retrieval streams are fused.
+        # Default is the shipped `multi_stream_first`; `rrf` is the cap-invariant
+        # alternative. Recorded in provenance AND in the finder's query_hash, so
+        # two runs of the same packet under different fusions are never confused.
+        from .f5_candidate_finder import RANKINGS, RANKING_DEFAULT
+        ranking = str(packet.get("f5_ranking") or RANKING_DEFAULT).strip()
+        if ranking not in RANKINGS:
+            raise WiringError(
+                f"f5_ranking must be one of {sorted(RANKINGS)}, not {ranking!r}")
         finder = PubMedCandidateFinder(
             email=str(packet.get("f5_mailto") or "").strip() or DEFAULT_EMAIL,
-            cache_dir=str(packet.get("f5_cache_dir") or "") or None)
+            cache_dir=str(packet.get("f5_cache_dir") or "") or None,
+            ranking=ranking)
 
         def search_candidates(cited_meta, claim, *, after_date, as_of_date,
-                              cap: int = 50):
+                              cap: int = CANDIDATE_CAP):
             """Production finder, with every hit ADMITTED TO THE BANK.
 
             ``fetch_meta``/``fetch_abstract`` above answer only from the bank, and
@@ -508,31 +546,96 @@ def build_f5(*, packet: dict, model: str, api_key: str = "") -> dict:
     # malformed model rather than a truncated budget.
     generator = make_anthropic_call(
         Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")), model,
-        max_tokens=8192)
+        max_tokens=8192, stage="f5_generator")
     verifier = make_anthropic_call(
         Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")), model,
-        max_tokens=8192)
+        max_tokens=8192, stage="f5_verifier")
+
+    # THE CANDIDATE SCREEN, ON BY DEFAULT. It is the reason the candidate cap can
+    # rise at all: without it every structurally admissible candidate goes
+    # straight to the deep comparison and retrieval depth costs money linearly.
+    # `"f5_candidate_screen": false` turns it off, which is what makes the
+    # screened and unscreened cost of the same packet comparable.
+    #
+    # A THIRD TRANSPORT, NOT THE GENERATOR'S. Sharing it would put screen calls
+    # and judgment calls in one token ledger and the run could not say what the
+    # screen cost -- which is the number this wiring exists to produce.
+    #
+    screen_enabled = packet.get("f5_candidate_screen") is not False
+    cap = _bench_positive_int(packet, "f5_candidate_cap", CANDIDATE_CAP)
+    max_deep = _bench_positive_int(
+        packet, "f5_max_deep_comparisons", None, allow_zero=True)
+
+    # THE OUTPUT BUDGET SCALES WITH THE BATCH, AND THEREFORE STREAMS. One call
+    # for the whole batch means one reply for the whole batch: about 40 tokens of
+    # JSON per candidate, so 400 candidates is ~16K of answer -- and on a model
+    # with adaptive thinking on by default, the reasoning tokens come out of the
+    # SAME max_tokens. A first attempt at a flat 32768 was cut off mid-string at
+    # candidate ~298 of 400, and a truncated reply is not a degraded screen: it
+    # is a JSONDecodeError that discards the whole batch, so the run pays for the
+    # screen AND for every deep comparison the screen was meant to avoid.
+    #
+    # 160 tokens per candidate is ~4x the JSON a row needs, with the remainder
+    # left for reasoning. Above the SDK's non-streaming ceiling of 21333 this is
+    # necessarily a streaming transport (NONSTREAMING_MAX_TOKENS_CEILING).
+    screen_max_tokens = min(120_000, max(16_384, 160 * cap))
+    screen_transport = None
+    screen_candidates = None
+    if screen_enabled:
+        screen_transport = make_anthropic_call(
+            Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")),
+            model, max_tokens=screen_max_tokens,
+            stage="f5_candidate_screen", stream=True)
+        screen_candidates = make_candidate_screen(screen_transport)
 
     seams = build_f5_seams(
         fetch_meta=fetch_meta, fetch_abstract=fetch_abstract,
         search_candidates=search_candidates,
         complete=generator, verifier_complete=verifier,
+        cap=cap, screen_candidates=screen_candidates,
         judgment_model_id=model, verifier_model_id=model)
 
     # Path A stays hard-gated off, exactly as production requires. Deployment
     # mode with a distinct verifier is what makes Path B detection meaningful;
     # neither is relaxed for the bench.
+    #
+    # candidate_screen_enabled MUST agree with the wiring or the detector's own
+    # constructor refuses (f5_supersession.py:2119) -- the flag is not a request,
+    # it is an assertion about what was wired, so it is derived from the same
+    # value rather than set beside it.
     policy = F5Policy(mode="deployment", deploy_path_a=False,
+                      candidate_screen_enabled=screen_candidates is not None,
+                      max_deep_comparisons=max_deep,
                       generator_model_id=model, verifier_model_id=model)
 
     return {
         "f5_seams": seams,
         "f5_evidence_builder": make_f5_evidence_builder(fetch_meta, as_of_date=as_of),
         "f5_policy": policy,
+        # LIVE LEDGERS, NOT NUMBERS, and deliberately outside "provenance":
+        # provenance is built before the run and serialized after it, so a total
+        # captured here would be zero. The caller snapshots these once the run
+        # is over. Not a run kwarg -- sandbox_judge splats only the three keys
+        # above.
+        "token_ledgers": [
+            transport.token_ledger for transport in
+            (generator, verifier, screen_transport) if transport is not None],
         "provenance": {
             "f5_candidate_source": (LIVE_F5_CANDIDATE_SOURCE if live_discovery
                                     else BENCH_F5_CANDIDATE_SOURCE),
             "f5_as_of_date": as_of,
+            # The screen's presence is provenance, not configuration: a reader
+            # comparing two runs of the same packet has to be able to see which
+            # one paid for a triage and which one deep-read everything.
+            "f5_candidate_screen": (
+                {"enabled": True,
+                 "prompt_version": CANDIDATE_SCREEN_PROMPT_VERSION,
+                 "max_output_tokens": screen_max_tokens,
+                 "render_log": screen_candidates.render_log}
+                if screen_candidates is not None else {"enabled": False}),
+            "f5_candidate_cap": cap,
+            "f5_ranking": (ranking if live_discovery else "not_applicable"),
+            "f5_max_deep_comparisons": max_deep,
             "bank_papers": len(bank),
             # In live mode the count is not known at wiring time -- the finder has
             # not run yet -- and reporting the bank's 0 would read as "retrieval

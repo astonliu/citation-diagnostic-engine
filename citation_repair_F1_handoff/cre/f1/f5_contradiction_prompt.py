@@ -44,6 +44,7 @@ module ships no fabricated pair as an example.
 from __future__ import annotations
 
 from . import sentence_spans as ss
+from .anthropic_transport import CACHE_BREAK_MARKER as _CACHE_BREAK_MARKER
 from .f5_supersession import (
     F5_CONTRADICTION_PROMPT_VERSION,
     F5_RESPONSE_PARSER_VERSION,
@@ -57,6 +58,25 @@ CONTRADICTION_PROMPT_VERSION = F5_CONTRADICTION_PROMPT_VERSION
 #: DEC-022: the parser version moves independently of the prompt version. Both are
 #: stamped on every record.
 RESPONSE_PARSER_VERSION = F5_RESPONSE_PARSER_VERSION
+
+#: WHERE THE PROMPT CACHE BREAKPOINT SITS, and its own version.
+#:
+#: F5's deep comparison is a per-candidate fan-out against ONE cited work, so
+#: everything from the first instruction through the end of the CITED source is
+#: byte-identical across every candidate in a claim and only the CANDIDATE block
+#: and the claim vary. That is the shape prompt caching is for, and it is why
+#: this taxonomy needed no prompt REORDER to get it -- the stable material was
+#: already first.
+#:
+#: WHY THIS IS NOT A ``contradiction_prompt_version`` BUMP. The marker is split
+#: out by :func:`anthropic_transport.split_cache_blocks` and the two content blocks
+#: concatenate back to the exact bytes the model saw at
+#: ``f5_contradiction_v5``, so no record stamped v5 misrepresents what was
+#: asked. The prompt version answers "what was the judge asked"; that answer did
+#: not change. Moving the breakpoint DOES change billing and cache behaviour,
+#: which is what this constant is for -- bump it, not the prompt version, and a
+#: reader can tell the two kinds of change apart.
+CONTRADICTION_CACHE_BREAKPOINT_VERSION = "after_cited_source_v1"
 
 #: The ``ComparabilitySource`` fields that carry evidence text, in the order
 #: ``f5_supersession._source_text`` concatenates them -- so what the judge is shown
@@ -269,7 +289,7 @@ join multiple ids or manufacture a passage.
 
 CITED (earlier) WORK SOURCE:
 <<CITED_SOURCE>>
-
+<<<CACHE_BREAK>>>
 CANDIDATE (later) WORK SOURCE:
 <<CANDIDATE_SOURCE>>
 
@@ -312,3 +332,10 @@ Return ONLY one JSON object with exactly these keys and no others:
 
 No prose outside the object, and no second object.
 """
+
+# The prompt spells the marker literally, so the one place the text gets cut is
+# visible where it is cut. Checked at import: the literal and the adapter that
+# splits on it cannot drift apart unnoticed, and losing the marker would make
+# every deep comparison silently pay full price for the cited-work prefix.
+assert F5_CONTRADICTION_PROMPT.count(_CACHE_BREAK_MARKER) == 1, (
+    "the F5 contradiction prompt must carry exactly one cache breakpoint marker")

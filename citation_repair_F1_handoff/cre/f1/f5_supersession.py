@@ -1065,6 +1065,14 @@ class TemporalAssessorRun:
             "screen_missing_facts": [],
             "screen_version": None,
             "screen_prompt_sha256": None,
+            # THE ORDER THE DEEP LOOP ACTUALLY WALKED THIS CLAIM'S CANDIDATES.
+            # The loop is sorted by the screen's priority signal while
+            # ``candidate_assessments`` stays in retrieval order, so list
+            # position no longer tells a reader -- or the record validator --
+            # which candidates the deep-comparison budget was spent on first.
+            # This does. None means the candidate never reached the loop (a
+            # structural terminal, or a proven same-study report).
+            "deep_comparison_rank": None,
             "screen_response_sha256": None,
             "claim_match": None,
             "outcome_relation": None,
@@ -1137,7 +1145,8 @@ class TemporalAssessorRun:
     def _cost_gate_result(self, *, candidate: CandidateWork, notice: NoticeStatus,
                           reason: str, cited_work_id: str,
                           study_cluster_by_work: Optional[dict] = None,
-                          decision=None, batch=None) -> _CandResult:
+                          decision=None, batch=None,
+                          deep_rank: Optional[int] = None) -> _CandResult:
         cand = self._new_candidate_assessment(candidate)
         self._record_candidate_notice(cand, notice)
         cand["candidate_tier"] = self._candidate_tier(candidate).value
@@ -1151,6 +1160,8 @@ class TemporalAssessorRun:
             cand["study_cluster_uncertain"] = candidate_cluster.cluster_uncertain
         if decision is not None and batch is not None:
             self._record_screen_decision(cand, decision, batch)
+        if deep_rank is not None:
+            cand["deep_comparison_rank"] = deep_rank
         cand["reason"] = reason
         cand["discovery_disposition"] = "unassessable"
         return _CandResult(
@@ -1806,10 +1817,53 @@ class TemporalAssessorRun:
         deep_entries = 0
         deep_comparisons_used = 0
         budget = policy.max_deep_comparisons
-        for candidate_index, candidate, candidate_notice in screenable:
+        # DEEP-COMPARE THE LIKELIEST REFUTERS FIRST.
+        #
+        # WHY THIS IS NOT A SEMANTIC CHANGE. With ``max_deep_comparisons=None``
+        # -- the default -- every screenable candidate is deep-compared no matter
+        # what order this loop walks, and ``cand_results`` below is reassembled by
+        # ``candidate_index`` in retrieval order, so both the assessments and the
+        # record are byte-identical to the unsorted walk. The chosen candidate is
+        # picked by ``min(surfaced, key=(-confidence, id))``, which is
+        # order-independent too. Order becomes observable ONLY when a budget is
+        # configured, and there it decides which candidates the budget buys.
+        #
+        # WHY IT MATTERS THERE. Retrieval order is not relevance order: measured
+        # on the HRT fixture, WHI 2002 sits at position 8 when the cap is 25 and
+        # at position 197 when the cap is 300 -- it is an artifact of how the
+        # finder allocates its streams (f5_seams.py:77 states plainly that v1 has
+        # no learned reranker). So a budget spent in retrieval order is a budget
+        # spent close to at random. The screen already reads every candidate's
+        # abstract and reports a ``possible_relation``; measured on the sepsis
+        # fixture at cap 200, 21 of 200 candidates came back opposes/mixed and
+        # BOTH landmark refuters were among those 21. Spending the budget on
+        # those first is the difference between finding the refuter and running
+        # out of budget three rows above it.
+        #
+        # THE SCREEN IS A PRIORITY SIGNAL HERE, NEVER A VERDICT. A low-priority
+        # candidate is still deep-compared whenever the budget reaches it, and
+        # only an explicit ``clear_mismatch`` avoids comparison at all -- that
+        # rule is unchanged, and it is enforced inside the loop below.
+        _RELATION_PRIORITY = {
+            "opposes": 0, "mixed": 1, "uncertain": 2, "confirms": 3, "neutral": 4}
+
+        def _deep_priority(row) -> tuple:
+            candidate_index, candidate, _notice = row
+            decision = screen_decisions.get(candidate.id)
+            if decision is None:
+                # No screen (or a discarded batch): every candidate ties, and the
+                # stable sort then preserves retrieval order exactly.
+                return (0, 0, candidate_index)
+            return (_RELATION_PRIORITY.get(decision.possible_relation, 2),
+                    0 if decision.decision == "plausible" else 1,
+                    candidate_index)
+
+        for deep_rank, (candidate_index, candidate, candidate_notice) in enumerate(
+                sorted(screenable, key=_deep_priority)):
             decision = screen_decisions.get(candidate.id)
             if decision is not None and decision.decision == "clear_mismatch":
                 cand_results_by_index[candidate_index] = self._cost_gate_result(
+                    deep_rank=deep_rank,
                     candidate=candidate, notice=candidate_notice,
                     cited_work_id=cited_work_id,
                     study_cluster_by_work=study_cluster_by_work,
@@ -1824,7 +1878,7 @@ class TemporalAssessorRun:
                     cited_work_id=cited_work_id,
                     study_cluster_by_work=study_cluster_by_work,
                     reason="deep_comparison_budget_exhausted",
-                    decision=decision, batch=screen_batch)
+                    decision=decision, batch=screen_batch, deep_rank=deep_rank)
                 continue
             candidate_result = self._assess_candidate(
                 claim=claim, cited_work_id=cited_work_id, cited_meta=cited_meta,
@@ -1833,6 +1887,7 @@ class TemporalAssessorRun:
                 cited_eoc_caps=cited_eoc_caps, candidate=candidate,
                 candidate_notice=candidate_notice,
                 study_cluster_by_work=study_cluster_by_work)
+            candidate_result.assessment["deep_comparison_rank"] = deep_rank
             deep_entries += 1
             if candidate_result.assessment.get("contradiction_response") is not None:
                 deep_comparisons_used += 1
@@ -2678,7 +2733,18 @@ def validate_f5_record(
     if verified_early_claim_reason is None and policy.max_deep_comparisons is not None:
         completed_comparisons = 0
         budget_skip_seen = False
-        for cand in assessments:
+        # REPLAY IN THE ORDER THE BUDGET WAS SPENT, which is no longer list
+        # order: the deep loop walks candidates by the screen's priority signal
+        # so a configured budget buys the likeliest refuters, while
+        # ``candidate_assessments`` stays in retrieval order for the reader. The
+        # invariant is unchanged and still strict -- no skip before the budget is
+        # spent, no comparison after it -- it is simply replayed against the
+        # recorded walk instead of against a list order that no longer implies
+        # one. A row with no rank never entered the loop and cannot be either.
+        def _spend_order(cand: dict):
+            rank = cand.get("deep_comparison_rank")
+            return (1, 0) if not isinstance(rank, int) else (0, rank)
+        for cand in sorted(assessments, key=_spend_order):
             if cand.get("reason") == "deep_comparison_budget_exhausted":
                 if completed_comparisons < policy.max_deep_comparisons:
                     raise ValueError(

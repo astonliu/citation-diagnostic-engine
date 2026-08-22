@@ -1,0 +1,67 @@
+{
+ "schema": "cre_sandbox_packet_v1",
+ "citation_id": "BENCH_F5_EGDT:bibr1",
+ "citing_pmcid": "PMC9000010",
+ "citing_sentence": "Early goal-directed therapy reduces mortality in patients with septic shock.",
+ "citing_source_section": "introduction",
+ "cited_claimed": {
+  "title": "Early goal-directed therapy in the treatment of severe sepsis and septic shock.",
+  "claimed_pmid": "11794169",
+  "claimed_doi": "10.1056/NEJMoa010307",
+  "journal": "N Engl J Med",
+  "year": "2001-11-08"
+ },
+ "cited_pmcid": "",
+ "cited_pub_date": "2001-11-08",
+ "cited_abstract": "Goal-directed therapy has been used for severe sepsis and septic shock in the intensive care unit. This approach involves adjustments of cardiac preload, afterload, and contractility to balance oxygen delivery with oxygen demand. The purpose of this study was to evaluate the efficacy of early goal-directed therapy before admission to the intensive care unit. We randomly assigned patients who arrived at an urban emergency department with severe sepsis or septic shock to receive either six hours of early goal-directed therapy or standard therapy (as a control) before admission to the intensive care unit. Clinicians who subsequently assumed the care of the patients were blinded to the treatment assignment. In-hospital mortality (the primary efficacy outcome), end points with respect to resuscitation, and Acute Physiology and Chronic Health Evaluation (APACHE II) scores were obtained serially for 72 hours and compared between the study groups. Of the 263 enrolled patients, 130 were randomly assigned to early goal-directed therapy and 133 to standard therapy; there were no significant differences between the groups with respect to base-line characteristics. In-hospital mortality was 30.5 percent in the group assigned to early goal-directed therapy, as compared with 46.5 percent in the group assigned to standard therapy (P = 0.009). Early goal-directed therapy provides significant benefits with respect to outcome in patients with severe sepsis and septic shock.",
+ "cited_publication_types": [
+  "Clinical Trial",
+  "Journal Article",
+  "Randomized Controlled Trial"
+ ],
+ "cited_mesh_terms": [
+  "Sepsis",
+  "Shock, Septic",
+  "Systemic Inflammatory Response Syndrome",
+  "Hospital Mortality",
+  "Fluid Therapy",
+  "Emergency Service, Hospital",
+  "Hemodynamics",
+  "Humans",
+  "Treatment Outcome",
+  "Monitoring, Physiologic"
+ ],
+ "cited_authors": [
+  "Rivers E",
+  "Nguyen B",
+  "Havstad S",
+  "Ressler J",
+  "Muzzin A",
+  "Knoblich B",
+  "Peterson E",
+  "Tomlanovich M"
+ ],
+ "cited_sections": [
+  {
+   "label": "results",
+   "title": "Primary outcome",
+   "text": "In-hospital mortality was 30.5 percent in the group assigned to early goal-directed therapy, as compared with 46.5 percent in the group assigned to standard therapy (P = 0.009)."
+  },
+  {
+   "label": "results",
+   "title": "Conclusion",
+   "text": "Early goal-directed therapy provides significant benefits with respect to outcome in patients with severe sepsis and septic shock."
+  },
+  {
+   "label": "methods",
+   "title": "Design",
+   "text": "We randomly assigned patients who arrived at an urban emergency department with severe sepsis or septic shock to receive either six hours of early goal-directed therapy or standard therapy (as a control) before admission to the intensive care unit."
+  }
+ ],
+ "f5_as_of_date": "2026-08-22",
+ "taxonomies": [
+  "F5"
+ ],
+ "f5_live_discovery": true,
+ "f5_mailto": "zhandong.liu@bcm.edu"
+}

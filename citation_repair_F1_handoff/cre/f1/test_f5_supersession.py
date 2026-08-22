@@ -1535,3 +1535,132 @@ def test_policy_rejects_nondefault_comparability_rule():
 def test_policy_rejects_deploy_path_a():
     with pytest.raises(ValueError, match="deploy_path_a must be False"):
         validate_f5_policy(F5Policy(deploy_path_a=True))
+
+
+# ==========================================================================
+# The budget spends itself on the likeliest refuters first.
+#
+# Retrieval order is not relevance order -- measured on the live HRT fixture,
+# WHI 2002 sits at position 8 when the cap is 25 and at position 197 when the cap
+# is 300 -- so a budget spent in retrieval order is a budget spent nearly at
+# random. The screen already reports a possible_relation per candidate; the deep
+# loop uses it as a PRIORITY, never as a verdict.
+# ==========================================================================
+def _two_candidate_screen(w2_relation, w3_relation, *, decision="plausible"):
+    return lambda **_kwargs: screen_batch(
+        screen_row("W2", decision, relevance="match", relation=w2_relation),
+        screen_row("W3", decision, relevance="match", relation=w3_relation))
+
+
+def test_the_budget_buys_the_opposing_candidate_not_the_first_retrieved():
+    """W3 is retrieved LAST and screened `opposes`; a budget of one must buy it."""
+    candidates = (candidate("W2"), candidate("W3"))
+    seams, calls = make_seams(candidates=candidates)
+    seams["screen_candidates"] = _two_candidate_screen("confirms", "opposes")
+
+    policy = F5Policy(candidate_screen_enabled=True, max_deep_comparisons=1)
+    _temporal, records = decide_f5(
+        CLAIMS, SUPPORTED, EVIDENCE, policy=policy, **seams)
+
+    record = records[0]
+    assert calls["judge"] == 1
+    assert record["budget_exhausted"] is True
+    by_id = {row["candidate_work_id"]: row
+             for row in record["candidate_assessments"]}
+    # The budget went to the opposer, and the confirmer is the one held back.
+    assert by_id["W3"]["reason"] != "deep_comparison_budget_exhausted"
+    assert by_id["W2"]["reason"] == "deep_comparison_budget_exhausted"
+    validate_f5_record(record, policy)
+
+
+def test_retrieval_order_would_have_spent_that_budget_on_the_confirmer():
+    """The same pair with NO screen: the budget goes to whoever came first."""
+    candidates = (candidate("W2"), candidate("W3"))
+    seams, calls = make_seams(candidates=candidates)
+
+    policy = F5Policy(max_deep_comparisons=1)
+    _temporal, records = decide_f5(
+        CLAIMS, SUPPORTED, EVIDENCE, policy=policy, **seams)
+
+    assert calls["judge"] == 1
+    by_id = {row["candidate_work_id"]: row
+             for row in records[0]["candidate_assessments"]}
+    assert by_id["W2"]["reason"] != "deep_comparison_budget_exhausted"
+    assert by_id["W3"]["reason"] == "deep_comparison_budget_exhausted"
+
+
+def test_the_record_stays_in_retrieval_order_however_the_budget_was_spent():
+    """Reassembly is by candidate_index, so the audit list never reorders."""
+    candidates = (candidate("W2"), candidate("W3"))
+    seams, _calls = make_seams(candidates=candidates)
+    seams["screen_candidates"] = _two_candidate_screen("confirms", "opposes")
+
+    _temporal, records = decide_f5(
+        CLAIMS, SUPPORTED, EVIDENCE,
+        policy=F5Policy(candidate_screen_enabled=True, max_deep_comparisons=1),
+        **seams)
+
+    ids = [row["candidate_work_id"] for row in records[0]["candidate_assessments"]]
+    assert ids == ["W2", "W3"], ids
+
+
+def test_without_a_budget_the_priority_sort_changes_nothing_observable():
+    """The default policy compares every candidate, so ordering is a pure no-op:
+    the two runs below differ only in which candidate the screen called an
+    opposer, and their assessments must be identical apart from that label."""
+    def one_run(w2_relation, w3_relation):
+        candidates = (candidate("W2"), candidate("W3"))
+        seams, calls = make_seams(candidates=candidates)
+        seams["screen_candidates"] = _two_candidate_screen(w2_relation, w3_relation)
+        _t, records = decide_f5(
+            CLAIMS, SUPPORTED, EVIDENCE,
+            policy=F5Policy(candidate_screen_enabled=True), **seams)
+        return records[0], calls
+
+    forward, forward_calls = one_run("opposes", "confirms")
+    reverse, reverse_calls = one_run("confirms", "opposes")
+
+    assert forward_calls["judge"] == reverse_calls["judge"] == 2
+    for record in (forward, reverse):
+        assert record["cost_stage_counts"]["candidates_budget_skipped"] == 0
+        assert record.get("budget_exhausted") is not True
+
+    def substantive(record):
+        """Everything the verdict rests on. The screen labels and the recorded
+        walk order are provenance ABOUT the run, not findings from it."""
+        return [{k: v for k, v in row.items()
+                 if not k.startswith("screen_") and k != "deep_comparison_rank"}
+                for row in record["candidate_assessments"]]
+
+    assert substantive(forward) == substantive(reverse)
+
+    # The sort really did fire -- the opposer was walked first BOTH times, which
+    # is the whole point -- and it changed nothing above.
+    def ranks(record):
+        return {row["candidate_work_id"]: row["deep_comparison_rank"]
+                for row in record["candidate_assessments"]}
+
+    assert ranks(forward) == {"W2": 0, "W3": 1}
+    assert ranks(reverse) == {"W2": 1, "W3": 0}
+
+
+def test_an_unscreened_batch_keeps_exact_retrieval_order():
+    """A discarded batch leaves every candidate tied, so the stable sort is the
+    identity and the pre-screen walk is preserved byte for byte."""
+    candidates = (candidate("W2"), candidate("W3"))
+    seams, calls = make_seams(candidates=candidates)
+    seams["screen_candidates"] = lambda **_kwargs: screen_batch(
+        screen_row("W2"))                      # W3 missing: batch is unusable
+
+    _temporal, records = decide_f5(
+        CLAIMS, SUPPORTED, EVIDENCE,
+        policy=F5Policy(candidate_screen_enabled=True, max_deep_comparisons=1),
+        **seams)
+
+    record = records[0]
+    assert record["candidate_screen_status"] == "malformed_open_to_deep_comparison"
+    assert calls["judge"] == 1
+    by_id = {row["candidate_work_id"]: row
+             for row in record["candidate_assessments"]}
+    assert by_id["W2"]["reason"] != "deep_comparison_budget_exhausted"
+    assert by_id["W3"]["reason"] == "deep_comparison_budget_exhausted"
