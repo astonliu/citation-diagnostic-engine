@@ -270,6 +270,12 @@ def _ext_link(cit) -> str:
 # (one with no nested block) so a <td> wrapping a <p> isn't counted twice.
 _BLOCK_TAGS = {"p", "title", "caption", "td", "th", "list-item", "disp-quote"}
 
+#: Subtrees an outer block must NOT inline when serializing its own text: each is
+#: yielded as its own block, so inlining would serialize it twice and could move a
+#: citance that is already correctly assigned. ``tr`` is included because a table
+#: row is serialized whole by ``_serialize_table_row``.
+_NESTED_BLOCK_STOP = _BLOCK_TAGS | {"tr"}
+
 # Kept as a public compatibility constant for callers that imported it. Sentence
 # construction no longer uses this non-tiling regex; :func:`_sentence_spans`
 # delegates ordinary prose boundaries to ``sentence_spans`` and adds the one
@@ -278,9 +284,17 @@ _BLOCK_TAGS = {"p", "title", "caption", "td", "th", "list-item", "disp-quote"}
 _SENT_RE = re.compile(r"[^.!?]*[.!?]+(?:\s+|$)|[^.!?]+$")
 
 
-def _serialize_with_markers(block):
+def _serialize_with_markers(block, *, stop_at_nested_blocks: bool = False):
     """Linearize a block's text, recording (char_offset, [rid...], marker_text)
-    for every <xref ref-type="bibr"> in document order."""
+    for every <xref ref-type="bibr"> in document order.
+
+    ``stop_at_nested_blocks`` serializes only the text that belongs to THIS
+    block, not descending into a nested block's subtree. Those subtrees are
+    yielded separately by :func:`_innermost_blocks`, so descending would
+    serialize them twice; not descending is what lets an OUTER block contribute
+    its own markers without disturbing the inner ones. A block with no nested
+    block serializes identically either way.
+    """
     parts: list[str] = []
     markers: list[tuple[int, list[str], str]] = []
 
@@ -288,13 +302,16 @@ def _serialize_with_markers(block):
         if el.text:
             parts.append(el.text)
         for child in el:
-            if _localname(child.tag) == "xref" and child.get("ref-type") == "bibr":
+            name = _localname(child.tag)
+            if name == "xref" and child.get("ref-type") == "bibr":
                 pos = sum(len(p) for p in parts)
                 rids = (child.get("rid") or "").split()
                 mtext = _text(child)
                 markers.append((pos, rids, mtext))
                 if mtext:
                     parts.append(mtext)       # keep the marker visible in-sentence
+            elif stop_at_nested_blocks and name in _NESTED_BLOCK_STOP:
+                pass                          # yielded on its own; do not inline it
             else:
                 walk(child)
             if child.tail:
@@ -453,8 +470,31 @@ def _serialize_table_row(row):
     return "".join(parts), markers
 
 
+def unreached_cited_rids(root) -> set:
+    """Cited rids the BLOCK WALK cannot see. Empty is the invariant.
+
+    The two walks answer the same question by different routes:
+    :func:`_cited_rids` scans the whole document for ``<xref ref-type="bibr">``,
+    while :func:`_innermost_blocks` finds markers through the block selection
+    that citance assignment actually uses. Anything in the first and not the
+    second is a reference the document cites and this parser cannot reach -- a
+    traversal defect, and one that surfaces downstream as a reference with no
+    citing sentence, indistinguishable from a reference nothing cites.
+
+    Kept as an ORACLE, deliberately independent of the walk it checks. It is the
+    only thing that can catch the next traversal defect, so it must never be
+    re-pointed at the marker walk it exists to audit -- including after a fix,
+    when the two agree and the independence looks redundant.
+    """
+    reached: set = set()
+    for _text, markers, _section, _kind in _innermost_blocks(root):
+        for _pos, rids, _mtext in markers:
+            reached.update(rids)
+    return _cited_rids(root) - reached
+
+
 def _innermost_blocks(root):
-    """Sentence-bearing blocks with no nested block, serialized once each.
+    """Sentence-bearing blocks, serialized once each, in document order.
 
     Serializing here rather than inside :func:`link_citances` lets that function
     make TWO passes over the same data -- one to validate the article's
@@ -484,15 +524,22 @@ def _innermost_blocks(root):
             node = parents.get(node)
         if inside_table_cell:
             continue
-        nested = 0
-        for d in block.iter():
-            if _localname(d.tag) in _BLOCK_TAGS:
-                nested += 1
-                if nested > 1:
-                    break
-        if nested > 1:
-            continue
-        text, markers = _serialize_with_markers(block)
+        # A BLOCK THAT CONTAINS ANOTHER BLOCK STILL HAS TEXT OF ITS OWN.
+        #
+        # This used to `continue` on any block that was not innermost, and that
+        # discarded every marker sitting in the outer block's OWN text. On the
+        # natural run it lost 9 real citations: a <p> that also contains a <list>
+        # (PMC8544026:B5, B14) or a <fig>/<table-wrap> whose <caption> and cells
+        # are blocks (PMC13449730:cit0007 and five more), where the marker is in
+        # the paragraph's own prose and the nested block merely sits beside it.
+        # Those references then had no citance at all and reached human review as
+        # "empty_claim_input" -- which reads as a reference nothing cites, when in
+        # fact the document cites it and this walk could not see the marker.
+        #
+        # The nested blocks are still yielded separately, at their own document
+        # positions, with byte-identical text and markers; this serializes only
+        # the text that is NOT inside one, so nothing is serialized twice.
+        text, markers = _serialize_with_markers(block, stop_at_nested_blocks=True)
         if markers:
             yield text, markers, _source_section(block, parents), "prose"
 

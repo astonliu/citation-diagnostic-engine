@@ -173,3 +173,40 @@ def test_two_consecutive_rebands_byte_identical(tmp_path):
     a = _run(tmp_path / "run_a")
     b = _run(tmp_path / "run_b")
     assert a == b and len(a) > 0
+
+
+# ==========================================================================
+# TRAVERSAL REACHABILITY -- the block walk must see every cited reference
+# ==========================================================================
+def test_every_cited_reference_is_reachable_by_the_block_walk(capsys):
+    """The whole-document xref scan is the ORACLE; the block walk must match it.
+
+    REGRESSION GUARD. `_innermost_blocks` used to skip any block that contained
+    another block, which discarded the markers in the outer block's own text: it
+    reached 36 of PMC8544026's 38 cited references and 95 of PMC13449730's 102,
+    and those 9 references then had no citing sentence at all and reached human
+    review as "empty_claim_input" -- reading as a reference nothing cites, when
+    the document cites it and the walk could not see the marker.
+
+    Prints per-document reached/total so a partial regression is visible as a
+    number rather than only as a boolean.
+    """
+    import xml.etree.ElementTree as ET
+    from pathlib import Path as _Path
+    from cre.f1 import parser as P
+
+    fixtures = sorted(_Path(__file__).parent.joinpath("fixtures").glob("*.xml"))
+    assert fixtures, "no XML fixtures found; this guard would pass vacuously"
+    total_cited = 0
+    for path in fixtures:
+        root = ET.parse(str(path)).getroot()
+        cited = P._cited_rids(root)
+        unreached = P.unreached_cited_rids(root)
+        total_cited += len(cited)
+        print(f"  {path.name:28} {len(cited) - len(unreached):3d}/{len(cited):3d}")
+        assert not unreached, (
+            f"{path.name}: the block walk cannot reach cited reference(s) "
+            f"{sorted(unreached)}; a traversal defect makes them look uncited")
+    # A guard that cannot fail is not a guard: fixtures must actually cite things.
+    assert total_cited > 0, "fixtures contain no bibr xrefs; guard is vacuous"
+    print(f"  TOTAL cited references across fixtures: {total_cited}")

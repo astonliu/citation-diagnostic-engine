@@ -6,18 +6,17 @@
   ],
   "cohort_sha256": "3e2a7457a60831b0915daaa09d9b0eca927a72121dee27bccd3c518634429d70",
   "counts_by_outcome": {
-    "HUMAN_REVIEW_REQUIRED": 10,
+    "HUMAN_REVIEW_REQUIRED": 1,
     "UNJUDGEABLE": 48
   },
   "counts_by_outcome_reason": {
-    "HUMAN_REVIEW_REQUIRED/empty_claim_input": 9,
     "HUMAN_REVIEW_REQUIRED/malformed_claim_input": 1,
     "UNJUDGEABLE/cited_text_unavailable": 4,
     "UNJUDGEABLE/preband_excluded_preband": 28,
     "UNJUDGEABLE/uncited_reference": 16
   },
-  "freeze_sha256": "dca02d21562fa843a0295623180b05e40010c9c3351d9572cd3d967b691a192a",
-  "frozen_count": 58,
+  "freeze_sha256": "e51868e4523059cb7f22f6c29ed169d62179d4200563ab510c37d28161094cdf",
+  "frozen_count": 49,
   "note": "Terminal outcomes reachable with NO model call and NO network call, over the hash-pinned 408. Sealed before the paid F1-F8 run; asserted unchanged after it.",
   "rows": [
     {
@@ -146,19 +145,9 @@
       "terminal_outcome": "UNJUDGEABLE"
     },
     {
-      "citation_id": "PMC13449730:cit0007",
-      "reason": "empty_claim_input",
-      "terminal_outcome": "HUMAN_REVIEW_REQUIRED"
-    },
-    {
       "citation_id": "PMC13449730:cit0008",
       "reason": "uncited_reference",
       "terminal_outcome": "UNJUDGEABLE"
-    },
-    {
-      "citation_id": "PMC13449730:cit0011",
-      "reason": "empty_claim_input",
-      "terminal_outcome": "HUMAN_REVIEW_REQUIRED"
     },
     {
       "citation_id": "PMC13449730:cit0024",
@@ -191,21 +180,6 @@
       "terminal_outcome": "UNJUDGEABLE"
     },
     {
-      "citation_id": "PMC13449730:cit0042",
-      "reason": "empty_claim_input",
-      "terminal_outcome": "HUMAN_REVIEW_REQUIRED"
-    },
-    {
-      "citation_id": "PMC13449730:cit0043",
-      "reason": "empty_claim_input",
-      "terminal_outcome": "HUMAN_REVIEW_REQUIRED"
-    },
-    {
-      "citation_id": "PMC13449730:cit0044",
-      "reason": "empty_claim_input",
-      "terminal_outcome": "HUMAN_REVIEW_REQUIRED"
-    },
-    {
       "citation_id": "PMC13449730:cit0045",
       "reason": "uncited_reference",
       "terminal_outcome": "UNJUDGEABLE"
@@ -226,11 +200,6 @@
       "terminal_outcome": "UNJUDGEABLE"
     },
     {
-      "citation_id": "PMC13449730:cit0062",
-      "reason": "empty_claim_input",
-      "terminal_outcome": "HUMAN_REVIEW_REQUIRED"
-    },
-    {
       "citation_id": "PMC13449730:cit0064",
       "reason": "uncited_reference",
       "terminal_outcome": "UNJUDGEABLE"
@@ -239,11 +208,6 @@
       "citation_id": "PMC13449730:cit0065",
       "reason": "uncited_reference",
       "terminal_outcome": "UNJUDGEABLE"
-    },
-    {
-      "citation_id": "PMC13449730:cit0086",
-      "reason": "empty_claim_input",
-      "terminal_outcome": "HUMAN_REVIEW_REQUIRED"
     },
     {
       "citation_id": "PMC13449730:cit0108",
@@ -259,11 +223,6 @@
       "citation_id": "PMC8544026:B10",
       "reason": "preband_excluded_preband",
       "terminal_outcome": "UNJUDGEABLE"
-    },
-    {
-      "citation_id": "PMC8544026:B14",
-      "reason": "empty_claim_input",
-      "terminal_outcome": "HUMAN_REVIEW_REQUIRED"
     },
     {
       "citation_id": "PMC8544026:B17",
@@ -294,11 +253,6 @@
       "citation_id": "PMC8544026:B35",
       "reason": "preband_excluded_preband",
       "terminal_outcome": "UNJUDGEABLE"
-    },
-    {
-      "citation_id": "PMC8544026:B5",
-      "reason": "empty_claim_input",
-      "terminal_outcome": "HUMAN_REVIEW_REQUIRED"
     },
     {
       "citation_id": "PMC8544026:B7",
