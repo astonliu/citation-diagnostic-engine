@@ -317,3 +317,38 @@ def test_the_manifest_names_a_stage_that_ran_uncounted(tmp_path, monkeypatch):
     assert block["unmetered"]["records"] == 1
     assert block["unmetered"]["by_stage"] == {"coverage": 1}
     assert "coverage" not in block["by_stage"]
+
+
+# ==========================================================================
+# THE TWO COUNTERS -- reconcilable by total, NOT joinable by name
+# ==========================================================================
+def test_every_booked_stage_name_is_in_the_pinned_vocabulary(
+        tmp_path, monkeypatch):
+    """A typo'd stage string would not raise -- it would quietly open a second
+    bucket and split one stage's spend across two keys, which is the silent gap
+    this ledger exists to close. The vocabulary is pinned so that fails here
+    rather than in a manifest nobody re-reads."""
+    manifest, _rows = run(
+        tmp_path, [make_ref("c")],
+        extractor=extractor_of(CLAIM_A, CLAIM_B),
+        coverage_judge=make_coverage_judge(
+            _counting_transport(_coverage_reply())),
+        disposition=CLEARED, monkeypatch=monkeypatch)
+
+    booked = set(manifest["paid_calls"]["by_stage"])
+    assert booked <= set(jr.PAID_CALL_STAGES), booked - set(jr.PAID_CALL_STAGES)
+
+
+def test_the_ledger_and_the_receipt_are_deliberately_not_name_joinable():
+    """Documented so nobody 'fixes' the divergence by renaming. The receipt
+    counts SEAMS and this ledger counts STAGES: one seam (discriminator_call_llm)
+    serves both F3 and F4, and separating those is the whole reason the ledger
+    beats the receipt here -- renaming to seam names would throw it away. A
+    cross-check compares totals or maps explicitly."""
+    from .recording_adapter import RUN_SEAMS
+
+    shared_names = set(jr.PAID_CALL_STAGES) & set(RUN_SEAMS)
+    assert shared_names == set(), shared_names
+    # And the seam that proves why: one transport, two stages.
+    assert "discriminator_call_llm" in RUN_SEAMS
+    assert {"F3", "F4"} <= set(jr.PAID_CALL_STAGES)

@@ -261,6 +261,29 @@ def _preserve_failed_response(rec: dict, *, stage: str, attempt: int,
     })
 
 
+#: The closed vocabulary of billed stages. Pinned as a constant, and by a test,
+#: because two independent counters now exist and NEITHER can be joined to the
+#: other by name. ``AdapterReceipt`` counts SEAMS; this ledger counts STAGES, and
+#: the two differ on purpose in both directions:
+#:
+#: * one seam serves two stages -- ``discriminator_call_llm`` is F3 and F4 both,
+#:   and separating their spend is the main thing this ledger adds over the
+#:   receipt, so renaming these keys to seam names would destroy it;
+#: * one seam invocation is many calls -- ``coverage_judge_v3`` fires once per
+#:   reference and bills once per claim.
+#:
+#: So a receipt/ledger cross-check must compare TOTALS, or map deliberately
+#: (``coverage_judge``/``coverage_judge_v3`` -> ``coverage``, ``f7_generator`` ->
+#: ``F7``, ``f7_verifier`` -> ``F7_verifier``, ``extractor`` ->
+#: ``claim_extraction``), and must exclude the free packet- or cache-served seams
+#: like ``fetch_abstract``. Joining the key sets directly would be asserting a
+#: coincidence.
+PAID_CALL_STAGES = (
+    "claim_extraction", "coverage",
+    "F3", "F4", "F4_verifier", "F5", "F5_verifier", "F7", "F7_verifier",
+)
+
+
 def _count_paid_call(rec: dict, stage: str, *, retry: bool) -> None:
     """Book one billed attempt against this record. EVERY attempt, retries too.
 
