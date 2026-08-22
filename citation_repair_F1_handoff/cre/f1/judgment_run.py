@@ -729,6 +729,7 @@ def _new_record(item: dict) -> dict:
         # stranded bibliography marker, and the durable record is the only place
         # a later reader can tell them apart.
         "claim_input_status": tox.claim_input_status(item.get("citing_sentence")),
+        "cited_in_body": item.get("cited_in_body"),
         **({"citing_source_section": item["citing_source_section"]}
            if item.get("citing_source_section") else {}),
         "cited_pmid": item.get("cited_pmid"),
@@ -772,6 +773,9 @@ def _excluded_record(ref, disposition: str, preband_label=None,
         "citing_pmid": ref.source_pmid,
         "citing_sentence": ref.citance,
         "claim_input_status": tox.claim_input_status(ref.citance),
+        # Tri-state, carried verbatim: only an explicit False licenses the
+        # uncited-reference scope exclusion in the router.
+        "cited_in_body": getattr(ref, "cited_in_body", None),
         "cited_pmid": c.claimed_pmid,
         "cited_claimed": {"title": c.title, "claimed_pmid": c.claimed_pmid,
                           "claimed_doi": c.claimed_doi},
@@ -2633,6 +2637,10 @@ def run_natural_judgment(
     # from a file that may have been rotated.
     terminal_counts: dict = {}
     human_review_by_reason: dict = {}
+    # References the taxonomy has NOTHING TO SAY ABOUT, as opposed to ones it
+    # tried to judge and could not. Reported so the count reads as a methods
+    # sentence rather than as a failure rate.
+    scope_exclusions: dict = {}
     # Which identifier kind each reference entered the band on. The point of the
     # v2 handoff is that "doi" is now a nonzero bucket instead of a silent drop.
     identifier_kinds: dict = {}
@@ -2689,6 +2697,8 @@ def run_natural_judgment(
         if rec["human_review_required"]:
             human_review_by_reason[reason] = (
                 human_review_by_reason.get(reason, 0) + 1)
+        if reason in tox.TERMINAL_SCOPE_EXCLUSION_REASONS:
+            scope_exclusions[reason] = scope_exclusions.get(reason, 0) + 1
         source = str((rec.get("evidence") or {}).get("cited_abstract_source") or "")
         if source:
             evidence_abstract_sources[source] = (
@@ -3488,6 +3498,17 @@ def run_natural_judgment(
             "total": sum(terminal_counts.values()),
             "accounting_ok": sum(terminal_counts.values()) == total_records,
             "vocabulary": sorted(tox.TERMINAL_OUTCOMES),
+        },
+        "scope_exclusions": {
+            "counts_by_reason": dict(sorted(scope_exclusions.items())),
+            "total": sum(scope_exclusions.values()),
+            "vocabulary": sorted(tox.TERMINAL_SCOPE_EXCLUSION_REASONS),
+            "note": (
+                "References the F3-F7 taxonomy has nothing to say about -- an "
+                "uncited reference has no citing sentence, therefore no "
+                "attributed claim. Terminal UNJUDGEABLE, in neither queue, and "
+                "distinct from a reference the band tried to judge and could not."
+            ),
         },
         "human_review": {
             "path": review_path,

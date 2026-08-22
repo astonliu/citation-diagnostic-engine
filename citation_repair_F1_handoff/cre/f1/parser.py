@@ -210,6 +210,35 @@ def _citation_node(ref):
     return _first(ref, "element-citation", "mixed-citation", "citation")
 
 
+def _cited_rids(root) -> set:
+    """Every ``rid`` any ``<xref ref-type="bibr">`` in the document points at.
+
+    A WHOLE-DOCUMENT WALK, DELIBERATELY NOT THE MARKER WALK. ``_innermost_blocks``
+    only yields sentence-bearing blocks, and ``link_citances`` only ever sees the
+    markers inside those -- so a marker the block selection does not reach is
+    invisible to it. Deriving "is this reference cited" from that walk would be
+    circular: it would answer "no" in exactly the cases where the parser FAILED,
+    which is the inference this field exists to make impossible.
+
+    Measured on the natural run: the marker walk reaches 36 of PMC8544026's 38
+    cited rids and 95 of PMC13449730's 102. The 9 it misses are real citations in
+    ordinary body paragraphs -- ``Chavan-Dafle et al.,``, ``Holweg et al. (1996)``,
+    a ``<sup>``-wrapped ``7``. Every one of them would have been reported as an
+    uncited reference and silently dropped from the taxonomy's scope.
+
+    An ``rid`` attribute may name several references at once ("B1 B2 B3"), so it
+    is split rather than taken whole.
+    """
+    rids: set = set()
+    for node in root.iter():
+        if _localname(node.tag) != "xref":
+            continue
+        if (node.get("ref-type") or "").strip() != "bibr":
+            continue
+        rids.update((node.get("rid") or "").split())
+    return rids
+
+
 def _publication_type(cit) -> str:
     """The publisher's own `publication-type`, verbatim and lowercased.
 
@@ -829,6 +858,9 @@ def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:
     # and _positional_numbering refuses the article if the markers disagree.
     ordered_ref_ids: list[str] = [
         ref.get("id") or f"ref{i}" for i, ref in enumerate(root.iter("ref"))]
+    # Computed ONCE over the whole document, before any citance is assigned, so
+    # the answer cannot depend on what the citance walk managed to reach.
+    cited_rids = _cited_rids(root)
     for i, ref in enumerate(root.iter("ref")):
         cit = _citation_node(ref)
         if cit is None:
@@ -859,6 +891,9 @@ def parse_pmc_xml(path: str, source_pmcid: str = "") -> list[Reference]:
             source_pmcid=source_pmcid,
             source_pmid=src_pmid,
             source_title=src_title,
+            # An OBSERVATION about the document, not about this reference's
+            # citance -- which has not even been assigned yet at this point.
+            cited_in_body=ref.get("id") in cited_rids if ref.get("id") else False,
         )
         refs.append(reference)
         if ref.get("id"):

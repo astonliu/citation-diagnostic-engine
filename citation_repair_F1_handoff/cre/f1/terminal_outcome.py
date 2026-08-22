@@ -100,10 +100,29 @@ REASON_SCHEMA_CONTRACT_FAILURE = "schema_contract_failure_after_retry"
 #: The saved source record itself cannot be read as a citation pair.
 REASON_CORRUPT_SOURCE_RECORD = "corrupt_source_record"
 
+#: NOT a human-review reason, and NOT a defect. No ``<xref ref-type="bibr">``
+#: anywhere in the citing document points at this reference: it is listed in the
+#: bibliography and cited nowhere. An uncited reference has no citing sentence,
+#: therefore no attributed claim, therefore nothing for F3-F7 to judge -- the same
+#: class as a reference to a database or a website. A SCOPE EXCLUSION, machine-
+#: final, in neither queue.
+#:
+#: Only an explicit ``cited_in_body is False`` reaches this. An empty citance on a
+#: reference a marker DOES point at is the opposite finding -- the parser failed to
+#: reach a marker that exists -- and stays a human-review item. Collapsing the two
+#: would bury a parser defect inside a scope exclusion, which is precisely the
+#: shape of silent drop this outcome vocabulary exists to prevent.
+REASON_UNCITED_REFERENCE = "uncited_reference"
+
 #: NOT a human-review reason. Band 1 identified the cited work and no text of it
 #: can be retrieved -- no PubMed record, no PMC full text, nothing to judge the
 #: claim against. Terminal UNJUDGEABLE, decided BEFORE any model call.
 REASON_CITED_TEXT_UNAVAILABLE = "cited_text_unavailable"
+
+#: Re-exported from ``reason_registry`` so the router and its consumers read the
+#: same closed set, and a caller does not have to import two modules to tell a
+#: scope exclusion from a judgment.
+from .reason_registry import TERMINAL_SCOPE_EXCLUSION_REASONS  # noqa: E402
 
 HUMAN_REVIEW_REASONS = frozenset({
     REASON_MALFORMED_CLAIM_INPUT,
@@ -363,6 +382,15 @@ def resolve(record) -> tuple:
     status = record.get("claim_input_status") or claim_input_status(
         record.get("citing_sentence"))
     if status == CLAIM_INPUT_EMPTY:
+        # NO CITANCE, AND NOTHING IN THE DOCUMENT CITES IT -> out of scope.
+        # `is False` exactly: None means no document was walked (a Reference
+        # built outside the parser), and an unexamined reference must never be
+        # silently excluded on a field nobody set.
+        if record.get("cited_in_body") is False:
+            return OUTCOME_UNJUDGEABLE, REASON_UNCITED_REFERENCE
+        # No citance, but a marker DOES point at this reference. That is a
+        # PARSER DEFECT -- the marker exists and the citance walk did not reach
+        # it -- and it is a real review item, not a scope exclusion.
         return OUTCOME_HUMAN_REVIEW, REASON_EMPTY_CLAIM_INPUT
     if status in BROKEN_CLAIM_INPUT:
         return OUTCOME_HUMAN_REVIEW, REASON_MALFORMED_CLAIM_INPUT

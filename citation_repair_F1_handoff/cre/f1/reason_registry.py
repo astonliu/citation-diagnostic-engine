@@ -122,6 +122,25 @@ UNSCOREABLE_BUCKETS = frozenset({
 REASON_REGISTRY = (SAME_WORK_REASONS | WRONG_PAPER_REASONS
                    | RETRACTION_REASONS | UNSCOREABLE_BUCKETS)
 
+# --- Rev 5.8: BAND-2 TERMINAL SCOPE EXCLUSIONS -------------------------------
+# Deliberately a SEPARATE closed set, not folded into REASON_REGISTRY above.
+# That registry is the §5.6 route vocabulary: it partitions into exactly four
+# Band-1 route groups and REASON_ROUTE is total over it, so a Band-2 terminal
+# reason -- which names no Band-1 route at all -- cannot live there without
+# making both properties false.
+#
+# These name references the F3-F7 taxonomy has NOTHING TO SAY ABOUT, as opposed
+# to ones it tried to judge and could not. The distinction is what lets the count
+# be reported as a methods sentence ("n references were cited nowhere in the
+# body") rather than read as a failure rate.
+#
+# CLOSED on the same terms as §5.6 A.4: a new member requires its spec amendment
+# in the same commit, and `test_reason_registry` scans terminal_outcome.py so the
+# set cannot drift behind the code.
+TERMINAL_SCOPE_EXCLUSION_REASONS = frozenset({
+    "uncited_reference",
+})
+
 # reason -> route (the machine-contract mapping).
 REASON_ROUTE = {
     **{r: "review_same_work_variant" for r in SAME_WORK_REASONS},

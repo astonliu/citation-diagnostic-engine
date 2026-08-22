@@ -205,6 +205,7 @@ def build_item(ref, *, resolved_identifier=None) -> "dict | None":
         "citing_pmid": ref.source_pmid,
         "citing_title": ref.source_title,
         "citing_sentence": ref.citance,
+        "cited_in_body": getattr(ref, "cited_in_body", None),
         **({"citing_source_section": ref.citance_source_section}
            if getattr(ref, "citance_source_section", "") else {}),
         "citance_group_id": getattr(ref, "citance_group_id", "") or "",

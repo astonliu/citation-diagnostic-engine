@@ -467,6 +467,23 @@ class Reference:
     source_pmcid: str = ""
     source_pmid: str = ""
     source_title: str = ""
+    # DID ANY <xref ref-type="bibr"> IN THE DOCUMENT POINT AT THIS REFERENCE?
+    #
+    # TRI-STATE, and the third state is load-bearing. True/False are observations
+    # the parser made by walking the document; None means NOBODY LOOKED -- a
+    # Reference built outside `parse_pmc_xml` (a test, an injection) has no
+    # document to walk. Only an explicit False licenses the uncited-reference
+    # scope exclusion, so an unexamined Reference can never be silently excluded.
+    #
+    # Read with `is False`, never falsily: None and False mean opposite things
+    # here, the same discipline `author_match` carries.
+    #
+    # NEVER INFERRED FROM AN EMPTY CITANCE. "No citance" and "no marker anywhere"
+    # are different facts, and the whole point of this field is to separate them:
+    # a reference nothing cites is out of the taxonomy's scope, while a reference
+    # a marker DOES point at whose citance we failed to assign is a parser defect
+    # and a real review item.
+    cited_in_body: Optional[bool] = None
     # Nearest JATS <sec> title/type containing the first citance. Empty means the
     # source section could not be established; consumers must not guess one.
     citance_source_section: str = ""

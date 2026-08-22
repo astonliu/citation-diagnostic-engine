@@ -60,6 +60,37 @@ def test_registry_equals_emitted_literals_exactly():
         f"  registered but NOT in code: {sorted(set(rr.REASON_REGISTRY) - emitted)}")
 
 
+def test_terminal_scope_exclusion_reasons_do_not_drift():
+    """The rev-5.8 Band-2 set is CLOSED on the same terms as the §5.6 registry.
+
+    Scanned from terminal_outcome's source so a reason added in code without a
+    registry amendment fails here, exactly as it would for a Band-1 route reason.
+    """
+    from . import terminal_outcome as tox
+    src = inspect.getsource(tox)
+    # REASON_* constants that the router returns beside OUTCOME_UNJUDGEABLE are
+    # scope exclusions; the human-review reasons have their own closed set and
+    # their own vocabulary assertion in assert_valid.
+    emitted = set(re.findall(
+        r'return OUTCOME_UNJUDGEABLE,\s*(REASON_[A-Z0-9_]+)', src))
+    values = {getattr(tox, name) for name in emitted}
+    registered = set(rr.TERMINAL_SCOPE_EXCLUSION_REASONS)
+    # cited_text_unavailable is an evidence-availability outcome, not a scope
+    # exclusion: the taxonomy HAS something to say about that reference, we just
+    # cannot read the paper. It stays out of this set on purpose.
+    values.discard(tox.REASON_CITED_TEXT_UNAVAILABLE)
+    assert values == registered, (
+        "rev 5.8 terminal scope-exclusion drift.\n"
+        f"  in code but NOT registered: {sorted(values - registered)}\n"
+        f"  registered but NOT in code: {sorted(registered - values)}")
+
+
+def test_the_two_registries_stay_disjoint():
+    """A Band-2 terminal reason must never be readable as a Band-1 route."""
+    assert set(rr.TERMINAL_SCOPE_EXCLUSION_REASONS).isdisjoint(
+        set(rr.REASON_REGISTRY))
+
+
 def test_registry_partitions_cleanly():
     # The four route groups are pairwise disjoint and cover the whole registry.
     groups = (rr.SAME_WORK_REASONS, rr.WRONG_PAPER_REASONS,
