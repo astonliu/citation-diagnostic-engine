@@ -136,6 +136,7 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
 import xml.etree.ElementTree as ET
 from typing import Callable, Optional
 
@@ -250,6 +251,34 @@ def _sanitize(value: str, path: str, touched: list) -> str:
 def _sha256_text(text: str) -> str:
     """The F7 ``SectionText.content_sha256`` convention, kept identical."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def canonical_section_text(value: str) -> str:
+    """THE one representation of a section's text. Producer and consumer share it.
+
+    A section is addressed downstream BY ITS HASH: F5 and F7 bind every evidence
+    span to ``content_sha256``, and that is what makes a span checkable against
+    the paragraph it claims to come from. So there may be exactly one byte
+    sequence per section. There were two. This module emitted the text as JATS
+    rendered it; ``f5_evidence_store`` canonicalized before hashing, and the two
+    digests disagreed whenever the rendering left a trailing space on a line or a
+    decomposed accent -- 13 references on the natural run died as
+    ``quarantine_parse`` for it (e.g. PMC11624350:bib31, "fulltext section 8
+    content_sha256 does not match stored text").
+
+    The fix is to AGREE, never to relax: the comparison downstream stays strict
+    and keeps failing on mismatch, because a loosened comparison would let an
+    evidence span bind to the wrong paragraph and produce a confident wrong label
+    with no error anywhere. Applying this at the producer makes the consumer's
+    normalization a no-op, so one hash addresses one representation.
+
+    NFC, LF line endings, no trailing whitespace on any line, stripped ends --
+    byte-for-byte ``f5_evidence_store._normalize_text``, which is the consumer
+    this has to match.
+    """
+    text = unicodedata.normalize("NFC", value)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.rstrip() for line in text.split("\n")).strip()
 
 
 # ==========================================================================
@@ -617,12 +646,18 @@ def _finalize(pmid: str, pmcid: "str | None", resolved: bool, sections: list,
 def _emit_sections(raw_sections: list, sanitized: list) -> list:
     """Sanitize, hash, and freeze the extracted sections.
 
-    Hashing follows sanitization: ``content_sha256`` must be the hash of the text
-    actually emitted, or F7's ``SectionText`` rejects it at construction."""
+    Hashing follows sanitization AND canonicalization, in that order:
+    ``content_sha256`` must be the hash of the text actually emitted, or F7's
+    ``SectionText`` rejects it at construction -- and the text actually emitted
+    must already be in the one canonical representation every consumer hashes,
+    or F5's strict binding check rejects it instead. See
+    :func:`canonical_section_text` for why there is exactly one."""
     out = []
     for index, section in enumerate(raw_sections):
-        title = _sanitize(section["title"], f"sections[{index}].title", sanitized)
-        text = _sanitize(section["text"], f"sections[{index}].text", sanitized)
+        title = canonical_section_text(
+            _sanitize(section["title"], f"sections[{index}].title", sanitized))
+        text = canonical_section_text(
+            _sanitize(section["text"], f"sections[{index}].text", sanitized))
         out.append({
             "label": section["label"],
             "title": title,
@@ -675,7 +710,16 @@ def _cache_is_usable(data, pmid: str) -> bool:
         if section["label"] not in SECTION_LABELS:
             return False
         try:
+            # BOTH conditions, and the second is the new one: the stored text
+            # must already BE the canonical representation, not merely hash to
+            # itself. An entry written before the producer canonicalized is
+            # self-consistent and still unusable downstream -- F5 would refuse
+            # its binding and the reference would die UNJUDGEABLE on a cache
+            # artifact. Treated like any other corrupt entry: ignored, refetched,
+            # rewritten canonical.
             if section["content_sha256"] != _sha256_text(section["text"]):
+                return False
+            if section["text"] != canonical_section_text(section["text"]):
                 return False
         except (AttributeError, TypeError, UnicodeEncodeError):
             return False

@@ -144,19 +144,38 @@ FetchReflist = Callable[[str], tuple]
 # ==========================================================================
 # 1. Build the judgeable unit from a parsed ref
 # ==========================================================================
-def exclusion_reason(ref) -> "str | None":
+def exclusion_reason(ref, *, resolved_identifier=None) -> "str | None":
     """Structural reason this ref cannot enter the band, or None.
 
-    Checked in order so a ref missing both a citance and a cited PMID is
-    reported as the citance exclusion (no sentence => nothing to judge)."""
+    Checked in order so a ref missing both a citance and a cited work is
+    reported as the citance exclusion (no sentence => nothing to judge).
+
+    ``resolved_identifier`` IS THE IDENTITY BAND 1 ESTABLISHED, read from the
+    disposition artifact. It exists because this gate used to ask the wrong
+    question. The reference's own bibliography entry may print no PMID -- an IEEE
+    proceedings paper typically prints a DOI and nothing else -- and Band 1 will
+    have resolved it anyway, by DOI, minutes earlier. Re-deriving identity from
+    ``claimed_pmid`` here therefore discarded references Band 1 had already
+    cleared: 77 of them on the natural run. The question this gate must ask is
+    "did Band 1 resolve this reference to a work", and the disposition is the only
+    place that answer lives.
+
+    NOT a judgeability test. A resolved identifier says the right work is known,
+    not that any of its text can be fetched; that is checked downstream on the
+    assembled evidence (``judgment_run``), where a work with no retrievable text
+    terminates UNJUDGEABLE before any discriminator runs.
+    """
     if not (ref.citance or "").strip():
         return EXCLUDED_NO_CITANCE
+    identifier = resolved_identifier or {}
+    if str(identifier.get("value") or "").strip() and identifier.get("kind"):
+        return None
     if not (ref.claimed.claimed_pmid or "").strip():
         return EXCLUDED_NO_CITED_PMID
     return None
 
 
-def build_item(ref) -> "dict | None":
+def build_item(ref, *, resolved_identifier=None) -> "dict | None":
     """Assemble the judgeable unit from a parsed ref.
 
     Returns None (the caller counts :func:`exclusion_reason`) when there is no
@@ -175,7 +194,7 @@ def build_item(ref) -> "dict | None":
     the parser resolved -- the other references this sentence cites collectively.
     Empty on a Reference built outside ``parser.link_citances``, which every
     consumer reads as a singleton, i.e. the pre-group behaviour."""
-    if exclusion_reason(ref) is not None:
+    if exclusion_reason(ref, resolved_identifier=resolved_identifier) is not None:
         return None
     c = ref.claimed
     item = {
@@ -203,6 +222,12 @@ def build_item(ref) -> "dict | None":
            if getattr(ref, "citance_sentence_partition_failures", None) else {}),
         "cited_marker": ref.cited_reference_marker,
         "cited_pmid": c.claimed_pmid,
+        # Carried, never substituted for cited_pmid: downstream retrieval and the
+        # annotation payload both key on the claimed PMID, and silently swapping
+        # a DOI in would change what those mean. Consumers that can use a DOI read
+        # it here explicitly.
+        **({"resolved_identifier": dict(resolved_identifier)}
+           if resolved_identifier else {}),
         "cited_claimed": {
             "title": c.title,
             "authors": list(c.authors),

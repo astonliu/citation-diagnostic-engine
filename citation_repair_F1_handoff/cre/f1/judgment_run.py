@@ -69,6 +69,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -131,6 +132,11 @@ from .coverage_prompts_v3 import (
     COVERAGE_PROMPT_VERSION_V3,
     RESPONSE_PARSER_VERSION as RESPONSE_PARSER_VERSION_V3)
 from .parser_versions import CLAIM_PARSER_VERSION, COVERAGE_PARSER_VERSION
+# The routing layer. `disposition` says where the pipeline stopped; `terminal_outcome`
+# says what we concluded about the citation. They were one field and had to stop being
+# one -- see terminal_outcome.py for the two defects that forced the split.
+from . import terminal_outcome as tox
+from . import citation_selection as csel
 
 #: DEC-070: the recorded value when the provider rejects the parameter. Defined
 #: here (not imported from production_launcher) because judgment_run must not
@@ -147,7 +153,15 @@ DISP_EXCLUDED_NO_CITANCE = "excluded_no_citance"
 DISP_EXCLUDED_NO_CITED_PMID = "excluded_no_cited_pmid"
 DISP_EXCLUDED_PREBAND_MISSING = "excluded_preband_disposition_missing"
 DISP_EXCLUDED_PREBAND = "excluded_preband"          # + preband_label carries the F1/F2 label
+#: ABOLISHED AS A TERMINAL OUTCOME. Kept as a NAME only, so the constant a
+#: consumer may still import resolves and so the string can be recognised when an
+#: old prediction file is replayed. Nothing in this module assigns it any more:
+#: the six faults it used to bundle are typed by
+#: ``terminal_outcome.classify_parse_failure`` and routed to their own answers.
 DISP_QUARANTINE_PARSE = "quarantine_parse"
+#: A stage raised on this pair. The record KEEPS every earlier success -- claims,
+#: evidence, coverage verdicts -- and the router terminates it UNJUDGEABLE.
+DISP_HELD_STAGE_FAILURE = "held_stage_failure"
 DISP_HELD_NO_CLAIMS = "held_no_atomic_claims"
 DISP_HELD_CLAIM_EXTRACTION_FAILURE = "held_claim_extraction_failure"
 DISP_PREDICTED = "predicted"                        # label == F6
@@ -171,7 +185,12 @@ DISP_HELD_UNSUPPORTED_COCITATION_MEMBER = "held_unsupported_cocitation_member"
 # existing paper" -> the F3-F7 band may proceed. Everything else is out of band.
 _CLEAR_LABELS = frozenset({"cleared", "accurate"})
 
-# Scoreable dispositions get a blind annotation payload; excluded/quarantine do not.
+# Dispositions at which the pair was actually JUDGED, as opposed to excluded
+# before the substrate. NO LONGER THE ANNOTATION-QUEUE GATE: the queue is filled
+# from the terminal outcome (records carrying an F3-F7 finding), because a blind
+# gold-label payload for `held_no_atomic_claims` asks an annotator to confirm
+# "no claim here" about a citance the parser had reduced to "5,8,10,19". Retained
+# as the "reached the judgment substrate" predicate and for readers that import it.
 _SCOREABLE = frozenset(
     {DISP_PREDICTED, DISP_HELD_NO_CLAIMS,
      DISP_HELD_CLAIM_EXTRACTION_FAILURE,
@@ -199,6 +218,204 @@ def _record_stage_failure(rec: dict, stage: str, exc: ValueError) -> None:
 def _stage_failed(rec: dict, stage: str) -> bool:
     return any(row.get("stage") == stage
                for row in rec.get("stage_failures") or [])
+
+
+#: Redacted before a failed response is preserved. A raw response is kept for
+#: audit -- you cannot diagnose a contract failure from a hash -- but it travels
+#: through a durable artifact, so anything credential-shaped is removed on the way
+#: in rather than trusted not to be there.
+_SECRET_RE = re.compile(
+    r"(sk-[A-Za-z0-9_\-]{8,}|api[_-]?key\"?\s*[:=]\s*\"?[A-Za-z0-9_\-]{8,}|"
+    r"Bearer\s+[A-Za-z0-9._\-]{8,})", re.IGNORECASE)
+
+#: A preserved response is evidence, not a payload. Truncated so one pathological
+#: reply cannot dominate the prediction file, and the original length is recorded
+#: so the truncation is visible rather than silent.
+_PRESERVED_RESPONSE_LIMIT = 4000
+
+
+def _preserve_failed_response(rec: dict, *, stage: str, attempt: int,
+                              raw) -> None:
+    """Keep the bytes that failed, with secrets stripped, for audit.
+
+    A schema contract failure that discards the response leaves a human queue
+    item nobody can act on: "the model answered wrongly" with no way to see how.
+    """
+    text = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+    redacted = _SECRET_RE.sub("[REDACTED]", text)
+    rec.setdefault("failed_model_responses", []).append({
+        "stage": stage,
+        "attempt": attempt,
+        "response_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "response_chars": len(text),
+        "truncated": len(redacted) > _PRESERVED_RESPONSE_LIMIT,
+        "response": redacted[:_PRESERVED_RESPONSE_LIMIT],
+    })
+
+
+def _count_paid_call(rec: dict, stage: str, *, retry: bool) -> None:
+    """Book one billed attempt against this record. EVERY attempt, retries too.
+
+    Paid-call accounting that counts only successful attempts understates the
+    bill by exactly the retries the retry budget was added to make -- so the
+    counter that would justify the budget is the one the budget breaks.
+    """
+    ledger = rec.setdefault(
+        "paid_calls", {"total": 0, "retries": 0, "by_stage": {}})
+    ledger["total"] = int(ledger.get("total") or 0) + 1
+    if retry:
+        ledger["retries"] = int(ledger.get("retries") or 0) + 1
+    by_stage = ledger.setdefault("by_stage", {})
+    by_stage[stage] = int(by_stage.get(stage) or 0) + 1
+
+
+def _record_attempt(rec: dict, *, stage: str, attempt: int, result: str,
+                    bucket: str = "", message: str = "",
+                    max_tokens=None) -> None:
+    """Append one line to the per-record retry ledger."""
+    rec.setdefault("retry_history", []).append({
+        "stage": stage,
+        "attempt": attempt,
+        "result": result,
+        **({"failure_bucket": bucket} if bucket else {}),
+        **({"message": message} if message else {}),
+        **({"max_tokens": max_tokens} if max_tokens is not None else {}),
+    })
+
+
+def _run_with_retry(rec: dict, stage: str, call, *, larger_token_call=None):
+    """Run ``call`` under the bounded retry budget its failure bucket allows.
+
+    Returns ``(value, parse_failure_or_None)``. The budget is chosen from the
+    FIRST failure's bucket, because that is what says whether asking again can
+    possibly help: an empty or truncated response is worth a second ask (and a
+    bigger ceiling), a deterministic hash mismatch or a semantic refusal is not,
+    and spending a paid call to reproduce identical bytes is waste dressed as
+    diligence.
+
+    Every attempt is booked as a paid call, the failing bytes are preserved, and
+    an exhausted budget returns a structured ``parse_failure`` the router turns
+    into a terminal outcome. It never raises for a model-reply fault; structural
+    and configuration errors still propagate.
+    """
+    attempt = 0
+    bucket = ""
+    last_exc = None
+    max_attempts, allow_larger = 1, False
+    while True:
+        attempt += 1
+        is_retry = attempt > 1
+        _count_paid_call(rec, stage, retry=is_retry)
+        larger = bool(allow_larger and is_retry and larger_token_call is not None)
+        try:
+            value = (larger_token_call() if larger else call())
+        except ValueError as exc:
+            last_exc = exc
+            if attempt == 1:
+                bucket = tox.classify_parse_failure(str(exc))
+                max_attempts, allow_larger = tox.retry_budget(bucket)
+            _record_attempt(rec, stage=stage, attempt=attempt, result="failed",
+                            bucket=bucket, message=str(exc),
+                            max_tokens="larger" if larger else None)
+            _preserve_failed_response(
+                rec, stage=stage, attempt=attempt,
+                raw=getattr(exc, "raw_response", ""))
+            if attempt >= max_attempts:
+                return None, {
+                    "stage": stage,
+                    "bucket": bucket,
+                    "message": str(last_exc),
+                    "attempts": attempt,
+                    "larger_token_retry_used": bool(allow_larger and attempt > 1),
+                    "resolved": False,
+                }
+            continue
+        _record_attempt(rec, stage=stage, attempt=attempt, result="success",
+                        max_tokens="larger" if larger else None)
+        if attempt > 1:
+            # A retry that WORKED is still a fact about this record: it says the
+            # first response was unusable and the pair cost more than one call.
+            rec.setdefault("parse_failure_recovered", []).append({
+                "stage": stage, "attempts": attempt,
+                "bucket": bucket, "message": str(last_exc or ""),
+            })
+        return value, None
+
+
+def _record_parse_failure(rec: dict, stage: str, exc) -> str:
+    """Type a raised model/schema failure and attach it, unresolved, to ``rec``.
+
+    ``parse_error`` is kept alongside as a plain string because existing readers
+    and saved artifacts use it; the typed block is what the router reads.
+
+    A block is attached ONLY for a RECOGNISED model-response fault. An
+    unrecognised message is not evidence that the model broke its contract -- a
+    misconfigured seam raises ValueError too -- and routing it to the human queue
+    on that guess would fill the queue with engine configuration defects wearing a
+    contract failure's name. Left untyped, it falls through to the stage-failure
+    branch and terminates UNJUDGEABLE, which is what a per-pair exception is.
+    """
+    bucket = tox.classify_parse_failure(str(exc))
+    rec["parse_error"] = str(exc)
+    if bucket != tox.PARSE_UNCLASSIFIED:
+        rec["parse_failure"] = {
+            "stage": stage,
+            "bucket": bucket,
+            "message": str(exc),
+            "attempts": int(
+                (rec.get("paid_calls") or {}).get("by_stage", {}).get(stage) or 1),
+            "resolved": False,
+        }
+    _preserve_failed_response(rec, stage=stage, attempt=1,
+                              raw=getattr(exc, "raw_response", ""))
+    return bucket
+
+
+def _preserve_stage_failure(rec: dict, stage: str, exc) -> None:
+    """A stage raised. KEEP the record; record the failure against the stage.
+
+    This is the whole of the per-pair-exception rule: an exception in F3-F7 is a
+    fact about that stage, not permission to delete the claims and evidence the
+    earlier stages produced. The pair terminates UNJUDGEABLE with its work
+    intact, so a human or a rerun has something to start from.
+    """
+    if not isinstance(rec, dict):
+        return
+    _record_stage_failure(rec, stage, exc)
+    _record_parse_failure(rec, stage, exc)
+    rec["disposition"] = DISP_HELD_STAGE_FAILURE
+    holds = list(rec.get("hold_reasons") or [])
+    holds.append(f"{stage} stage failed")
+    rec["hold_reasons"] = holds
+    rec["ts"] = int(time.time())
+    print(f"[judgment-run-stage-failure] {rec.get('citation_id')}: "
+          f"{stage}: {exc}")
+
+
+def _evidence_absence_detail(item: dict, *, fulltext_path: bool) -> dict:
+    """Say WHICH retrieval produced nothing, so "unjudgeable" is diagnosable.
+
+    "No usable evidence" with no further detail is indistinguishable from a
+    transport outage, and the two need opposite responses: one is a permanent
+    property of the cited work, the other is a rerun.
+    """
+    evidence = item.get("evidence") or {}
+    abstract = evidence.get("cited_abstract")
+    fulltext = evidence.get("cited_fulltext")
+    resolved = item.get("resolved_identifier") or {}
+    return {
+        "abstract_present": bool(isinstance(abstract, str) and abstract.strip()),
+        "fulltext_requested": bool(fulltext_path),
+        "fulltext_retrieval_complete": bool(
+            isinstance(fulltext, dict)
+            and fulltext.get("retrieval_complete") is True),
+        "fulltext_sections": len(
+            (fulltext or {}).get("sections") or []
+            if isinstance(fulltext, dict) else []),
+        "cited_pmid": item.get("cited_pmid") or "",
+        "resolved_identifier_kind": resolved.get("kind") or "",
+        "resolved_identifier_status": resolved.get("status") or "",
+    }
 
 
 def _coverage_failure_verdicts(claims: list, evidence: dict, exc: ValueError,
@@ -456,6 +673,11 @@ def _new_record(item: dict) -> dict:
         "citing_pmcid": item.get("citing_pmcid"),
         "citing_pmid": item.get("citing_pmid"),
         "citing_sentence": item.get("citing_sentence"),
+        # WHAT THE EXTRACTOR WAS ACTUALLY SHOWN. Recorded on every record because
+        # "no claims" means one thing on prose and something else entirely on a
+        # stranded bibliography marker, and the durable record is the only place
+        # a later reader can tell them apart.
+        "claim_input_status": tox.claim_input_status(item.get("citing_sentence")),
         **({"citing_source_section": item["citing_source_section"]}
            if item.get("citing_source_section") else {}),
         "cited_pmid": item.get("cited_pmid"),
@@ -477,13 +699,20 @@ def _new_record(item: dict) -> dict:
            if item.get("sentence_partition_failures") else {}),
         "strength_records": [],
         "provenance": None,
+        # RETRY + PAID-CALL LEDGER. Every attempt this record cost, including the
+        # ones that failed: a retry that is not counted is a paid call the run
+        # accounting cannot see.
+        "retry_history": [],
+        "paid_calls": {"total": 0, "retries": 0, "by_stage": {}},
+        "stage_failures": [],
         "claim_extract_prompt_version": CLAIM_EXTRACT_PROMPT_VERSION,
         "coverage_prompt_version": COVERAGE_PROMPT_VERSION,
         "ts": None,
     }
 
 
-def _excluded_record(ref, disposition: str, preband_label=None) -> dict:
+def _excluded_record(ref, disposition: str, preband_label=None,
+                     resolved_identifier=None) -> dict:
     """A durable record for a pair excluded before the coverage substrate."""
     c = ref.claimed
     return {
@@ -491,9 +720,17 @@ def _excluded_record(ref, disposition: str, preband_label=None) -> dict:
         "citing_pmcid": ref.source_pmcid,
         "citing_pmid": ref.source_pmid,
         "citing_sentence": ref.citance,
+        "claim_input_status": tox.claim_input_status(ref.citance),
         "cited_pmid": c.claimed_pmid,
         "cited_claimed": {"title": c.title, "claimed_pmid": c.claimed_pmid,
                           "claimed_doi": c.claimed_doi},
+        # THE IDENTIFIER BAND 1 ACTUALLY RESOLVED, carried forward verbatim with
+        # its source and status. Band 2 used to re-check the CLAIMED pmid and drop
+        # a reference Band 1 had already cleared through a DOI match -- 77 of them
+        # on the natural run -- as `excluded_no_cited_pmid`. Never guessed: an
+        # unresolved reference carries an empty value and says so.
+        **({"resolved_identifier": dict(resolved_identifier)}
+           if resolved_identifier else {}),
         "cited_is_review": None,
         "preband_cleared": False if disposition != DISP_EXCLUDED_NO_CITANCE
         and disposition != DISP_EXCLUDED_NO_CITED_PMID else None,
@@ -510,6 +747,9 @@ def _excluded_record(ref, disposition: str, preband_label=None) -> dict:
         **({"sentence_partition_failures": list(
             getattr(ref, "citance_sentence_partition_failures", None) or [])}
            if getattr(ref, "citance_sentence_partition_failures", None) else {}),
+        "retry_history": [],
+        "paid_calls": {"total": 0, "retries": 0, "by_stage": {}},
+        "stage_failures": [],
         "claim_extract_prompt_version": CLAIM_EXTRACT_PROMPT_VERSION,
         "coverage_prompt_version": COVERAGE_PROMPT_VERSION,
         "ts": int(time.time()),
@@ -577,26 +817,82 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
     rec["evidence"] = item["evidence"]
     from .band_prompts import evidence_is_usable
     rec["evidence_usable"] = bool(evidence_is_usable(item["evidence"]))
+    # THE GATE IS "IS THE TEXT READABLE", NOT "WAS THE PAPER IDENTIFIED".
+    # Band 1 clearing a reference means the cited WORK is the right one; it says
+    # nothing about whether any of that work's text can be fetched. An IEEE
+    # conference paper matched to a Crossref DOI at 100% title similarity is
+    # certainly identified and has no PubMed record and no PMC full text, so
+    # there is nothing for a claim to be checked against. Recorded here, before
+    # any discriminator runs, so the router can terminate the pair UNJUDGEABLE
+    # without spending a call that could only produce a confident answer about an
+    # empty evidence set.
+    rec["cited_text_retrievable"] = rec["evidence_usable"]
+    rec["evidence_scope"] = rec.get(
+        "evidence_scope",
+        EVIDENCE_SCOPE_FULLTEXT if fulltext_path else EVIDENCE_SCOPE_ABSTRACT)
+    rec["evidence_status"] = (
+        "retrievable" if rec["evidence_usable"] else "unretrievable")
+    if not rec["evidence_usable"]:
+        rec["evidence_unretrievable_detail"] = _evidence_absence_detail(
+            item, fulltext_path=fulltext_path)
 
     sentence = item["citing_sentence"]
-    try:
+
+    def _extract_once():
         if claims_cache is None:
-            claims = jb.extract_atomic_claims(sentence, extractor=extractor)
-        elif isinstance(claims_cache, _OrderedClaimsCache):
+            return jb.extract_atomic_claims(sentence, extractor=extractor)
+        if isinstance(claims_cache, _OrderedClaimsCache):
             if claims_cache_order is None:
                 raise ValueError(
                     "claims_cache_order is required for the ordered claims cache")
-            claims = claims_cache.get_or_extract(
+            return claims_cache.get_or_extract(
                 sentence, claims_cache_order, extractor)
-        else:
-            if sentence not in claims_cache:
-                # Assigned only on success. A failed extraction is not reused by
-                # another reference sharing the sentence.
-                claims_cache[sentence] = jb.extract_atomic_claims(
-                    sentence, extractor=extractor)
-            claims = list(claims_cache[sentence])
+        if sentence not in claims_cache:
+            # Assigned only on success. A failed extraction is not reused by
+            # another reference sharing the sentence.
+            claims_cache[sentence] = jb.extract_atomic_claims(
+                sentence, extractor=extractor)
+        return list(claims_cache[sentence])
+
+    try:
+        claims = _extract_once()
+        rec["claim_extraction_attempts"] = 1
+        _count_paid_call(rec, "claim_extraction", retry=False)
+        # BOUNDED RETRY ON AN EMPTY EXTRACTION FROM REAL PROSE. An empty list is
+        # the answer that becomes NONE, so it is the one answer worth paying to
+        # confirm. Only on prose: retrying a marker-only or bled citance asks the
+        # same broken question twice and bills for it.
+        if (not claims
+                and rec.get("claim_input_status") == tox.CLAIM_INPUT_PROSE):
+            for attempt in range(2, tox.CLAIM_EXTRACTION_ATTEMPTS + 1):
+                if isinstance(claims_cache, dict):
+                    claims_cache.pop(sentence, None)
+                _count_paid_call(rec, "claim_extraction", retry=True)
+                rec["claim_extraction_attempts"] = attempt
+                retried = _extract_once()
+                _record_attempt(
+                    rec, stage="claim_extraction", attempt=attempt,
+                    result="success" if retried else "empty")
+                if retried:
+                    claims = retried
+                    break
+        # THE ATTESTATION NONE DEPENDS ON. "No claims" only means "this sentence
+        # asserts nothing empirical" if that was DECIDED; inferred from an empty
+        # list it is just the extractor's silence, which is exactly how 209
+        # broken parses became "no claim". Prose that survived a retry and still
+        # yields nothing is the only shape that may attest it.
+        if not claims:
+            rec["claim_extraction_asserts_nothing"] = (
+                rec.get("claim_input_status") == tox.CLAIM_INPUT_PROSE
+                and int(rec.get("claim_extraction_attempts") or 0)
+                >= tox.CLAIM_EXTRACTION_ATTEMPTS)
     except ValueError as exc:
         _record_stage_failure(rec, "claim_extraction", exc)
+        _record_attempt(rec, stage="claim_extraction",
+                        attempt=int(rec.get("claim_extraction_attempts") or 1),
+                        result="failed",
+                        bucket=tox.classify_parse_failure(str(exc)),
+                        message=str(exc))
         claims = []
     # MARKER ATTRIBUTION. A reference is asked only the claims its own marker
     # cluster was cited for; a claim it was never cited for cannot produce a
@@ -752,6 +1048,23 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
     group coverage (``cogroup_covered``) between the two. Mutates and returns
     ``rec``.
     """
+    # NO RETRIEVABLE CITED TEXT -> STOP HERE, BEFORE ANY DISCRIMINATOR.
+    # Every F3-F7 seam below asks a model to compare a claim against the cited
+    # work's text. With no text there is no comparison to make, and a label
+    # returned from an empty evidence set is a confident statement about nothing.
+    # This is a property of the CITED WORK, not a defect in this engine, so it is
+    # UNJUDGEABLE and never human review -- and it costs zero paid calls.
+    if rec.get("cited_text_retrievable") is False:
+        rec["route"] = jb.route(verdicts)
+        rec["disposition"] = DISP_HELD_INSUFFICIENT
+        rec["hold_reasons"] = [tox.REASON_CITED_TEXT_UNAVAILABLE]
+        rec["discriminators_skipped"] = {
+            "reason": tox.REASON_CITED_TEXT_UNAVAILABLE,
+            "stages": ["F4", "F3", "F5", "F7"],
+            "detail": rec.get("evidence_unretrievable_detail") or {},
+        }
+        return rec
+
     if not claims:
         # NO_CLAIMS since 2026-08-11 (ZD calibration item 1). This branch always
         # had the case right -- DISP_HELD_NO_CLAIMS below -- while jb.route
@@ -1308,37 +1621,70 @@ def _f7_manifest_block(f7_policy, f7_records, *, wired: bool = False,
     }
 
 
-def _queue_audit(pred_path: str, queue_path: str) -> dict:
-    """Audit the BLIND QUEUE FILE against the PREDICTIONS FILE.
+def _queue_audit(pred_path: str, queue_path: str,
+                 review_path: str = "") -> dict:
+    """Audit BOTH QUEUE FILES against the PREDICTIONS FILE.
 
     Both sides are re-read from disk on purpose. An earlier version compared two
     in-memory lists that were appended in the same branch, so it agreed with
-    itself by construction and proved nothing about what was written. The queue
-    is the annotation denominator: if it holds fewer rows than the run scored,
-    every per-fault rate is computed over a different population than the
-    manifest reports.
+    itself by construction and proved nothing about what was written. A queue is
+    a denominator: if it holds fewer rows than the run put in it, every rate
+    computed from it is over a different population than the manifest reports.
+
+    WHAT THE ANNOTATION QUEUE MUST NOW EQUAL. It used to be audited against
+    ``_SCOREABLE`` -- every held disposition, including ``held_no_atomic_claims``.
+    That made the audit pass while the queue was full of rows an annotator cannot
+    label: "no claim here, please confirm" for a citance the parser had reduced to
+    "5,8,10,19". The queue's job is blind GOLD-LABELLING of findings, so it is
+    audited against exactly the records carrying an F3-F7 finding. The
+    human-review queue is audited separately against the records the router
+    flagged, and the two must not intersect.
     """
-    scoreable: list = []
+    finding_ids: list = []
+    review_ids: list = []
     for line in _read_jsonl_lines(pred_path):
         try:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if rec.get("disposition") in _SCOREABLE:
-            scoreable.append(rec.get("citation_id"))
+        outcome = rec.get("terminal_outcome")
+        if tox.carries_finding(outcome):
+            finding_ids.append(rec.get("citation_id"))
+        elif rec.get("human_review_required") is True:
+            review_ids.append(rec.get("citation_id"))
     queued: list = []
     for line in _read_jsonl_lines(queue_path):
         try:
             queued.append(json.loads(line).get("item_key"))
         except json.JSONDecodeError:
             continue
+    reviewed: list = []
+    if review_path:
+        for line in _read_jsonl_lines(review_path):
+            try:
+                reviewed.append(json.loads(line).get("citation_id"))
+            except json.JSONDecodeError:
+                continue
+    overlap = sorted(set(queued) & set(reviewed))
     return {
         "queue_rows": len(queued),
-        "scoreable_rows": len(scoreable),
-        "matches": (len(queued) == len(scoreable)
-                    and set(queued) == set(scoreable)),
+        "finding_rows": len(finding_ids),
+        # Kept under its original key so existing readers of the manifest do not
+        # silently start reading a missing field as zero.
+        "scoreable_rows": len(finding_ids),
+        "matches": (len(queued) == len(finding_ids)
+                    and set(queued) == set(finding_ids)),
         "symmetric_difference": sorted(
-            x for x in (set(queued) ^ set(scoreable)) if x is not None)[:10],
+            x for x in (set(queued) ^ set(finding_ids)) if x is not None)[:10],
+        "human_review_rows": len(reviewed),
+        "human_review_expected": len(review_ids),
+        "human_review_matches": (len(reviewed) == len(review_ids)
+                                 and set(reviewed) == set(review_ids)),
+        # NONE and UNJUDGEABLE belong to neither file, and no record may sit in
+        # both. A row in both queues would be counted twice by whichever report
+        # summed them.
+        "queues_disjoint": not overlap,
+        "queue_overlap": overlap[:10],
         "source": "files_on_disk",
     }
 
@@ -1789,6 +2135,7 @@ def run_natural_judgment(
     chain_genesis: str = "",
     assistant_prefill: str = "", stop_sequences: tuple = (), temperature=None,
     code_commit: str = "", corpus_manifest_path: str = "",
+    citation_selection_path: str = "",
     require_full_coverage: bool = False, require_reportable: bool = False,
     production: bool = False, max_workers: int = 1,
 ) -> dict:
@@ -1992,6 +2339,7 @@ def run_natural_judgment(
 
     pred_path = os.path.join(out_dir, "judgment_predictions.jsonl")
     queue_path = os.path.join(out_dir, "judgment_band_annotation_queue.jsonl")
+    review_path = os.path.join(out_dir, "human_review_required.jsonl")
     manifest_path = os.path.join(out_dir, "judgment_run_manifest.json")
     checkpoint_path = os.path.join(out_dir, "judgment_run_checkpoint.jsonl")
     sidecar_path = os.path.join(out_dir, "judgment_run_record_hashes.jsonl")
@@ -2024,6 +2372,24 @@ def run_natural_judgment(
     expected_ids, expected_per_doc, preflight_parse_failures = (
         pc.collect_expected_ids(xml_dir, to_process, parse_pmc_xml,
                                 jb._pmcid_from_filename))
+    # THE SELECTION IS VERIFIED AND INTERSECTED BEFORE ANY OUTPUT FILE EXISTS,
+    # against the same preflight parse the join gate uses. A selection naming ids
+    # this corpus does not contain would otherwise produce a silently SMALLER run
+    # that still completes cleanly -- the exact failure shape the join gate exists
+    # to prevent, one layer earlier.
+    selection = (csel.load_selection(citation_selection_path)
+                 if citation_selection_path else None)
+    selection_accounting = csel.assert_selection_covered(selection, expected_ids)
+    if selection is not None:
+        # From here on the SELECTED ids are the population: the join, the
+        # coverage requirement and every denominator must all mean the same set,
+        # or the run reports fractions of two different things.
+        expected_ids = set(selection.ids)
+        expected_per_doc = {
+            pmcid: sum(1 for cid in selection.ids
+                       if cid.split(":", 1)[0] == pmcid)
+            for pmcid in expected_per_doc
+        }
     join_acc = pc.join_accounting(disp_obj, expected_ids)
     pc.enforce_join(join_acc, disp=disp_obj,
                     require_full_coverage=require_full_coverage or production)
@@ -2116,13 +2482,28 @@ def run_natural_judgment(
     refs_seen = 0
     docs_processed = 0
     scoreable_records = 0
+    human_review_records = 0
     executed_ids: set = set()
     emitted_labels: dict = {}
     finding_labels: dict = {}
     pubtype_cache: dict = {}
+    # One entry per emitted record, keyed by the CLOSED terminal vocabulary, and
+    # the human-review split by its exact reason. Both are what the run is
+    # reported by, so they are counted at emit rather than derived afterwards
+    # from a file that may have been rotated.
+    terminal_counts: dict = {}
+    human_review_by_reason: dict = {}
+    # Which identifier kind each reference entered the band on. The point of the
+    # v2 handoff is that "doi" is now a nonzero bucket instead of a silent drop.
+    identifier_kinds: dict = {}
+    # EVERY billed attempt, retries included. A retry that is not counted is a
+    # paid call the accounting cannot see.
+    paid_call_totals = {"total": 0, "retries": 0}
+    paid_call_by_stage: dict = {}
 
     pred_fh = open(pred_path, "a", encoding="utf-8")
     queue_fh = open(queue_path, "a", encoding="utf-8")
+    review_fh = open(review_path, "a", encoding="utf-8")
     ckpt_fh = open(checkpoint_path, "a", encoding="utf-8")
     side_fh = open(sidecar_path, "a", encoding="utf-8")
     groups_fh = open(groups_path, "a", encoding="utf-8")
@@ -2141,6 +2522,30 @@ def run_natural_judgment(
     def emit(rec: dict) -> None:
         nonlocal prev_link, chain_count, sentence_partition_affected_records
         nonlocal stage_failure_records
+        # THE TERMINAL OUTCOME IS STAMPED BEFORE THE RECORD IS HASHED, so the
+        # chain covers the conclusion and not merely the inputs to it. Every
+        # record gets one, from the closed vocabulary, with its reason.
+        outcome, reason = tox.resolve(rec)
+        tox.assert_valid(outcome, reason)
+        rec["terminal_outcome"] = outcome
+        rec["terminal_reason"] = reason
+        rec["terminal_outcome_version"] = tox.TERMINAL_OUTCOME_VERSION
+        rec["human_review_required"] = tox.is_human_review(outcome)
+        rec.setdefault("claim_input_status",
+                       tox.claim_input_status(rec.get("citing_sentence")))
+        rec.setdefault("retry_history", [])
+        rec.setdefault("paid_calls", {"total": 0, "retries": 0, "by_stage": {}})
+        rec.setdefault("stage_failures", [])
+        terminal_counts[outcome] = terminal_counts.get(outcome, 0) + 1
+        if rec["human_review_required"]:
+            human_review_by_reason[reason] = (
+                human_review_by_reason.get(reason, 0) + 1)
+        ledger = rec.get("paid_calls") or {}
+        paid_call_totals["total"] += int(ledger.get("total") or 0)
+        paid_call_totals["retries"] += int(ledger.get("retries") or 0)
+        for stage_name, n in (ledger.get("by_stage") or {}).items():
+            paid_call_by_stage[stage_name] = (
+                paid_call_by_stage.get(stage_name, 0) + int(n or 0))
         f5_records_all.extend(rec.get("f5_records") or [])
         f7_records_all.extend(rec.get("f7_records") or [])
         stage_failures = rec.get("stage_failures") or []
@@ -2189,7 +2594,18 @@ def run_natural_judgment(
                     f4_counts["verifier_calls"] += 1
             elif sr.get("reason") == "no_usable_abstract":
                 f4_counts["unassessed_no_usable_abstract"] += 1
-        if rec["disposition"] in _SCOREABLE:
+        # TWO QUEUES, TWO POPULATIONS, NO OVERLAP.
+        #
+        # The annotation queue is for BLIND GOLD-LABELLING, so it may hold only
+        # rows that carry an F3-F7 finding -- something a human is being asked to
+        # agree or disagree with. It used to be filled from `_SCOREABLE`, which
+        # included `held_no_atomic_claims`: 209 broken parses went to annotators
+        # as "no claim here, please confirm", which is not a judgment anyone can
+        # make about a citance that reads "5,8,10,19".
+        #
+        # The human-review queue is for rows where THIS ENGINE is broken. NONE and
+        # UNJUDGEABLE are conclusions, not work items, and enter neither file.
+        if tox.carries_finding(rec["terminal_outcome"]):
             nonlocal scoreable_records
             scoreable_records += 1
             payload = jb.annotation_payload({
@@ -2201,6 +2617,31 @@ def run_natural_judgment(
             })
             queue_fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
             queue_fh.flush()
+        elif rec["human_review_required"]:
+            nonlocal human_review_records
+            human_review_records += 1
+            review_fh.write(json.dumps({
+                "citation_id": rec["citation_id"],
+                "citing_pmcid": rec.get("citing_pmcid"),
+                "terminal_outcome": rec["terminal_outcome"],
+                "reason": rec["terminal_reason"],
+                "claim_input_status": rec.get("claim_input_status"),
+                "citing_sentence": rec.get("citing_sentence"),
+                "cited_pmid": rec.get("cited_pmid"),
+                "resolved_identifier": rec.get("resolved_identifier") or {},
+                "atomic_claims": rec.get("atomic_claims") or [],
+                "evidence_scope": rec.get("evidence_scope"),
+                "evidence_status": rec.get("evidence_status"),
+                "stage_failures": rec.get("stage_failures") or [],
+                "retry_history": rec.get("retry_history") or [],
+                "paid_calls": rec.get("paid_calls") or {},
+                "parse_failure": rec.get("parse_failure") or {},
+                # The bytes that failed, secrets already stripped on the way in.
+                # A contract failure a human cannot see is a ticket nobody can act
+                # on.
+                "failed_model_responses": rec.get("failed_model_responses") or [],
+            }, ensure_ascii=False) + "\n")
+            review_fh.flush()
 
     worker_pool = (ThreadPoolExecutor(
         max_workers=max_workers, thread_name_prefix="cre-judgment")
@@ -2245,7 +2686,13 @@ def run_natural_judgment(
                 f7_policy=f7_policy)
             return finished, None
         except ValueError as exc:
-            return None, exc
+            # THE PARTIALLY BUILT RECORD COMES BACK, NOT None. Phase 2 raising
+            # does not unmake Phase 1: the claims, the evidence, the coverage
+            # verdicts and any stage that already succeeded are on `rec`, and
+            # they are the only reason a human could act on this row. Returning
+            # None here is what made the caller rebuild an empty record and throw
+            # all of it away.
+            return rec, exc
 
     t0 = time.time()
     try:
@@ -2278,6 +2725,23 @@ def run_natural_judgment(
                 _write_json_atomic(manifest_path, progress_manifest())
                 continue
 
+            # THE HASH-PINNED CITATION SELECTION, APPLIED HERE AND NOWHERE
+            # ELSE: after the real parser has produced the real Reference
+            # objects, before any of them is judged. Narrowing the POPULATION at
+            # this point leaves every surviving reference running the identical
+            # code path it would on a whole-corpus run -- which is the only way a
+            # subset run's numbers mean the same thing as the full run's. `None`
+            # (the ordinary case) returns the list unchanged.
+            refs = csel.apply_selection(refs, selection)
+            if not refs:
+                print(f"[judgment-run-selection-skip] {pmcid}: "
+                      "no selected references in this document")
+                ckpt_fh.write(json.dumps({"pmcid": pmcid}) + "\n")
+                ckpt_fh.flush()
+                done.add(pmcid)
+                _write_json_atomic(manifest_path, progress_manifest())
+                continue
+
             # PHASE 1 over the whole document. A co-citation group verdict needs
             # every member's coverage, so nothing is emitted until the document's
             # coverage is complete. `pending` preserves REF ORDER exactly, so the
@@ -2305,22 +2769,36 @@ def run_natural_judgment(
                 if isinstance(preband_label, str) and preband_label.strip():
                     ck = preband_label.strip()
                     preband_label_census[ck] = preband_label_census.get(ck, 0) + 1
-                reason = jb.exclusion_reason(ref)
-                if reason is not None:                    # no citance / no cited pmid
-                    pending.append((_excluded_record(ref, reason), None))
+                # THE IDENTIFIER BAND 1 RESOLVED, read from the disposition
+                # artifact rather than re-derived from the reference. This is the
+                # whole of the handoff fix: `jb.exclusion_reason` below now sees
+                # what Band 1 actually found, instead of re-checking the CLAIMED
+                # pmid and discarding a reference Band 1 had already cleared.
+                identifier = (disp_obj.identifier(ref.citation_id)
+                              if disp_obj is not None else {})
+                if identifier:
+                    identifier_kinds[identifier.get("kind") or "none"] = (
+                        identifier_kinds.get(identifier.get("kind") or "none", 0)
+                        + 1)
+                reason = jb.exclusion_reason(ref, resolved_identifier=identifier)
+                if reason is not None:                    # no citance / no cited work
+                    pending.append((_excluded_record(
+                        ref, reason, resolved_identifier=identifier), None))
                     continue
                 if not cleared:
-                    rec = _excluded_record(ref, disp_label, preband_label)
+                    rec = _excluded_record(ref, disp_label, preband_label,
+                                           resolved_identifier=identifier)
                     pending.append((rec, None))
                     if disp_label == DISP_EXCLUDED_PREBAND:
                         k = str(preband_label)
                         preband_by_label[k] = preband_by_label.get(k, 0) + 1
                     continue
 
-                item = jb.build_item(ref)
+                item = jb.build_item(ref, resolved_identifier=identifier)
                 if item is None:                          # defensive; exclusion caught above
-                    pending.append((_excluded_record(ref, DISP_EXCLUDED_NO_CITANCE),
-                                    None))
+                    pending.append((_excluded_record(
+                        ref, DISP_EXCLUDED_NO_CITANCE,
+                        resolved_identifier=identifier), None))
                     continue
 
                 # Review check (optional injected lookup; cached per pmid).
@@ -2356,13 +2834,16 @@ def run_natural_judgment(
                 _merge_marker_scope_counts(scope_counts, local_scope_counts)
                 if error is not None:
                     item = extra_or_item
+                    # Phase 1 raised, so there is no partially-built record to
+                    # keep -- but the FAILURE is still typed and routed rather
+                    # than dumped into one terminal quarantine bucket.
                     rec = _new_record(item)
                     rec["preband_cleared"] = True
-                    rec["disposition"] = DISP_QUARANTINE_PARSE
-                    rec["parse_error"] = str(error)
+                    rec["disposition"] = DISP_HELD_STAGE_FAILURE
+                    _record_parse_failure(rec, "coverage", error)
                     rec["ts"] = int(time.time())
-                    print(f"[judgment-run-quarantine] "
-                          f"{rec['citation_id']}: {error}")
+                    print(f"[judgment-run-stage-failure] "
+                          f"{rec['citation_id']}: coverage: {error}")
                     resolved_pending.append((rec, None))
                     continue
                 if rec.get("fulltext_incomplete_hold") is True:
@@ -2411,13 +2892,7 @@ def run_natural_judgment(
                     rec, error = finish_attempt(
                         rec, item, claims, verdicts, flags)
                     if error is not None:
-                        rec = _new_record(item)
-                        rec["preband_cleared"] = True
-                        rec["disposition"] = DISP_QUARANTINE_PARSE
-                        rec["parse_error"] = str(error)
-                        rec["ts"] = int(time.time())
-                        print(f"[judgment-run-quarantine] "
-                              f"{rec['citation_id']}: {error}")
+                        _preserve_stage_failure(rec, "F3_F7", error)
                     emit(rec)
             else:
                 phase2_pending: list = []
@@ -2441,13 +2916,7 @@ def run_natural_judgment(
                         continue
                     rec, error = result.result()
                     if error is not None:
-                        rec = _new_record(item)
-                        rec["preband_cleared"] = True
-                        rec["disposition"] = DISP_QUARANTINE_PARSE
-                        rec["parse_error"] = str(error)
-                        rec["ts"] = int(time.time())
-                        print(f"[judgment-run-quarantine] "
-                              f"{rec['citation_id']}: {error}")
+                        _preserve_stage_failure(rec, "F3_F7", error)
                     emit(rec)
 
             ckpt_fh.write(json.dumps({"pmcid": pmcid}) + "\n")
@@ -2460,6 +2929,7 @@ def run_natural_judgment(
             worker_pool.shutdown(wait=True, cancel_futures=True)
         pred_fh.close()
         queue_fh.close()
+        review_fh.close()
         ckpt_fh.close()
         side_fh.close()
         groups_fh.close()
@@ -2527,7 +2997,7 @@ def run_natural_judgment(
     status = "complete" if not remaining else "in_progress"
 
     total_records = sum(counts.values())
-    queue_audit = _queue_audit(pred_path, queue_path)
+    queue_audit = _queue_audit(pred_path, queue_path, review_path)
     manifest_queue_rows = queue_audit["queue_rows"]
     manifest = {
         "layer": "F3-F7 natural-paper orchestration (judgment_run)",
@@ -2841,6 +3311,42 @@ def run_natural_judgment(
         "accounting_ok": total_records == refs_seen,
         "scoreable_records": scoreable_records,
         "annotation_queue_rows": manifest_queue_rows,
+        # WHICH REFERENCES THIS RUN WAS ALLOWED TO TOUCH, bound to the artifact
+        # that decided it and the source runs that artifact was derived from.
+        "citation_selection": (
+            {**selection.binding(), **selection_accounting}
+            if selection is not None else {"selection_applied": False}),
+        "preband_identifier_kinds": dict(sorted(identifier_kinds.items())),
+        # THE OUTCOME LAYER. `disposition` above says where each pair stopped;
+        # this says what was concluded about it. One entry per emitted record,
+        # from the closed vocabulary, so the two can be reconciled but never
+        # confused.
+        "terminal_outcomes": {
+            "version": tox.TERMINAL_OUTCOME_VERSION,
+            "counts": dict(sorted(terminal_counts.items())),
+            "total": sum(terminal_counts.values()),
+            "accounting_ok": sum(terminal_counts.values()) == total_records,
+            "vocabulary": sorted(tox.TERMINAL_OUTCOMES),
+        },
+        "human_review": {
+            "path": review_path,
+            "records": human_review_records,
+            "by_reason": dict(sorted(human_review_by_reason.items())),
+            "allowed_reasons": sorted(tox.HUMAN_REVIEW_REASONS),
+            "note": (
+                "HUMAN_REVIEW_REQUIRED only. NONE and UNJUDGEABLE are "
+                "conclusions, not work items, and enter neither queue; the "
+                "annotation queue holds only records carrying an F3-F7 finding."
+            ),
+        },
+        # PAID-CALL ACCOUNTING, retries included. Counting only the attempts that
+        # succeeded would understate the bill by exactly the retries the retry
+        # budget exists to spend.
+        "paid_calls": {
+            "total_attempts": paid_call_totals["total"],
+            "retry_attempts": paid_call_totals["retries"],
+            "by_stage": dict(sorted(paid_call_by_stage.items())),
+        },
         "stage_failures": {
             "affected_reference_records": stage_failure_records,
             "by_stage": dict(sorted(stage_failure_counts.items())),

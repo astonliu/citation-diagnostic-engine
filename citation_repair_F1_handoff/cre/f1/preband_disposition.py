@@ -1,4 +1,4 @@
-"""The canonical Band-1 -> Band-2 disposition artifact (schema ``preband_disposition_v1``).
+"""The canonical Band-1 -> Band-2 disposition artifact (schema ``preband_disposition_v2``).
 
 Band 1 (F1/F2/F8, deterministic) and Band 2 (F3-F7, judgment) do not share code.
 They join through ONE file: a citation_id -> label map that Band 2's orchestrator
@@ -23,6 +23,14 @@ that produced it, the corpus it was built over, and the row/label accounting. A
 disposition whose provenance is not recorded cannot be reconstructed, and a number
 computed from it cannot be defended.
 
+WHAT v2 ADDED, AND WHY IT HAD TO. v1 carried citation_id, citing_pmcid, cleared
+and label -- and nothing about WHICH WORK Band 1 had cleared the reference to. So
+Band 2 re-derived the identity from the reference's own CLAIMED pmid, and every
+reference Band 1 had resolved through a DOI lookup was dropped as
+``excluded_no_cited_pmid`` seconds after being cleared. v2 carries the resolved
+identifier with its source and status (:func:`resolved_identifier`). It is never
+guessed: an unresolved reference carries an empty value and says so.
+
 This module performs NO network call and NO model call. It is a pure transform
 over records ``run.run`` already wrote.
 """
@@ -36,7 +44,7 @@ from typing import Iterable
 
 #: Bump when the row shape, the label vocabulary, or the id format changes.
 #: Band 2's loader pins this string and refuses an artifact declaring anything else.
-DISPOSITION_SCHEMA = "preband_disposition_v1"
+DISPOSITION_SCHEMA = "preband_disposition_v2"
 
 # --- the label vocabulary, split by what it AUTHORIZES -------------------
 #: Band 2 may judge this reference: Band 1 verified the right, existing work.
@@ -53,7 +61,7 @@ DISPOSITION_LABELS = CLEARING_LABELS | FAULT_LABELS | OPERATIONAL_LABELS
 #: Band 2 checkouts; pinned here so a drift on either side fails loudly.
 CITATION_ID_RE = re.compile(r"^PMC\d+:\S+$")
 
-ARTIFACT_FILENAME = "preband_disposition_v1.jsonl"
+ARTIFACT_FILENAME = "preband_disposition_v2.jsonl"
 MANIFEST_SUFFIX = ".manifest.json"
 ATTESTED_CHECKS = ("F1", "F2", "F8")
 
@@ -125,6 +133,84 @@ def _iter_log_records(source) -> "Iterable[dict]":
         yield rec
 
 
+#: The identifier kinds this artifact may carry forward. A kind is only ever the
+#: kind of an identifier Band 1 ACTUALLY RESOLVED; there is deliberately no value
+#: meaning "probably a PMID".
+IDENTIFIER_PMID = "pmid"
+IDENTIFIER_DOI = "doi"
+IDENTIFIER_NONE = ""
+
+#: Resolution status, as distinct from the identifier itself. "resolved" means
+#: Band 1 matched the cited work to a record; "unresolved" means it did not.
+#: Band 2 needs both -- an empty value with status "resolved" is exactly the
+#: PMID-less DOI match that used to be dropped.
+STATUS_RESOLVED = "resolved"
+STATUS_UNRESOLVED = "unresolved"
+
+
+def resolved_identifier(rec: dict) -> dict:
+    """The identifier Band 1 actually resolved, with its source and status.
+
+    THE JOIN DEFECT THIS CLOSES. ``preband_disposition_v1`` carried four fields --
+    citation_id, citing_pmcid, cleared, label -- and nothing about WHICH work
+    Band 1 had cleared the reference to. Band 2 therefore re-derived the identity
+    from the reference's own CLAIMED pmid, and a reference whose bibliography
+    entry prints no PMID was dropped as ``excluded_no_cited_pmid`` even though
+    Band 1 had resolved it minutes earlier through a DOI lookup. 77 cleared
+    references on the natural run died in that gap.
+
+    NEVER GUESSED. Only an identifier present in the record is emitted; a
+    reference Band 1 could not resolve carries an empty value, kind
+    :data:`IDENTIFIER_NONE`, and status :data:`STATUS_UNRESOLVED`. The PMID is
+    preferred when there is one because it is the identifier every downstream
+    retrieval path takes, and the DOI is carried when there is not -- but neither
+    is invented, and carrying a DOI is NOT a claim that the work's text can be
+    fetched (see ``terminal_outcome.REASON_CITED_TEXT_UNAVAILABLE``).
+    """
+    retrieved = rec.get("retrieved") or {}
+    claimed = rec.get("claimed") or {}
+    log = rec.get("log") or {}
+    resolved = retrieved.get("resolved") is True
+
+    pmid = str(retrieved.get("pmid") or "").strip()
+    if not pmid:
+        pmid = str(claimed.get("claimed_pmid") or "").strip()
+        pmid_source = "claimed_reference" if pmid else ""
+    else:
+        pmid_source = "pubmed"
+    if pmid:
+        return {
+            "value": pmid,
+            "kind": IDENTIFIER_PMID,
+            "source": pmid_source,
+            "status": STATUS_RESOLVED if resolved else STATUS_UNRESOLVED,
+            "decided_by": str(log.get("decided_by") or ""),
+        }
+
+    doi = str(retrieved.get("doi") or "").strip()
+    if not doi:
+        doi = str(claimed.get("claimed_doi") or "").strip()
+    if doi:
+        return {
+            "value": doi,
+            "kind": IDENTIFIER_DOI,
+            # Which provider's metadata backed the match -- crossref, datacite --
+            # so a reader can weigh the resolution rather than take it on trust.
+            "source": str(log.get("doi_metadata_source")
+                          or log.get("doi_lookup_status") or "") or "reference",
+            "status": STATUS_RESOLVED if resolved else STATUS_UNRESOLVED,
+            "decided_by": str(log.get("decided_by") or ""),
+        }
+
+    return {
+        "value": "",
+        "kind": IDENTIFIER_NONE,
+        "source": "",
+        "status": STATUS_RESOLVED if resolved else STATUS_UNRESOLVED,
+        "decided_by": str(log.get("decided_by") or ""),
+    }
+
+
 def build_rows(log_source) -> list:
     """Canonical rows from the LOSSLESS log source, validated as it goes.
 
@@ -166,6 +252,10 @@ def build_rows(log_source) -> list:
             "label": label,
             "citing_pmcid": cid.split(":", 1)[0],
             "cleared": label in CLEARING_LABELS,
+            # The fifth field, and the reason this schema needed a fifth: without
+            # it Band 2 re-derives identity from the CLAIMED pmid and discards
+            # every reference Band 1 resolved by DOI. See resolved_identifier().
+            "resolved_identifier": resolved_identifier(rec),
         })
     return rows
 

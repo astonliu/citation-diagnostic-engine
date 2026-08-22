@@ -60,6 +60,7 @@ import re
 import subprocess
 from datetime import date
 
+from . import citation_selection
 from . import preband_contract as pc
 from .judgment_run import run_natural_judgment
 
@@ -719,6 +720,8 @@ def _require_full_launch_wiring(*, out_dir: str, run_kwargs: dict,
 def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
                 corpus_manifest_path: str, model: str, authorized_models,
                 adapter_receipt, band1_snapshot_date: str,
+                citation_selection_path: str = "",
+                citation_selection_proof_dir: str = "",
                 judge_model: str = "", preregistration_amendment: str = "",
                 preregistration_scope_ruling=None,
                 temperature=None, assistant_prefill=None,
@@ -734,6 +737,19 @@ def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
     pre-band artifact.  It runs the exact current Band-1 code over ``xml_dir``,
     builds the canonical disposition from its lossless log, and immediately
     consumes that artifact in the production judgment run.
+
+    ``citation_selection_path`` narrows the run to a HASH-PINNED reference set
+    (``citation_selection.py``). It is applied after XML parsing and BEFORE Band
+    1, so every selected reference runs the real F1/F2/F8 code and the real
+    F3-F8 band -- the selection changes the population and substitutes for no
+    stage. ``citation_selection_proof_dir``, when given, re-hashes the source-run
+    artifacts the selection binds, so "derived from those runs" is verified here
+    rather than asserted by the manifest.
+
+    IT IS NOT A BACK DOOR FOR A PRE-BAND MAP. The selection carries ids only --
+    no labels, no dispositions, no identifiers -- and the refusal of an injected
+    ``preband_disposition`` below is unchanged. A caller wanting to skip Band 1
+    still cannot.
     """
     if "preband_disposition" in run_kwargs:
         raise LaunchRefused(
@@ -788,6 +804,22 @@ def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         raise LaunchRefused(
             f"full-launch discriminator configuration invalid: {exc}") from exc
 
+    # THE SELECTION IS LOADED AND VERIFIED BEFORE BAND 1 CREATES ITS FIRST FILE.
+    # Its digest must recompute from its own id list, and -- when a proof dir is
+    # supplied -- every source-run artifact it binds must re-hash to the recorded
+    # value. A selection that cannot prove what it is derived from is refused
+    # here, where the refusal costs nothing.
+    selection = None
+    selection_proof = {}
+    if citation_selection_path:
+        try:
+            selection = citation_selection.load_selection(citation_selection_path)
+            if citation_selection_proof_dir:
+                selection_proof = citation_selection.verify_source_runs(
+                    selection, citation_selection_proof_dir)
+        except citation_selection.SelectionError as exc:
+            raise LaunchRefused(f"citation selection preflight failed: {exc}") from exc
+
     band1_dir = os.path.join(out_dir, "band1")
     judgment_dir = os.path.join(out_dir, "judgment")
     os.makedirs(band1_dir)
@@ -797,6 +829,7 @@ def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         band1_dir, "preband_disposition_v1.jsonl")
 
     from .run import make_completer, run as run_band1
+    from .parser import iter_pmc_dir
     from .preband_disposition import write_disposition
     complete = f1_complete or make_completer(model, anthropic_key)
 
@@ -804,11 +837,26 @@ def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         adapter_receipt.record(seam="f1_llm_filter")
         return complete(prompt)
 
+    # AFTER XML PARSING, BEFORE BAND 1. `iter_pmc_dir` is the same parse Band 1
+    # performs for itself when `refs` is omitted, so the selected references are
+    # the real parser's objects and every one of them goes on to run the real
+    # F1/F2/F8 code. Selecting here rather than filtering Band 1's OUTPUT is the
+    # difference between a smaller run and a censored one.
+    band1_refs = None
+    if selection is not None:
+        parsed = list(iter_pmc_dir(xml_dir))
+        citation_selection.assert_selection_covered(
+            selection, [ref.citation_id for ref in parsed])
+        band1_refs = citation_selection.apply_selection(parsed, selection)
+        print(f"[launch-full-selection] {len(band1_refs)} of {len(parsed)} "
+              f"parsed references selected "
+              f"(cohort {selection.cohort_sha256[:12]})")
+
     run_band1(
         xml_dir, dataset_path, log_path, model=model,
         anthropic_key=anthropic_key, ncbi_key=ncbi_key,
         crossref_mailto=crossref_mailto,
-        openalex_mailto=openalex_mailto,
+        openalex_mailto=openalex_mailto, refs=band1_refs,
         complete=recorded_band1_complete, f8_timing=True)
     attestations = _band1_attestations(
         log_path, snapshot_date=band1_snapshot_date)
@@ -832,6 +880,7 @@ def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         f5_seams=f5_seams, f5_evidence_builder=f5_evidence_builder,
         f5_policy=f5_policy, f7_seams=f7_seams,
         f7_evidence_builder=f7_evidence_builder, f7_policy=f7_policy,
+        citation_selection_path=citation_selection_path,
         **run_kwargs)
     manifest["full_launch"] = {
         "entrypoint": "production_launcher.launch_full",
@@ -842,6 +891,9 @@ def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         "band1_label_counts": disposition_manifest["label_counts"],
         "band1_check_attestations": attestations,
         "all_taxonomies_wired": True,
+        "citation_selection": (
+            {**selection.binding(), "source_run_proof": selection_proof}
+            if selection is not None else {"selection_applied": False}),
     }
     _persist_finished_manifest(manifest)
     return manifest

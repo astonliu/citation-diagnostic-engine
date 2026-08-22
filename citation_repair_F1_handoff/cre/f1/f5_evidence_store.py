@@ -141,21 +141,27 @@ def adapt_fulltext_sections(fulltext: Any, *, work_id: str) -> FullTextAdaptatio
         if (not isinstance(label, str) or not label.strip()
                 or not isinstance(source_text, str) or not source_text.strip()):
             raise ValueError(f"fulltext section {index} has invalid label/text")
-        # Validate the producer's binding BEFORE applying F5's canonicalization.
-        # Comparing its source hash to normalized text rejected valid table rows
-        # whenever XML rendering left trailing cell whitespace.
-        if (not isinstance(content_hash, str)
-                or content_hash != _sha256_text(source_text)):
-            raise ValueError(
-                f"fulltext section {index} content_sha256 does not match stored text")
         text = _normalize_text(source_text, f"sections[{index}].text")
         if text is None:  # guarded above; retained as an explicit invariant
             raise ValueError(f"fulltext section {index} has invalid label/text")
-        # The adapted packet owns normalized text, so its hash must bind that
-        # exact representation rather than reusing the source representation's
-        # digest.
+        # ONE REPRESENTATION, ONE HASH, AND THE COMPARISON STAYS STRICT.
+        # Every evidence span downstream is bound to this digest, and that
+        # binding is the only thing that lets a span be checked against the
+        # paragraph it claims to come from. The producer
+        # (``fulltext_reader.canonical_section_text``) now emits text already in
+        # this canonical form, so ``_normalize_text`` is a no-op and the two
+        # sides hash identical bytes. Requiring the producer's digest to bind the
+        # CANONICAL text -- rather than accepting its own representation and
+        # re-hashing -- is what keeps this a real check: relaxing it would let a
+        # span bind to the wrong paragraph and yield a confident wrong label with
+        # no error raised anywhere. A section that still fails is refused, and
+        # the router terminates that reference UNJUDGEABLE.
+        if (not isinstance(content_hash, str)
+                or content_hash != _sha256_text(text)):
+            raise ValueError(
+                f"fulltext section {index} content_sha256 does not match stored text")
         row = {"label": label, "title": title, "text": text,
-               "content_sha256": _sha256_text(text)}
+               "content_sha256": content_hash}
         preserved.append(row)
         normalized_label = label.strip().casefold()
         heading = f"[{normalized_label}]" + (f" {title}" if title else "")

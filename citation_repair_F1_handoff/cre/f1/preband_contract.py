@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 #: The only artifact schema this consumer accepts. Must match Band 1's
 #: ``preband_disposition.DISPOSITION_SCHEMA`` exactly; the two bands share no
 #: code, so this string is the whole of the version handshake.
-DISPOSITION_SCHEMA = "preband_disposition_v1"
+DISPOSITION_SCHEMA = "preband_disposition_v2"
 
 MANIFEST_SUFFIX = ".manifest.json"
 
@@ -79,6 +79,19 @@ class Disposition:
     corpus_manifest_sha256: str = ""
     check_attestations: dict = field(default_factory=dict)
     canonical: bool = False
+    #: citation_id -> the identifier Band 1 actually resolved, with its source
+    #: and status (schema v2). Empty for a dict injection, which carries labels
+    #: only; Band 2 then falls back to the claimed reference exactly as before.
+    identifiers: dict = field(default_factory=dict)
+
+    def identifier(self, citation_id: str) -> dict:
+        """The resolved identifier for one id, or an explicit "none" record.
+
+        Never returns None and never guesses: a caller that gets an empty value
+        back knows Band 1 resolved nothing, which is a different fact from "this
+        artifact does not carry identifiers".
+        """
+        return dict(self.identifiers.get(citation_id) or {})
 
     def provenance(self) -> dict:
         """The manifest block. Absent fields stay empty rather than guessed."""
@@ -95,7 +108,23 @@ class Disposition:
             "row_count": self.row_count,
             "cleared_count": sum(1 for v in self.mapping.values()
                                  if _is_clear(v)),
+            # How many cleared references Band 1 resolved WITHOUT a PMID. This is
+            # the population Band 2 used to discard as `excluded_no_cited_pmid`,
+            # so it is reported rather than left to be rediscovered.
+            "resolved_identifier_kinds": _identifier_kind_counts(
+                self.mapping, self.identifiers),
         }
+
+
+def _identifier_kind_counts(mapping: dict, identifiers: dict) -> dict:
+    """Cleared rows tallied by the KIND of identifier Band 1 resolved."""
+    counts: dict = {}
+    for cid, label in mapping.items():
+        if not _is_clear(label):
+            continue
+        kind = str((identifiers.get(cid) or {}).get("kind") or "none")
+        counts[kind] = counts.get(kind, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _is_clear(label) -> bool:
@@ -113,6 +142,63 @@ def _validate_label(label, where: str) -> str:
             f"({sorted(DISPOSITION_LABELS)}). An unknown label would be read as "
             "NOT CLEARED and silently exclude the pair.")
     return stripped
+
+
+#: The identifier kinds a v2 row may declare. Closed, and validated on load: an
+#: unknown kind would be read by Band 2's retrieval as "no identifier" and
+#: silently re-create the drop this field exists to prevent.
+IDENTIFIER_KINDS = frozenset({"pmid", "doi", ""})
+IDENTIFIER_STATUSES = frozenset({"resolved", "unresolved"})
+
+
+def _validate_identifier(value, where: str) -> dict:
+    """Validate one row's ``resolved_identifier`` block; ``{}`` when absent.
+
+    OPTIONAL ON READ, ALWAYS WRITTEN. Every artifact this codebase produces
+    carries the block (``preband_disposition.build_rows``), so the rescue path is
+    always available on a current run. A row that lacks it -- an artifact written
+    before v2 -- is not refused, because absence is safe IN ONE DIRECTION ONLY:
+    with no identifier carried, Band 2 falls back to the reference's claimed PMID
+    and behaves exactly as it did before this field existed. A missing block can
+    therefore fail to RESCUE a reference; it can never ADMIT one. Refusing
+    outright would invalidate every previously produced disposition to buy
+    strictness the failure mode does not need.
+
+    What IS strict is a block that is present and wrong: an unknown kind or
+    status, or a value with no kind, would be read by the retrieval path as "no
+    identifier" and silently recreate the drop this field exists to prevent.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise PrebandContractError(
+            f"{where}: resolved_identifier must be an object when present, "
+            f"got {type(value).__name__}")
+    kind = value.get("kind")
+    if kind not in IDENTIFIER_KINDS:
+        raise PrebandContractError(
+            f"{where}: resolved_identifier.kind {kind!r} is outside "
+            f"{sorted(IDENTIFIER_KINDS)}")
+    status = value.get("status")
+    if status not in IDENTIFIER_STATUSES:
+        raise PrebandContractError(
+            f"{where}: resolved_identifier.status {status!r} is outside "
+            f"{sorted(IDENTIFIER_STATUSES)}")
+    identifier = value.get("value")
+    if not isinstance(identifier, str):
+        raise PrebandContractError(
+            f"{where}: resolved_identifier.value must be a string")
+    if identifier.strip() and not kind:
+        raise PrebandContractError(
+            f"{where}: resolved_identifier carries a value with no kind; an "
+            "unkinded identifier cannot be routed to a retrieval path")
+    return {
+        "value": identifier.strip(),
+        "kind": kind,
+        "source": str(value.get("source") or ""),
+        "status": status,
+        "decided_by": str(value.get("decided_by") or ""),
+    }
 
 
 def load_artifact(path: str) -> Disposition:
@@ -157,6 +243,7 @@ def load_artifact(path: str) -> Disposition:
             "cannot be bound to the Band-1 code that produced its population")
 
     mapping: dict = {}
+    identifiers: dict = {}
     with open(path, encoding="utf-8") as f:
         for lineno, line in enumerate(f, 1):
             line = line.strip()
@@ -186,6 +273,8 @@ def load_artifact(path: str) -> Disposition:
                     f"(already {mapping[cid]!r}, now {rec.get('label')!r}); "
                     "last-write-wins could clear a known F2")
             mapping[cid] = _validate_label(rec.get("label"), f"{path}:{lineno}")
+            identifiers[cid] = _validate_identifier(
+                rec.get("resolved_identifier"), f"{path}:{lineno}")
 
     declared_rows = manifest.get("row_count")
     if isinstance(declared_rows, int) and declared_rows != len(mapping):
@@ -214,6 +303,7 @@ def load_artifact(path: str) -> Disposition:
         manifest_sha256=_sha256_file(manifest_path),
         corpus_manifest_sha256=str(manifest.get("corpus_manifest_sha256", "")),
         check_attestations=check_attestations,
+        identifiers=identifiers,
         canonical=True)
 
 
@@ -676,8 +766,20 @@ def reportability_report(manifest: dict, predictions_path: str) -> dict:
 
     # Zero judged pairs is the clean-empty-run failure. Unconditional, so it
     # needs no reasoning about which exclusions dilute which denominator.
-    need("pairs_judged", (manifest.get("scoreable_records") or 0) > 0,
-         "no scoreable pair was judged")
+    #
+    # COUNTED ON TERMINAL OUTCOMES, NOT ON QUEUE ROWS. `scoreable_records` now
+    # means "records carrying an F3-F7 finding", and a run that legitimately
+    # finds nothing must still be reportable -- reporting zero findings IS a
+    # result. What must never pass is a run that judged nothing at all, so the
+    # test is on pairs that REACHED a terminal outcome of any kind.
+    terminal = manifest.get("terminal_outcomes") or {}
+    judged = int(terminal.get("total") or 0) or int(
+        manifest.get("scoreable_records") or 0)
+    need("pairs_judged", judged > 0, "no pair reached a terminal outcome")
+    need("terminal_outcomes_accounted",
+         terminal.get("accounting_ok") is not False,
+         f"terminal outcomes ({terminal.get('total')}) do not account for "
+         f"every emitted record ({manifest.get('total_records')})")
 
     need("no_parse_failures", not (pb.get("preflight_parse_failures") or {}),
          f"documents failed to parse: "
@@ -715,14 +817,22 @@ def reportability_report(manifest: dict, predictions_path: str) -> dict:
          f"{dom.get('only_in_preflight', [])[:3]} missing, "
          f"{dom.get('only_in_execution', [])[:3]} unexpected")
 
-    # THE QUEUE MUST EQUAL THE SCOREABLE PREDICTIONS. An annotation queue that
-    # silently holds fewer rows than the run scored is a different denominator
-    # than the one the manifest reports.
+    # EACH QUEUE MUST EQUAL THE POPULATION IT CLAIMS, AND THEY MUST BE DISJOINT.
+    # A queue that silently holds fewer rows than the run put in it is a
+    # different denominator than the one the manifest reports; a row in both
+    # queues is counted twice by anything that sums them.
     q = manifest.get("queue_audit") or {}
-    need("queue_matches_scoreable", q.get("matches") is True,
-         f"annotation queue does not match the scoreable predictions "
-         f"(queue {q.get('queue_rows')} vs scoreable {q.get('scoreable_rows')}; "
+    need("queue_matches_findings", q.get("matches") is True,
+         f"annotation queue does not match the records carrying an F3-F7 "
+         f"finding (queue {q.get('queue_rows')} vs findings "
+         f"{q.get('finding_rows', q.get('scoreable_rows'))}; "
          f"differing ids {(q.get('symmetric_difference') or [])[:3]})")
+    need("human_review_queue_matches",
+         q.get("human_review_matches") is not False,
+         f"human-review queue does not match the records flagged for review "
+         f"({q.get('human_review_rows')} vs {q.get('human_review_expected')})")
+    need("queues_disjoint", q.get("queues_disjoint") is not False,
+         f"records appear in BOTH queues: {(q.get('queue_overlap') or [])[:3]}")
 
     # GLOBAL REPORTABILITY. A per-category block may be non-reportable on its own
     # terms (F5 is unreportable BY CONSTRUCTION -- deploy_path_a is hard-gated off
