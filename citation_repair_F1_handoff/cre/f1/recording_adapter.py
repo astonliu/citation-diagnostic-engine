@@ -143,3 +143,50 @@ def wrap_run_seams(receipt: AdapterReceipt, **seams):
             f"UNWRAPPED and its calls would be missing from the receipt. "
             f"Known seams: {list(RUN_SEAMS)}")
     return receipt.wrap_all(seams)
+
+
+class PaidCallMeter:
+    """A per-thread tally of billed calls made through one closure.
+
+    WHY A METER AND NOT A RECEIPT. The receipt above wraps SEAMS, and a seam is
+    not a call: both coverage judges make one model call PER CLAIM inside a
+    single ``coverage_judge(claims, evidence)`` invocation, so a receipt entry
+    per seam call undercounts a five-claim reference by four. The transport is
+    closed over inside the judge and cannot be wrapped from the call site, so
+    the count has to come from inside the closure -- which is what this is.
+
+    WHY THREAD-LOCAL, and this is the whole design rather than a detail. The
+    judge is built ONCE PER RUN and shared by every worker in
+    ``run_natural_judgment``'s pool. A single shared integer read before and
+    after one record would hand that record another thread's calls -- precisely
+    the defect the pool's own tally refuses ("shared counter mutation would make
+    a correct numeric result depend on thread timing"). Each worker sees only
+    its own count, and one record is judged start to finish on one thread, so a
+    before/after delta on that thread is exactly that record's spend.
+    """
+
+    __slots__ = ("_local",)
+
+    def __init__(self):
+        self._local = threading.local()
+
+    def count(self) -> int:
+        """Billed calls made on THIS thread since the meter was created."""
+        return int(getattr(self._local, "n", 0))
+
+    def bump(self) -> None:
+        """Book one billed call. Called BEFORE the transport, so a provider
+        error still leaves the attempt counted -- an attempt that raised was
+        still paid for, and the same rule the receipt follows."""
+        self._local.n = self.count() + 1
+
+
+def paid_call_meter(fn) -> "PaidCallMeter | None":
+    """The meter carried by ``fn``, or None if it carries none.
+
+    None is a real answer and must not be read as zero: an injected judge with
+    no meter has made an UNKNOWN number of paid calls, not no paid calls. Every
+    caller here records that distinction rather than defaulting it to 0.
+    """
+    meter = getattr(fn, "paid_call_meter", None)
+    return meter if isinstance(meter, PaidCallMeter) else None

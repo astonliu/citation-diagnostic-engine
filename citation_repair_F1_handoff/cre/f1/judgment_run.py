@@ -95,6 +95,7 @@ from .judgment_engine import (
 )
 from .parser import parse_pmc_xml
 from .band_prompts import CLAIM_EXTRACT_PROMPT_VERSION, COVERAGE_PROMPT_VERSION
+from .recording_adapter import paid_call_meter
 from .ncbi_meta import DEFAULT_EMAIL
 from .f4_strength import (
     F4Policy,
@@ -274,6 +275,73 @@ def _count_paid_call(rec: dict, stage: str, *, retry: bool) -> None:
         ledger["retries"] = int(ledger.get("retries") or 0) + 1
     by_stage = ledger.setdefault("by_stage", {})
     by_stage[stage] = int(by_stage.get(stage) or 0) + 1
+
+
+def _book_paid_calls(rec: dict, stage: str, n: int) -> None:
+    """Book ``n`` billed attempts against one stage."""
+    for _ in range(max(0, int(n))):
+        _count_paid_call(rec, stage, retry=False)
+
+
+def _note_unmetered(rec: dict, stage: str) -> None:
+    """Record that a stage ran through a callable carrying NO meter.
+
+    An absent meter means the spend is UNKNOWN, which is not the same fact as
+    zero, and the difference is the whole value of this ledger: a reader costing
+    a run off ``paid_calls.total`` must be able to tell a real zero from a stage
+    nobody counted. Only stages that actually ran are listed.
+    """
+    ledger = rec.setdefault(
+        "paid_calls", {"total": 0, "retries": 0, "by_stage": {}})
+    unmetered = ledger.setdefault("unmetered_stages", [])
+    if stage not in unmetered:
+        unmetered.append(stage)
+
+
+def _metered(rec: dict, stage: str, call):
+    """Wrap one model-shaped callable so EVERY invocation books a paid call.
+
+    Counting invocations rather than predicting them from claim counts is the
+    point: a stage that raises on claim 3 of 5 has already paid for two replies,
+    and any arithmetic over ``len(claims)`` books either two calls too many or
+    two too few. ``None`` passes through untouched -- an unwired seam stays
+    unwired, exactly as ``AdapterReceipt.wrap_all`` treats it.
+
+    No attribute is copied onto the wrapper because none is read: the three
+    consumers (``refine_support_strength``, ``decide_f5``,
+    ``make_entity_assessor``) only CALL these callables. ``model_id`` is sniffed
+    off an F5 transport, but by ``make_judge_contradiction`` at BUILD time, long
+    before this wrapper exists, and the F5 model ids that reach a record come
+    from the policy rather than the seam.
+    """
+    if call is None:
+        return None
+
+    def metered(*args, **kwargs):
+        _count_paid_call(rec, stage, retry=False)
+        return call(*args, **kwargs)
+
+    return metered
+
+
+def _metered_pair(rec: dict, generator_stage: str, verifier_stage: str,
+                  generator, verifier):
+    """Meter a generator/verifier pair WITHOUT inventing distinctness.
+
+    F5 (``verify_contradiction is judge_contradiction``) and F7
+    (``verifier_call_llm is call_llm``) both REFUSE a verifier that is the
+    generator, because an independent verifier that is the same callable is not
+    independent. Two wrappers around one object are two objects, so wrapping
+    each side separately would turn a configuration those checks exist to
+    refuse into one they accept -- metering would have silenced the guard it was
+    added underneath. Same object in, same object out; the merged role's calls
+    then land under the generator stage, which is what actually happened.
+    """
+    if verifier is not None and verifier is generator:
+        shared = _metered(rec, generator_stage, generator)
+        return shared, shared
+    return (_metered(rec, generator_stage, generator),
+            _metered(rec, verifier_stage, verifier))
 
 
 def _record_attempt(rec: dict, *, stage: str, attempt: int, result: str,
@@ -972,9 +1040,20 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
         item["marker_scope"] = dict(scope_record)
     if scope_counts is not None:
         marker_scope.tally(scope_counts, scope, item.get("citing_pmcid") or "")
+    # COVERAGE IS BILLED PER CLAIM, and this call site cannot see those calls:
+    # the transport is closed over inside the judge, so the count is read off the
+    # judge's own meter as a per-thread DELTA. Both judges are snapshotted
+    # because one record can spend through both -- the incomplete-retrieval
+    # fallback below runs the v2 judge on a record configured for v3.
+    coverage_meters = [m for m in (paid_call_meter(coverage_judge),
+                                   paid_call_meter(coverage_judge_v3))
+                       if m is not None]
+    coverage_before = sum(m.count() for m in coverage_meters)
+    coverage_ran = False
     try:
         if not fulltext_path:
             # Default path: abstract scope, v2 prompt, no parser-version key.
+            coverage_ran = True
             verdicts = jb.coverage_verdicts(claims, item["evidence"],
                                             judge=coverage_judge)
             if item["evidence"].get("cited_abstract_body_unretrievable") is True:
@@ -993,6 +1072,7 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
             complete = (isinstance(fulltext, dict)
                         and fulltext.get("retrieval_complete") is True)
             if complete:
+                coverage_ran = True
                 verdicts = jb.coverage_verdicts(
                     claims, item["evidence"], judge=coverage_judge_v3,
                     prompt_version=COVERAGE_PROMPT_VERSION_V3,
@@ -1033,6 +1113,7 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
                     "body_permanently_absent": body_absent,
                 }
                 if body_absent and jb.evidence_is_usable(item["evidence"]):
+                    coverage_ran = True
                     verdicts = jb.coverage_verdicts(
                         claims, item["evidence"], judge=coverage_judge)
                     rec["abstract_scope_fallback"] = {
@@ -1052,6 +1133,20 @@ def judge_pair_coverage(item: dict, *, extractor, coverage_judge, fetch_abstract
         _record_stage_failure(rec, "coverage", exc)
         verdicts = _coverage_failure_verdicts(
             claims, item["evidence"], exc, fulltext_path=fulltext_path)
+    finally:
+        # BOOKED IN `finally`, SO THE FAILURE PATH IS BILLED TOO. A judge that
+        # raised on claim 3 of 5 was already charged for two replies; booking
+        # only on success would understate the bill by exactly the failures the
+        # stage-failure record exists to surface -- the same argument
+        # _count_paid_call makes about retries. The deterministic verdicts
+        # _coverage_failure_verdicts then produces cost nothing and carry no
+        # meter, so they add nothing here.
+        if coverage_meters:
+            _book_paid_calls(
+                rec, "coverage",
+                sum(m.count() for m in coverage_meters) - coverage_before)
+        elif coverage_ran:
+            _note_unmetered(rec, "coverage")
 
     if fulltext_path and not abstract_scope_fallback:
         # PROVENANCE MUST STATE THE SCOPE THE ROW WAS ACTUALLY JUDGED AT.
@@ -1221,10 +1316,17 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
         f4_evidence["coverage_evidence_scope"] = rec.get(
             "evidence_scope", EVIDENCE_SCOPE_ABSTRACT)
         try:
+            # F4 falls back to the generator when no distinct verifier is
+            # wired (f4_strength: `verifier or call_llm`), so leaving the
+            # verifier unwrapped as None keeps the merged role's calls booked
+            # under "F4" -- which is what actually happened.
+            f4_call, f4_verify = _metered_pair(
+                rec, "F4", "F4_verifier",
+                discriminator_call_llm, f4_verifier_call_llm)
             support, strength_records = refine_support_strength(
                 claims, coverage_support, f4_evidence,
-                call_llm=discriminator_call_llm,
-                verifier_call_llm=f4_verifier_call_llm,
+                call_llm=f4_call,
+                verifier_call_llm=f4_verify,
                 policy=policy)
             rec["strength_records"] = list(strength_records)
         except ValueError as exc:
@@ -1261,8 +1363,12 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
         if discriminator_call_llm is not None:
             cited_pmcid = (f3_resolve_pmcid(item["cited_pmid"])
                            if f3_resolve_pmcid is not None else None)
+            # BOOKED SEPARATELY FROM F4 even though it is the same transport.
+            # The receipt cannot separate them -- both are
+            # `discriminator_call_llm` -- so this ledger is the only place a
+            # reader can see what provenance cost as distinct from strength.
             assessor = make_provenance_assessor(
-                call_llm=discriminator_call_llm,
+                call_llm=_metered(rec, "F3", discriminator_call_llm),
                 fetch_reflist=f3_fetch_reflist or (lambda _p: ([], False)),
                 fetch_abstract=fetch_abstract,
                 cited_pmid=item["cited_pmid"], cited_pmcid=cited_pmcid,
@@ -1296,10 +1402,20 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
             f5_evidence = f5_evidence_builder(item)
             effective_f5_policy = (
                 f5_policy if f5_policy is not None else F5Policy())
+            # Only two of the eight F5 seams reach a model; the rest are
+            # offline resolvers. The bundle is COPIED rather than mutated so the
+            # original stays intact for the source-packet lookup below and for
+            # anything the caller validated it as.
+            metered_f5_seams = dict(f5_seams)
+            (metered_f5_seams["judge_contradiction"],
+             metered_f5_seams["verify_contradiction"]) = _metered_pair(
+                rec, "F5", "F5_verifier",
+                f5_seams.get("judge_contradiction"),
+                f5_seams.get("verify_contradiction"))
             temporal, f5_records = decide_f5(
                 claims, support, f5_evidence,
                 policy=effective_f5_policy,
-                **f5_seams)
+                **metered_f5_seams)
             if effective_f5_policy.mode == "deployment":
                 from .f5_evidence_store import source_packet_from_dict
                 from .f5_supersession import validate_f5_record
@@ -1342,8 +1458,19 @@ def judge_pair_finish(rec: dict, item: dict, claims, verdicts, *,
             # Configuration is validated outside the per-pair failure boundary.
             # A broken seam bundle must remain loud rather than converting every
             # row in a run into the same expensive hold.
+            # F7's transports are the one pair already visible to the
+            # adapter receipt (they are receipt-bound at construction), but the
+            # receipt is RUN-scoped and this ledger is RECORD-scoped, so the
+            # per-record count still has to be taken here. Copied, not mutated:
+            # the caller's bundle is what validate_production_f7_configuration
+            # was handed.
+            metered_f7_seams = dict(f7_seams)
+            (metered_f7_seams["call_llm"],
+             metered_f7_seams["verifier_call_llm"]) = _metered_pair(
+                rec, "F7", "F7_verifier",
+                f7_seams.get("call_llm"), f7_seams.get("verifier_call_llm"))
             entity_assessor = make_entity_assessor(
-                **f7_seams,
+                **metered_f7_seams,
                 evidence_context=evidence_context,
                 policy=f7_policy if f7_policy is not None else F7Policy())
             try:
@@ -2657,6 +2784,12 @@ def run_natural_judgment(
     # paid call the accounting cannot see.
     paid_call_totals = {"total": 0, "retries": 0}
     paid_call_by_stage: dict = {}
+    # STAGES THAT RAN UNCOUNTED, carried up from the per-record ledgers. Without
+    # this the fix stops one level short of the artifact that matters: the
+    # manifest would publish a total that looks complete over records that were
+    # never fully counted, which is the same undercount one layer up.
+    paid_call_unmetered: dict = {}
+    paid_call_unmetered_records = 0
 
     pred_fh = open(pred_path, "a", encoding="utf-8")
     queue_fh = open(queue_path, "a", encoding="utf-8")
@@ -2678,7 +2811,7 @@ def run_natural_judgment(
 
     def emit(rec: dict) -> None:
         nonlocal prev_link, chain_count, sentence_partition_affected_records
-        nonlocal stage_failure_records
+        nonlocal stage_failure_records, paid_call_unmetered_records
         # THE TERMINAL OUTCOME IS STAMPED BEFORE THE RECORD IS HASHED, so the
         # chain covers the conclusion and not merely the inputs to it. Every
         # record gets one, from the closed vocabulary, with its reason.
@@ -2713,6 +2846,12 @@ def run_natural_judgment(
         for stage_name, n in (ledger.get("by_stage") or {}).items():
             paid_call_by_stage[stage_name] = (
                 paid_call_by_stage.get(stage_name, 0) + int(n or 0))
+        unmetered = ledger.get("unmetered_stages") or []
+        if unmetered:
+            paid_call_unmetered_records += 1
+            for stage_name in unmetered:
+                paid_call_unmetered[stage_name] = (
+                    paid_call_unmetered.get(stage_name, 0) + 1)
         f5_records_all.extend(rec.get("f5_records") or [])
         f7_records_all.extend(rec.get("f7_records") or [])
         stage_failures = rec.get("stage_failures") or []
@@ -3524,10 +3663,29 @@ def run_natural_judgment(
         # PAID-CALL ACCOUNTING, retries included. Counting only the attempts that
         # succeeded would understate the bill by exactly the retries the retry
         # budget exists to spend.
+        #
+        # AND EVERY BILLED STAGE, not just claim extraction. This block once
+        # summed a ledger that booked ONE of seven stages -- coverage, F3, F4,
+        # F5 and F7 all reached the model without being booked -- so a manifest
+        # could report `total_attempts` near the reference count while the run
+        # had paid several times that. `unmetered` is the other half of being
+        # readable: a stage whose spend was never observed is NAMED with the
+        # number of records it affected, because a reader costing or auditing a
+        # run has to be able to tell a real zero from a stage nobody counted.
         "paid_calls": {
             "total_attempts": paid_call_totals["total"],
             "retry_attempts": paid_call_totals["retries"],
             "by_stage": dict(sorted(paid_call_by_stage.items())),
+            "unmetered": {
+                "records": paid_call_unmetered_records,
+                "by_stage": dict(sorted(paid_call_unmetered.items())),
+                "note": (
+                    "Stages that ran through a callable carrying no paid-call "
+                    "meter. Their spend is UNKNOWN, not zero, and is NOT in "
+                    "total_attempts -- which is therefore a floor, not the bill, "
+                    "on any run where records is nonzero."
+                ),
+            },
         },
         "stage_failures": {
             "affected_reference_records": stage_failure_records,

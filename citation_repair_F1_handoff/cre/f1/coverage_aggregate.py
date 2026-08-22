@@ -43,6 +43,7 @@ from __future__ import annotations
 from typing import Callable, List, Optional
 
 from . import band_prompts as bp
+from .recording_adapter import PaidCallMeter
 
 
 def aggregate_coverage(
@@ -257,7 +258,20 @@ def make_coverage_judge(
     per-claim verdict runs through the TRI-STATE :func:`aggregate_coverage` here
     instead of the frozen Boolean one. Judges each claim in its own call against
     the FROZEN ``band_prompts.COVERAGE_PROMPT`` (unchanged; its bytes and the
-    package seal do not move)."""
+    package seal do not move).
+
+    THE PER-CLAIM CALLS ARE COUNTED HERE, on ``coverage_judge.paid_call_meter``,
+    because this is the innermost place they are visible: one
+    ``coverage_judge(claims, evidence)`` invocation bills ONE CALL PER CLAIM, so
+    a receipt entry per seam call undercounts a five-claim reference by four, and
+    ``judgment_run`` cannot see inside this closure to do better. The meter lives
+    on this factory rather than on the frozen ``band_prompts`` one for the same
+    reason the tri-state mapping does -- ``band_prompts.py`` cannot be edited at
+    all without drifting its blob OID and unfreezing both prompt-package seals.
+    The no-usable-abstract short-circuit above is the zero-call path and is left
+    unmetered on purpose: it never reaches the model."""
+    meter = PaidCallMeter()
+
     def coverage_judge(claims: list, evidence: dict) -> list:
         if not bp.evidence_is_usable(evidence):
             return [_no_usable_abstract_dict() for _ in claims]
@@ -269,8 +283,11 @@ def make_coverage_judge(
                 .replace("<<ATOMIC_CLAIM>>", claim)
                 .replace("<<EVIDENCE>>", evidence_text)
             )
+            meter.bump()
             out.append(tristate_judge_dict(bp.parse_coverage(call_llm(prompt))))
         return out
+
+    coverage_judge.paid_call_meter = meter
     return coverage_judge
 
 

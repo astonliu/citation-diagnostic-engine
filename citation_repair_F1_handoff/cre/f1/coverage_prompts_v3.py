@@ -102,6 +102,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from . import sentence_spans as ss
+from .recording_adapter import PaidCallMeter
 from .coverage_aggregate import fulltext_judge_dict_v3, no_usable_fulltext_dict
 
 #: Prompt axis: named for the evidence SCOPE (DEC-030), which has not moved.
@@ -725,6 +726,12 @@ def make_coverage_judge_v3(
     because raising there quarantined the whole reference and destroyed every claim on
     it, and because the literature treats selection failure as a recall miss (Sarol,
     Recall@20 = 0.54, item retained)."""
+    # ONE CALL PER CLAIM IS BILLED (see above), and one seam invocation is not
+    # one call -- so the tally is taken here, inside the closure over the
+    # transport, where the calls actually happen. The fail-closed empty-evidence
+    # return below never reaches the model and is left unmetered on purpose.
+    meter = PaidCallMeter()
+
     def coverage_judge(claims: list, evidence: dict) -> list:
         fulltext = fulltext_of(evidence) or {}
         retrieval_complete = fulltext.get("retrieval_complete")
@@ -743,6 +750,7 @@ def make_coverage_judge_v3(
         out = []
         for claim in claims:
             prompt = render_prompt(claim, sections)
+            meter.bump()
             verdict = parse_coverage_v3(call_llm(prompt))
             for entry in verdict.evidence_spans:
                 if entry["label"] not in labels:
@@ -755,4 +763,6 @@ def make_coverage_judge_v3(
                 verdict, retrieval_complete,
                 evidence_spans=spans, span_status=status))
         return out
+
+    coverage_judge.paid_call_meter = meter
     return coverage_judge
