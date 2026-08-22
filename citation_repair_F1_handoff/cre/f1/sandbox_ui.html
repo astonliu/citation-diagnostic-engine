@@ -508,6 +508,10 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
   // travelling invisibly, and dropped the moment you say so.
   var REAL = null;
   var PMC = { article: null, picked: -1 };
+  // The last MEASURED Band-1 answer, or null. Only a real run sets it: a dry run
+  // measures nothing, and letting one stand in would be the exact substitution
+  // this whole panel exists to stop.
+  var PB = null;
   // Whether an engine is behind this page. Decided by asking, once, at load --
   // never assumed from the URL, because the same file is served from the local
   // runner and published as a static artifact and must be right in both.
@@ -871,6 +875,82 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
       '</tr></thead><tbody>' + rows + '</tbody></table></div>';
   }
 
+
+  /* ---------------- the join to Band 1 ----------------
+     judge_pair sets rec["preband_cleared"] = True unconditionally, on every
+     record the bench produces. That is the bench's standing assumption written
+     into the output, and from inside the record it is indistinguishable from a
+     measurement.
+
+     WHERE THE TWO PATHS ACTUALLY DIVERGE, because it is not in the engine. The
+     literal is on both: judge_pair_finish passes preband_cleared=True to the
+     only decide_judgment call the pipeline makes, and evaluate_judgment -- the
+     entry that could pass a variable -- has no non-test caller, so the engine's
+     OUTSIDE_BAND branch never fires in production. A corpus run keeps a faulted
+     pair out EARLIER: _preband reads the disposition artifact, and `if not
+     cleared` writes an excluded_preband record and continues, so the band is
+     never entered and no claim is extracted. The bench has no _preband and no
+     continue, which leaves line 939 asserting on its own what the corpus run
+     had already guaranteed. This banner says which of the two you are looking
+     at. */
+
+  function pbBanner(r){
+    var cid = r.citation_id || "";
+    var stamped = r.preband_cleared;
+    var head = '<div><h3>Band 1 &middot; is this verdict admissible?</h3>';
+    var stampLine = '<p class="note tight" style="margin-top:0">The record carries ' +
+      '<code>preband_cleared: ' + esc(String(stamped)) + '</code>. On this bench that is not a ' +
+      'measurement: <code>judge_pair</code> sets it to <code>true</code> for every packet, ' +
+      'because the bench skips the pre-band gate by design. It is a literal on <em>both</em> ' +
+      'paths — <code>judge_pair_finish</code> passes <code>preband_cleared=True</code> to the only ' +
+      '<code>decide_judgment</code> call the pipeline makes, so the engine&rsquo;s own ' +
+      '<code>OUTSIDE_BAND</code> guard never fires. A corpus run keeps a faulted pair out by ' +
+      'never entering the band, not by the band refusing it.</p>';
+
+    if(!PB){
+      return head +
+        '<div class="flag"><b>Band 1 has not been asked about this pair.</b><br>' +
+        'The verdict above was produced under the assumption that a dead PMID, a wrong paper ' +
+        'and a retracted source had all been ruled out. Nothing has ruled them out. ' +
+        '<button class="ghost" type="button" id="gotogate" style="margin-top:9px">Run the Band 1 gate on this pair</button>' +
+        '</div>' + stampLine + '</div>';
+    }
+    if(PB.cid && cid && PB.cid !== cid){
+      return head +
+        '<div class="flag"><b>The last gate run was about a different pair.</b><br>' +
+        'It measured <code>' + esc(PB.cid) + '</code>; this record is <code>' + esc(cid) + '</code>. ' +
+        'Nothing measured there says anything about this record, and the two are not joined. ' +
+        '<button class="ghost" type="button" id="gotogate" style="margin-top:9px">Run the gate on this pair</button>' +
+        '</div>' + stampLine + '</div>';
+    }
+    if(PB.admitted){
+      return head +
+        '<div class="flag" style="border-left-color:var(--wired);background:var(--wired-soft)">' +
+        '<b>Measured: ' + esc(PB.label) + '. The assumption held.</b><br>' +
+        'Band 1 admits this reference to the band, so the verdict above is one production could ' +
+        'actually have produced.' +
+        (PB.cleared ? "" : ' It is admitted <em>without</em> being an F2 clear — a proved same-work ' +
+          'row leaves the F2 scoreable denominator and still reaches F3–F7.') +
+        (PB.f8 ? "" : ' The F8 timing gate was off, so a retraction was not ruled out by notice date ' +
+          '— only by whether the cited record carries the retracted publication type.') +
+        '</div>' + stampLine + '</div>';
+    }
+    return head +
+      '<div class="flag bad">' +
+      '<b>Measured: ' + esc(PB.label) + '. The assumption is false for this pair.</b><br>' +
+      (PB.cls === "fault"
+        ? 'Band 1 asserted a deterministic fault, so in production this reference never reaches ' +
+          'F3–F7 at all. <code>run_natural_judgment</code> writes an <code>excluded_preband</code> ' +
+          'record and <code>continue</code>s: the band is never entered, no claim is extracted, and ' +
+          'no verdict exists to be wrong. <strong>The outcome above is one that could never have ' +
+          'been asked for.</strong>'
+        : 'Band 1 reached no verdict, so this reference is not admitted to the band. It is not an ' +
+          'accusation — precision-first holds a reference whose lookups did not answer rather than ' +
+          'reading silence as absence — but it is also not a clearance, and the verdict above ' +
+          'rests on one.') +
+      '</div>' + stampLine + '</div>';
+  }
+
   function readRecord(){
     var box = $("recout");
     var raw = $("f_rec").value.trim();
@@ -923,6 +1003,8 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
       '<br>human review <b>' + (r.human_review_required ? "required" : "not required") + '</b>' +
       ' &middot; ' + (known ? 'in the closed vocabulary' : '<b style="color:var(--refuse)">NOT in the closed vocabulary</b>') +
       '</span></div>');
+
+    html.push(pbBanner(r));
 
     /* scope stamps */
     var stampKeys = ["coverage_prompt_version","response_parser_version","evidence_scope",
@@ -1375,7 +1457,17 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
         $("preband").disabled = false;
         if(!res.ok){ stateInto("pbstate", errBlock(res), "x"); return; }
         stateInto("pbstate", '<span>Done in ' + esc(String(res.elapsed)) + 's.</span>', "running");
-        paintPreband(res.result);
+        var d = res.result;
+        if(!d.dry_run){
+          PB = { cid: (d.plan || {}).citation_id || "", label: d.label,
+                 cls: d["class"], admitted: !!d.band2_admitted, cleared: !!d.cleared,
+                 pmid: (d.plan || {}).claimed_pmid || "", f8: !!(d.plan || {}).f8_timing };
+          // BOTH DIRECTIONS. A record already sitting in step 3 was read under
+          // the old assumption; leaving it stale would let the page show a
+          // measured fault beside a verdict still captioned as admissible.
+          if($("f_rec").value.trim()) readRecord();
+        }
+        paintPreband(d);
       }).catch(function(err){
         stop();
         $("preband").disabled = false;
@@ -1637,6 +1729,11 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
     if(t.id === "getabs"){ getAbs(); return; }
     if(t.id === "getbody"){ getBody(); return; }
     if(t.id === "preband"){ runPreband(); return; }
+    if(t.id === "gotogate"){
+      $("pbsec").scrollIntoView({behavior:"smooth", block:"start"});
+      runPreband();
+      return;
+    }
     if(t.id === "dropreal"){
       ev.preventDefault();
       REAL = null; paintReal(); render();
