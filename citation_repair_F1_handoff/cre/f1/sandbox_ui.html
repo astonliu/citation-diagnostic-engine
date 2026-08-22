@@ -354,6 +354,15 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
       <div><label>Candidate ids from the bank<span class="key">f5_candidate_ids</span></label>
         <input id="f_cands" placeholder="1, 3 — blank means every paper in the bank"></div>
     </div>
+    <div style="margin-top:13px">
+      <label>Cited work&rsquo;s MeSH terms, one per line<span class="key">cited_mesh_terms</span></label>
+      <textarea id="f_mesh" rows="3" placeholder="Spinal Fractures&#10;Osteoporosis&#10;Bone Cements"></textarea>
+      <div class="acts" style="margin-top:9px">
+        <button class="ghost" type="button" id="getmeta">Fetch MeSH, types and date</button>
+        <span class="note" style="margin:0;align-self:center" id="metanote"></span>
+      </div>
+      <p class="note tight">Retrieval runs two streams, <code>pubmed_esearch_claim</code> and <code>pubmed_esearch_mesh</code>. With no MeSH terms the second query is empty, so F5 answers on half its retrieval &mdash; and the record cannot say so, because nothing was asked.</p>
+    </div>
     <p class="note tight">The cited work joins the bank automatically as its own row, because the evidence builder fetches it by PMID. It must not also appear as a candidate &mdash; nothing supersedes itself.</p>
   </div>
 
@@ -507,6 +516,11 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
   // and pages. They are announced under the cited-work fields rather than
   // travelling invisibly, and dropped the moment you say so.
   var REAL = null;
+  // The cited work's own PubMed metadata, when it was fetched. Held rather than
+  // written into a form field because publication types and the publication date
+  // have inputs elsewhere (or none), and a value the user cannot see must not be
+  // one the user cannot drop -- getMeta reports every field it filled.
+  var META = {};
   var PMC = { article: null, picked: -1 };
   // The last MEASURED Band-1 answer, or null. Only a real run sets it: a dry run
   // measures nothing, and letting one stand in would be the exact substitution
@@ -595,6 +609,14 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
     }
     if(on.F5){
       p.f5_as_of_date = $("f_asof").value.trim();
+      // The cited work's OWN metadata, which the bank row is built from. Kept
+      // under F5 because no other taxonomy reads it.
+      var mesh = $("f_mesh").value.split("\n")
+        .map(function(x){ return x.trim(); }).filter(Boolean);
+      if(mesh.length) p.cited_mesh_terms = mesh;
+      if(META.publication_types && META.publication_types.length)
+        p.cited_publication_types = META.publication_types;
+      if(META.pub_date) p.cited_pub_date = META.pub_date;
       var bank = papers();
       var raw = $("f_cands").value.trim();
       if(raw){
@@ -651,6 +673,8 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
         R("build_f5", "F5 needs cited_claimed.claimed_pmid: supersession is judged against the cited work, which has to be identified to be fetched");
       if(!(p.cited_claimed || {}).year)
         R("build_f5", "F5 needs the cited work's publication date (cited_pub_date, or cited_claimed.year): 'was there a later paper' has no answer without the date the comparison is against");
+      if(!(p.cited_mesh_terms && p.cited_mesh_terms.length))
+        W("f5_candidate_finder", "no cited_mesh_terms: build_mesh_query returns an empty query, so the pubmed_esearch_mesh stream retrieves nothing and F5 answers on the claim stream alone. The run is thinner than it looks and the record will not flag it \u2014 use the fetch button above");
       var seenId = {}, seenKey = {};
       cands.forEach(function(c){
         if(seenId[c.id])
@@ -1205,6 +1229,7 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
       '<b>' + esc(a.citing_title || a.citing_pmcid) + '</b><div class="counts">' +
       pill("flat", a.citing_pmcid) +
       (a.citing_pmid ? pill("flat", "PMID " + a.citing_pmid) : pill("silent", "no PMID in the XML")) +
+      (a.full_text_withheld ? pill("refuse", "full text withheld by the publisher") : "") +
       pill("flat", c.references_parsed + " references parsed") +
       pill(c.with_citance ? "wired" : "refuse", c.with_citance + " carry a citance") +
       (unlinked > 0 ? pill("silent", unlinked + " do not, and are not offered") : "") +
@@ -1215,8 +1240,18 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
     // paper with two citations, and only both numbers together say which.
     var note = $("pmcnote");
     note.style.display = "block";
-    note.innerHTML = c.with_citance === 0
-      ? 'Not one reference came back with a citing sentence. That is a parser result, not a property of the paper &mdash; <code>link_citances</code> found no marker it could resolve. Nothing here is pickable.'
+    // THREE STATES, NOT TWO. with_citance === 0 is reached both by a parser that
+    // resolved no marker AND by a document that delivered no bibliography to
+    // resolve markers against -- and only references_parsed separates them. The
+    // comment above says the comparison is the diagnostic; branching on one of
+    // the two numbers threw that away and told a reader whose publisher withheld
+    // the body to go looking for a bug in link_citances.
+    note.innerHTML = c.references_parsed === 0
+      ? (a.full_text_withheld
+        ? 'This article&rsquo;s XML carries <strong>no bibliography to parse</strong>. EFetch <code>db=pmc</code> returned front matter only, and the document says why in its own first line: <em>the publisher does not allow downloading of the full text in XML form</em>. Nothing was parsed because nothing was delivered &mdash; <code>link_citances</code> was never handed a reference. The reference list you can see on the PMC website is rendered from a record the API will not serve, and the body it would need for citing sentences is withheld too, so this paper cannot be used as a citing document. It can still be a <em>cited</em> work: its abstract and MeSH terms are served by <code>db=pubmed</code>.'
+        : 'This article&rsquo;s XML carries <strong>no <code>&lt;ref-list&gt;</code></strong>, so there was nothing to parse and nothing for <code>link_citances</code> to resolve. That is a property of the deposited document, not a parser result. Check whether the paper is in the PMC Open Access subset.')
+      : c.with_citance === 0
+      ? 'All ' + c.references_parsed + ' references parsed, and not one came back with a citing sentence. <strong>That</strong> is a parser result, not a property of the paper &mdash; <code>link_citances</code> had references and resolved no marker to any of them. Nothing here is pickable.'
       : (unlinked > 0
         ? 'The ' + unlinked + ' references without a citing sentence are withheld, not hidden: the taxonomy is defined over references a marker in the body points at, and one nothing cites carries no claim to judge.'
         : 'Every parsed reference resolved to a citing sentence.') +
@@ -1320,6 +1355,49 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
       render();
     }).catch(function(err){
       $("getabs").disabled = false;
+      note.innerHTML = '<span class="err">' + esc(String(err && err.message || err)) + '</span>';
+    });
+  }
+
+  function getMeta(){
+    var pmid = $("f_cpmid").value.trim();
+    var note = $("metanote");
+    if(!/^\d+$/.test(pmid)){
+      note.innerHTML = '<span class="err">Needs the cited work&rsquo;s PMID &mdash; the same one F5 judges against.</span>';
+      return;
+    }
+    if(!LIVE){ note.innerHTML = '<span class="err">Needs the local runner.</span>'; return; }
+    note.textContent = "Fetching\u2026";
+    $("getmeta").disabled = true;
+    post("/api/pubmeta", { pmid: pmid }).then(function(res){
+      $("getmeta").disabled = false;
+      if(!res.ok){ note.innerHTML = '<span class="err">' + esc(res.error || "") + '</span>'; return; }
+      var r = res.result;
+      if(!r.found){
+        // Same rule the abstract route follows: PubMed answering "no record"
+        // is a fact, and overwriting the box would make it indistinguishable
+        // from a fetch that never happened.
+        note.innerHTML = 'PubMed holds <strong>no record</strong> for PMID ' + esc(pmid) +
+          ' &mdash; the box above is left untouched.';
+        return;
+      }
+      META = { publication_types: r.publication_types || [], pub_date: r.pub_date || "" };
+      $("f_mesh").value = (r.mesh_terms || []).join("\n");
+      // NAME WHAT WENT WHERE. Two of these three fields have no visible input,
+      // so a bare "fetched" would leave the packet carrying values the page
+      // never showed.
+      var bits = [String((r.mesh_terms || []).length) + ' MeSH terms'];
+      if(META.pub_date) bits.push('<code>cited_pub_date</code> ' + esc(META.pub_date));
+      if(META.publication_types.length)
+        bits.push(String(META.publication_types.length) + ' publication types');
+      note.innerHTML = bits.join(', ') + ' &mdash; through the F5 seam&rsquo;s own ' +
+        '<code>PubMedCandidateFinder.fetch_metadata</code>, the same reader the live ' +
+        'finder uses for the cited work.' +
+        ((r.mesh_terms || []).length ? '' : ' <strong>This record carries no MeSH terms</strong>, ' +
+         'so the mesh stream stays empty however it was fetched.');
+      render();
+    }).catch(function(err){
+      $("getmeta").disabled = false;
       note.innerHTML = '<span class="err">' + esc(String(err && err.message || err)) + '</span>';
     });
   }
@@ -1700,6 +1778,7 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
     $("f_cdoi").value = ""; $("f_cyear").value = ""; $("f_cauth").value = ""; $("f_cjrnl").value = "";
     $("f_abs").value = "We show that Piezo2 is the principal mechanotransduction channel for proprioception in mice.";
     $("f_cpmcid").value = "PMC4661126";
+    $("f_mesh").value = ""; META = {}; $("metanote").textContent = "";
     $("secs").innerHTML = "";
     addSection({ label:"results", title:"Piezo2 in proprioceptors",
       text:"Conditional deletion of Piezo2 in sensory neurons abolished rapidly adapting mechanically activated currents in proprioceptors and produced severely uncoordinated body movements and limb positions in mice." });
@@ -1727,6 +1806,7 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
     if(t.id === "addsec"){ addSection(); return; }
     if(t.id === "loadpmc"){ loadPmc(); return; }
     if(t.id === "getabs"){ getAbs(); return; }
+    if(t.id === "getmeta"){ getMeta(); return; }
     if(t.id === "getbody"){ getBody(); return; }
     if(t.id === "preband"){ runPreband(); return; }
     if(t.id === "gotogate"){
@@ -1777,6 +1857,16 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
     if(!t.matches("input,textarea,select")) return;
     if(t.id === "f_rec") return;
     if(t.id === "f_auth") lsSet("bench.auth", t.value);
+    // EDITING THE CITED PMID INVALIDATES WHAT WAS FETCHED FOR THE OLD ONE. Two
+    // of META's fields have no visible input, so keeping them would let the
+    // packet carry one paper's publication date under another paper's PMID --
+    // the exact silent-carry this page refuses everywhere else.
+    if(t.id === "f_cpmid" && (META.pub_date || (META.publication_types || []).length)){
+      META = {};
+      $("metanote").innerHTML = '<span class="err">Cited PMID changed &mdash; the fetched ' +
+        'date and publication types were dropped. The MeSH box is left as it is, ' +
+        'because you can see it; fetch again for the new PMID.</span>';
+    }
     render();
   });
   document.addEventListener("change", function(ev){

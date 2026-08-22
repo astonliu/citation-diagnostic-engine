@@ -259,11 +259,12 @@ def _classify(exc: Exception) -> str:
 def run_fetch(kind: str, body: dict) -> dict:
     """One NCBI retrieval. No model, no verdict, no lock -- nothing here bills.
 
-    The three retrievals share this one handler because they share their whole
+    The four retrievals share this one handler because they share their whole
     failure surface: a bad identifier, a paper outside the Open Access subset, or
     NCBI not answering. What they must NOT share is silence -- every one of them
     raises ``PmcError`` with the reason rather than returning an empty result
-    that would read as "the paper has no references / no abstract / no body".
+    that would read as "the paper has no references / no abstract / no body /
+    no MeSH terms".
     """
     ncbi = read_ncbi_key()
     started = time.time()
@@ -275,6 +276,10 @@ def run_fetch(kind: str, body: dict) -> dict:
                 cited_only=not body.get("all_references"))
         elif kind == "abstract":
             out = spmc.load_abstract(
+                body.get("pmid") or "", api_key=ncbi,
+                email=CONFIG["mailto"] or spmc.DEFAULT_EMAIL)
+        elif kind == "pubmeta":
+            out = spmc.load_pubmeta(
                 body.get("pmid") or "", api_key=ncbi,
                 email=CONFIG["mailto"] or spmc.DEFAULT_EMAIL)
         else:
@@ -351,6 +356,7 @@ class Handler(BaseHTTPRequestHandler):
         "/api/preband":  (lambda b: run_preband(b), True),
         "/api/pmc":      (lambda b: run_fetch("pmc", b), False),
         "/api/abstract": (lambda b: run_fetch("abstract", b), False),
+        "/api/pubmeta":  (lambda b: run_fetch("pubmeta", b), False),
         "/api/fulltext": (lambda b: run_fetch("fulltext", b), False),
     }
 

@@ -67,7 +67,7 @@ def normalize_pmcid(value: str) -> str:
 
 
 def fetch_article_xml(pmcid: str, *, api_key: str = "", email: str = DEFAULT_EMAIL,
-                      session=None) -> str:
+                      session=None, raw_input: str = "") -> str:
     """The article's JATS XML from EFetch ``db=pmc``, or a named failure.
 
     Every non-answer raises with what actually happened. An empty return would
@@ -100,11 +100,60 @@ def fetch_article_xml(pmcid: str, *, api_key: str = "", email: str = DEFAULT_EMA
         error = re.search(r"<error[^>]*>(.*?)</error>", text, re.S)
         if error:
             detail = " -- " + re.sub(r"\s+", " ", error.group(1)).strip()
+        # NAME THE RIGHT LAYER. A bare number is a valid PMCID and a valid PMID,
+        # so "17353335" silently became PMC17353335 and came back absent -- and
+        # the licensing sentence below then blamed the Open Access subset for
+        # what was a wrong-identifier mistake. Only the raw input distinguishes
+        # them, so a caller that kept it gets the hint and one that did not is
+        # left with the message it always had.
+        if raw_input and "pmc" not in str(raw_input).casefold():
+            raise PmcError(
+                f"EFetch db=pmc has no PMC{digits}{detail}. You supplied "
+                f"{str(raw_input).strip()!r} with no PMC prefix; a bare number "
+                "is accepted as a PMCID, so if that was a PMID it was read as "
+                f"PMC{digits}. Convert the PMID to its PMCID first -- they are "
+                "different identifiers for different records, and this article "
+                "may not be the one you meant")
         raise PmcError(
             f"EFetch db=pmc returned no <article> for PMC{digits}{detail}. Most "
             "often this means the paper is not in the PMC Open Access subset, "
             "which is a fact about licensing, not about the paper")
     return text
+
+
+_FRONT_PMID_RE = re.compile(
+    r'<article-id[^>]*pub-id-type="pmid"[^>]*>\s*(\d+)\s*</article-id>', re.I)
+_FRONT_TITLE_RE = re.compile(
+    r"<article-title[^>]*>(.*?)</article-title>", re.I | re.S)
+
+
+def _front_identity(xml: str) -> dict:
+    """The article's OWN pmid and title, read from ``<front>``.
+
+    WHY NOT refs[0]. ``load_article`` took both fields off the first parsed
+    REFERENCE, which carries them only as a back-pointer to its source document.
+    That works whenever the bibliography parsed and reports "no PMID in the XML"
+    whenever it did not -- including for PMC7977842, whose front matter prints
+    ``<article-id pub-id-type="pmid">17353335</article-id>`` two lines above the
+    withheld body. An article's identity does not depend on its bibliography
+    parsing, so it must not be read through it.
+
+    This never overrides the production parser: ``load_article`` prefers what
+    ``parse_pmc_xml`` returned and falls back here only for the empty case.
+    """
+    pmid = ""
+    match = _FRONT_PMID_RE.search(xml or "")
+    if match:
+        pmid = match.group(1)
+    title = ""
+    # The FIRST article-title in the document is the article's own; later ones
+    # belong to reference entries, which is why this does not scan past <front>.
+    front = (xml or "").split("</front>", 1)[0]
+    match = _FRONT_TITLE_RE.search(front)
+    if match:
+        title = re.sub(r"<[^>]+>", "", match.group(1))
+        title = re.sub(r"\s+", " ", title).strip()
+    return {"pmid": pmid, "title": title}
 
 
 def load_article(pmcid: str, *, api_key: str = "", email: str = DEFAULT_EMAIL,
@@ -117,8 +166,10 @@ def load_article(pmcid: str, *, api_key: str = "", email: str = DEFAULT_EMAIL,
     silent one -- the counts below report both numbers, so a paper whose markers
     failed to parse shows up as a collapse rather than as a short list.
     """
+    raw_input = str(pmcid or "")
     pmcid = normalize_pmcid(pmcid)
-    xml = fetch_article_xml(pmcid, api_key=api_key, email=email, session=session)
+    xml = fetch_article_xml(pmcid, api_key=api_key, email=email, session=session,
+                            raw_input=raw_input)
     tmp = None
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False,
@@ -139,10 +190,16 @@ def load_article(pmcid: str, *, api_key: str = "", email: str = DEFAULT_EMAIL,
 
     rows = [_row(ref) for ref in refs]
     usable = [r for r in rows if r["citing_sentence"]] if cited_only else rows
+    front = _front_identity(xml)
+    # A document whose publisher withheld the body still printed its own id and
+    # title in <front>. Reporting them as absent said "this XML carries no PMID"
+    # about an XML that carries one, which sends the reader after a parser bug
+    # instead of at the licensing note the same document also carries.
     return {
         "citing_pmcid": pmcid,
-        "citing_pmid": refs[0].source_pmid if refs else "",
-        "citing_title": refs[0].source_title if refs else "",
+        "citing_pmid": (refs[0].source_pmid if refs else "") or front["pmid"],
+        "citing_title": (refs[0].source_title if refs else "") or front["title"],
+        "full_text_withheld": not refs and "does not allow downloading" in xml,
         "counts": {
             "references_parsed": len(rows),
             # THE THREE NUMBERS THAT DIAGNOSE A THIN RESULT. A paper with 60
@@ -209,6 +266,61 @@ def load_abstract(pmid: str, *, api_key: str = "", email: str = DEFAULT_EMAIL,
             "source": "evidence_reader.fetch_abstract (EFetch db=pubmed)"}
 
 
+def load_pubmeta(pmid: str, *, api_key: str = "", email: str = DEFAULT_EMAIL,
+                 session=None) -> dict:
+    """The cited work's F5 metadata, through the finder the F5 seam itself uses.
+
+    WHY THIS EXISTS. F5 retrieval runs two streams -- ``pubmed_esearch_claim``
+    and ``pubmed_esearch_mesh`` -- and ``build_mesh_query`` over an empty term
+    list yields an empty query. So a packet carrying no ``cited_mesh_terms``
+    retrieved on one stream of two and said nothing about the half that never
+    ran: not a wrong answer, but a quietly thinner one, and the page offered no
+    field to fill and no route to fetch. The abstract route already pays for an
+    EFetch ``db=pubmed`` round trip and keeps only the abstract; this returns the
+    rest of the record it already fetched.
+
+    It is ``PubMedCandidateFinder.fetch_metadata``, not a second parse of PubMed
+    XML, so the MeSH terms that reach the packet are the ones the live finder
+    would itself have used for the cited work. A reimplementation here could
+    disagree with the seam and the disagreement would look like an F5 result.
+
+    ``found: false`` means PubMed answered and held no usable record. A transport
+    failure raises instead -- an outage must never reach a packet as an absence.
+    """
+    # Imported here, not at module scope: the finder pulls in the F5 retrieval
+    # stack, and the article/abstract/body routes must not pay for it.
+    from .f5_candidate_finder import CandidateFinderError, PubMedCandidateFinder
+
+    pmid = str(pmid or "").strip()
+    if not pmid.isdigit():
+        raise PmcError(f"{pmid!r} is not a PMID")
+    finder = PubMedCandidateFinder(api_key=api_key, email=email, session=session)
+    try:
+        record = finder.fetch_metadata(pmid)
+    except CandidateFinderError as exc:
+        raise PmcError(
+            f"PubMed metadata lookup failed for PMID {pmid}: {exc}. This is an "
+            "outage, not an empty record -- rerun rather than treating the "
+            "MeSH terms as absent") from exc
+    if record is None:
+        return {"pmid": pmid, "found": False, "mesh_terms": [],
+                "mesh_major_terms": [], "publication_types": [],
+                "pub_date": "", "title": "", "authors": [],
+                "source": "f5_candidate_finder.PubMedCandidateFinder.fetch_metadata"}
+    return {
+        "pmid": pmid,
+        "found": True,
+        "mesh_terms": list(record.get("mesh_terms") or []),
+        "mesh_major_terms": list(record.get("mesh_major_terms") or []),
+        "publication_types": list(record.get("publication_types") or []),
+        "pub_date": record.get("pub_date") or "",
+        "pub_date_precision": record.get("pub_date_precision") or "",
+        "title": record.get("title") or "",
+        "authors": list(record.get("authors") or []),
+        "source": "f5_candidate_finder.PubMedCandidateFinder.fetch_metadata",
+    }
+
+
 def load_fulltext(pmid: str, *, api_key: str = "", email: str = DEFAULT_EMAIL,
                   session=None) -> dict:
     """The cited work's PMC body, filtered to the sections F7 admits.
@@ -262,7 +374,10 @@ def main(argv=None) -> int:
     abstract.add_argument("pmid")
     body = sub.add_parser("fulltext", help="the cited work's F7-admissible body")
     body.add_argument("pmid")
-    for p in (article, abstract, body):
+    pubmeta = sub.add_parser("pubmeta",
+                             help="the cited work's MeSH terms, types and date")
+    pubmeta.add_argument("pmid")
+    for p in (article, abstract, body, pubmeta):
         p.add_argument("--ncbi-key", default="")
         p.add_argument("--email", default=DEFAULT_EMAIL)
     args = parser.parse_args(argv)
@@ -273,6 +388,8 @@ def main(argv=None) -> int:
                                email=args.email, cited_only=not args.all)
         elif args.cmd == "abstract":
             out = load_abstract(args.pmid, api_key=args.ncbi_key, email=args.email)
+        elif args.cmd == "pubmeta":
+            out = load_pubmeta(args.pmid, api_key=args.ncbi_key, email=args.email)
         else:
             out = load_fulltext(args.pmid, api_key=args.ncbi_key, email=args.email)
     except PmcError as exc:
