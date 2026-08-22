@@ -217,6 +217,32 @@ details{margin-top:12px}
 summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
 .err{color:var(--refuse); font:400 12.5px/1.5 "IBM Plex Mono",monospace}
 .rr{display:flex; flex-direction:column; gap:15px}
+.outcome.stop{background:var(--refuse-soft); border-color:var(--refuse)}
+.outcome.stop .big{color:var(--refuse)}
+
+/* ---- real-paper picker ---- */
+.hits{max-height:330px; overflow-y:auto; border:1px solid var(--rule);
+      border-radius:5px; background:var(--paper); margin-top:13px}
+.hit{display:grid; grid-template-columns:auto minmax(0,1fr); gap:11px; width:100%;
+     text-align:left; border:0; border-bottom:1px solid var(--rule-soft);
+     background:none; padding:11px 13px; cursor:pointer; color:inherit;
+     font:inherit; align-items:start}
+.hit:last-child{border-bottom:0}
+.hit:hover{background:var(--sunk)}
+.hit[aria-pressed="true"]{background:var(--accent-soft); box-shadow:inset 3px 0 0 var(--accent)}
+.hit .mk{font:600 11px/1.4 "IBM Plex Mono",monospace; color:var(--accent);
+         background:var(--card); border:1px solid var(--rule); padding:3px 6px;
+         border-radius:3px; white-space:nowrap}
+.hit>span:last-child{min-width:0}
+.hit .ti{display:block; font-size:12.5px; font-weight:500; line-height:1.4; overflow-wrap:anywhere}
+.hit .sn{display:block; font-size:12px; color:var(--ink-soft); line-height:1.45;
+         margin-top:4px; overflow-wrap:anywhere}
+.hit .tags{display:flex; gap:6px; flex-wrap:wrap; margin-top:6px}
+.hit .tags span{font:400 10.5px/1 "IBM Plex Mono",monospace; color:var(--ink-faint);
+                background:var(--sunk); border-radius:3px; padding:3px 5px}
+.counts{display:flex; gap:7px; flex-wrap:wrap; margin-top:11px}
+.x{border-left:3px solid var(--refuse); background:var(--refuse-soft);
+   padding:11px 13px; border-radius:0 4px 4px 0}
 </style>
 
 <div class="wrap">
@@ -226,7 +252,7 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
 </header>
 
 <div id="live" class="banner ok"><span class="dot"></span>Connected to the engine. Packets run from this page.</div>
-<div id="ro" class="banner">Published view &mdash; no engine behind this page. Author and copy a packet, run it in your venv, then paste the record into step 3. To run packets from the page itself: <code>python -m cre.f1.sandbox_server</code> from <code>citation_repair_F1_handoff</code>.</div>
+<div id="ro" class="banner">Published view &mdash; no engine behind this page, and no network either: loading a real PMC paper, fetching an abstract or a body, and the Band&nbsp;1 gate all need the local runner. Author and copy a packet, run it in your venv, then paste the record into step 3. For all of it: <code>python -m cre.f1.sandbox_server</code> from <code>citation_repair_F1_handoff</code>.</div>
 
 <div class="cols">
 
@@ -244,13 +270,39 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
   </div>
   <p class="note" id="wiring"></p>
   <p class="note" style="border-top:1px solid var(--rule-soft);padding-top:11px">
-    <strong>F1, F2 and F8 never run here, and they do not run in the band either.</strong>
+    <strong>F1, F2 and F8 are not band taxonomies and cannot be selected here.</strong>
     They are existence and metadata faults &mdash; a dead or mismatched PMID, a retracted
-    source &mdash; decided upstream, and the band only ever sees a row they already cleared.
-    This bench skips that pre-band gate on purpose, so <em>every packet you author is treated
-    as already cleared</em>. Give it a cited work that production would have excluded and it
-    will still answer, with an F3&ndash;F7 verdict that could never have been asked for.
+    source &mdash; decided upstream by Band 1, and the band only ever sees a row they
+    already cleared. This run skips that gate exactly as before, so <em>the packet you
+    author is judged as if it were already cleared</em>. Give it a cited work production
+    would have excluded and it will still answer, with an F3&ndash;F7 verdict that could
+    never have been asked for.
+    <br><br>What is new is that you can now put the same pair to the real gate as a
+    <em>separate</em> question &mdash; see <strong>Band 1</strong> in the right-hand
+    column. It runs the same <code>run.process_reference</code> a corpus run calls, and
+    it tells you whether the verdict below is one production could ever have produced.
   </p>
+</section>
+
+<section id="pmcsec">
+  <h2>Fill the pair from a real paper</h2>
+  <p class="note" style="margin:0 0 13px">
+    Everything below this section is yours to type, and synthetic input is the point of the
+    bench &mdash; the band judges the text in the packet, so a pair you invented gets a real
+    verdict about real prose. What it cannot give you is a real <em>document</em>: markers,
+    sentence boundaries, the section a claim came from, the seven other references cited in
+    the same sentence, and what the cited paper actually says. Load a PMC article and this
+    fills those in from the same <code>parse_pmc_xml</code> a corpus run uses.
+  </p>
+  <div class="row">
+    <div style="flex:1 1 220px"><label>Citing PMCID<span class="key">EFetch db=pmc</span></label>
+      <input id="f_loadpmc" placeholder="PMC4661126"></div>
+    <div style="flex:0 0 auto;display:flex;align-items:flex-end">
+      <button class="go" type="button" id="loadpmc">Load paper</button></div>
+  </div>
+  <div id="pmcstate" style="margin-top:13px"></div>
+  <div id="pmchits"></div>
+  <p class="note" id="pmcnote" style="display:none"></p>
 </section>
 
 <section>
@@ -281,7 +333,12 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
       <div><label>Journal<span class="key">cited_claimed.journal</span></label><input id="f_cjrnl"></div>
     </div>
     <div><label>Abstract<span class="key">cited_abstract</span></label>
-      <textarea id="f_abs" placeholder="The evidence coverage is judged against, on the default path."></textarea></div>
+      <textarea id="f_abs" placeholder="The evidence coverage is judged against, on the default path."></textarea>
+      <div class="acts" style="margin-top:9px">
+        <button class="ghost" type="button" id="getabs">Fetch the real abstract</button>
+        <span class="note" style="margin:0;align-self:center" id="absnote"></span>
+      </div></div>
+    <p class="note" id="realnote" style="display:none;margin:0"></p>
   </div>
 
   <div class="gate" id="g_F3">
@@ -308,7 +365,11 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
     </div>
     <label>Body sections<span class="key">cited_sections</span></label>
     <div class="bank" id="secs"></div>
-    <div class="acts"><button class="ghost" type="button" id="addsec">Add section</button></div>
+    <div class="acts">
+      <button class="ghost" type="button" id="addsec">Add section</button>
+      <button class="ghost" type="button" id="getbody">Fetch the real body</button>
+    </div>
+    <div id="bodystate" style="margin-top:11px"></div>
     <p class="note tight">F7 admits <code>methods</code>, <code>results</code>, <code>table</code> and <code>figure</code>. Never the abstract, introduction or discussion &mdash; those are where authors restate other people's findings, which is the thing F7 is trying to catch.</p>
   </div>
 
@@ -330,6 +391,44 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
 <div class="lane">
 
 <div class="gatebar ok" id="gatebar"></div>
+
+<section id="pbsec">
+  <h2>Band 1 &middot; would this pair reach the band at all?</h2>
+  <p class="note" style="margin:0 0 13px">
+    A different engine and a different question. <code>run.process_reference</code> &mdash;
+    the same per-reference function a corpus run calls for every row &mdash; asks whether
+    the cited work <em>exists</em> (F1), whether it is the work the reference
+    <em>claims</em> (F2), and whether it was <em>retracted</em> before it was cited (F8). A
+    pair it faults never reaches F3&ndash;F7 in production, whatever the band would have
+    said about it.
+  </p>
+  <div class="flag" style="margin-bottom:13px">
+    <b>This one is live and this one is now.</b> The band judges the text in your packet and
+    would give the same answer next year. The gate asks PubMed, Crossref and OpenAlex what
+    they hold <em>today</em>. <strong>A PMID you invented does not exist</strong>, so the gate
+    will look, find nothing, and return <code>F1</code> or a held state &mdash; correctly.
+    That is a fact about the identifier, not about the citation you were modelling. Load a
+    real paper on the left if you want this answer to be about your claim.
+  </div>
+  <div class="row">
+    <div style="flex:1 1 240px"><label style="display:flex;align-items:center;gap:8px;font-weight:400;margin:0">
+      <input type="checkbox" id="f_f8" checked style="width:auto;margin:0"> F8 retraction-timing gate
+    </label></div>
+    <div style="flex:1 1 200px"><label style="display:flex;align-items:center;gap:8px;font-weight:400;margin:0">
+      <input type="checkbox" id="f_pbdry" style="width:auto;margin:0"> Dry run &mdash; no network
+    </label></div>
+  </div>
+  <p class="note tight" id="f8note"></p>
+  <div id="pbbox" class="acts" style="display:none">
+    <button class="go" type="button" id="preband">Run the Band 1 gate</button>
+  </div>
+  <div id="pbstate" style="margin-top:13px"></div>
+  <div id="pbout"></div>
+  <details id="pbcmdwrap">
+    <summary>The equivalent command</summary>
+    <div class="cmd" id="pbcmd" style="margin-top:9px"></div>
+  </details>
+</section>
 
 <section>
   <h2><span class="step">1</span>Packet</h2>
@@ -401,6 +500,14 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
                     "f3_fetch_reflist","f3_resolve_pmcid","pubtypes_lookup"];
 
   var on = {};
+  // The reference loaded from a real document, when there is one. It carries
+  // four fields no form input shows -- publication_type, raw, volume, pages --
+  // because Band 1 reads them and the F3-F7 band does not: scope exclusion turns
+  // on the publication type, and the metadata comparison behind F2 weighs volume
+  // and pages. They are announced under the cited-work fields rather than
+  // travelling invisibly, and dropped the moment you say so.
+  var REAL = null;
+  var PMC = { article: null, picked: -1 };
   // Whether an engine is behind this page. Decided by asking, once, at load --
   // never assumed from the URL, because the same file is served from the local
   // runner and published as a static artifact and must be right in both.
@@ -450,6 +557,15 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
       claimed_pmid: $("f_cpmid").value.trim(),
       claimed_doi: $("f_cdoi").value.trim()
     };
+    if(REAL){
+      // Only fields the form has no input for. Anything visible above wins,
+      // because a value you edited must never be silently overridden by the
+      // document you loaded it from.
+      ["publication_type","raw","volume","pages","ext_link"].forEach(function(k){
+        if(REAL[k]) cited[k] = REAL[k];
+      });
+      if(REAL.first_author_is_collab) cited.first_author_is_collab = true;
+    }
     var yr = $("f_cyear").value.trim();
     var au = $("f_cauth").value.split(",").map(function(x){ return x.trim(); }).filter(Boolean);
     var jr = $("f_cjrnl").value.trim();
@@ -661,6 +777,7 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
     $("out").textContent = JSON.stringify(p, null, 2);
     paintGates(p);
     paintCmd(p);
+    paintPb();
   }
 
   /* ---------------- bank + sections ---------------- */
@@ -904,18 +1021,52 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
 
   /* ---------------- live run ---------------- */
 
-  function runState(html, cls){
-    $("runstate").innerHTML = html ? '<div class="' + (cls || "running") + '">' + html + '</div>' : "";
+  function stateInto(id, html, cls){
+    var el = $(id);
+    if(el) el.innerHTML = html ? '<div class="' + (cls || "running") + '">' + html + '</div>' : "";
+  }
+  function runState(html, cls){ stateInto("runstate", html, cls); }
+
+  // A spinner with a live clock, in any of the four status slots. Returns the
+  // function that stops it, so every caller has exactly one thing to remember.
+  function busy(id, msg){
+    var t0 = Date.now();
+    stateInto(id, '<span class="spin"></span><span>' + msg +
+                  '</span><span class="elapsed">0.0s</span>');
+    var tick = setInterval(function(){
+      var el = document.querySelector("#" + id + " .elapsed");
+      if(el) el.textContent = ((Date.now() - t0) / 1000).toFixed(1) + "s";
+    }, 100);
+    return function(){ clearInterval(tick); };
+  }
+
+  function post(url, body){
+    return fetch(url, { method:"POST", headers:{"Content-Type":"application/json"},
+                        body: JSON.stringify(body) })
+      .then(function(r){ return r.json(); });
+  }
+
+  // Every route here needs the local runner. Say which one and why, rather than
+  // failing with a fetch error that reads like the network is down.
+  function needLive(id, what){
+    stateInto(id, '<div class="flag">' + esc(what) + ' needs the local runner. ' +
+      'Start it with <b>python -m cre.f1.sandbox_server</b> from ' +
+      '<b>citation_repair_F1_handoff</b> and open the address it prints — a published ' +
+      'page has no Python, no NCBI and no key behind it.</div>', "");
+    return false;
   }
 
   function errBlock(res){
-    // The four failures mean different things to someone holding a packet, so
-    // they are never collapsed into one red box.
+    // The failures mean different things to someone holding a packet, so they
+    // are never collapsed into one red box.
     var K = {
-      refusal: ["The engine refused the packet",
+      refusal: ["The engine refused",
                 "This is the engine working, not an outage. It stopped before the first paid call."],
+      packet:  ["The request was malformed", "Nothing ran."],
       key:     ["No API key", "A dry run still works — it makes no model call."],
       model:   ["The provider rejected the call", "Nothing was judged. Check balance, key and model id."],
+      network: ["A lookup did not answer",
+                "Neither a refusal nor a defect: PubMed, Crossref or OpenAlex did not reply. Nothing was decided, and precision-first means an unanswered lookup is never read as an absence."],
       busy:    ["A run is already in flight", "Paid calls are serialized so two tabs cannot bill twice for one answer."],
       engine:  ["The run raised", "This is a defect, not a refusal. The traceback is below."]
     };
@@ -926,6 +1077,463 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
     if(res.traceback)
       h += '<details><summary>Traceback</summary><pre>' + esc(res.traceback) + '</pre></details>';
     return h;
+  }
+
+  /* ---------------- a real paper ----------------
+     Three separate retrievals against three different things, deliberately not
+     one button: the citing document, the cited work's abstract, and the cited
+     work's body are different fetches with different failure modes, and a
+     single "load everything" would report one of them and hide the other two. */
+
+  function pill(cls, text){
+    return '<span class="pill ' + cls + '">' + esc(text) + '</span>';
+  }
+
+  function loadPmc(){
+    var id = $("f_loadpmc").value.trim();
+    $("pmchits").innerHTML = "";
+    if(!id){
+      stateInto("pmcstate", '<div class="err">Enter a PMCID, e.g. PMC4661126.</div>', "x");
+      return;
+    }
+    if(!LIVE) return needLive("pmcstate", "Loading a paper");
+    var stop = busy("pmcstate", "EFetch db=pmc, then parse_pmc_xml over " + id);
+    $("loadpmc").disabled = true;
+    post("/api/pmc", { pmcid: id }).then(function(res){
+      stop();
+      $("loadpmc").disabled = false;
+      if(!res.ok){ stateInto("pmcstate", errBlock(res), "x"); return; }
+      PMC.article = res.result;
+      PMC.picked = -1;
+      paintHits(res.elapsed);
+    }).catch(function(err){
+      stop();
+      $("loadpmc").disabled = false;
+      stateInto("pmcstate", errBlock({kind:"engine", error:String(err && err.message || err)}), "x");
+    });
+  }
+
+  function paintHits(secs){
+    var a = PMC.article;
+    if(!a){ $("pmcstate").innerHTML = ""; $("pmchits").innerHTML = ""; return; }
+    var c = a.counts;
+    var unlinked = c.references_parsed - c.with_citance;
+    stateInto("pmcstate",
+      '<div style="font-size:13px;line-height:1.5">' +
+      '<b>' + esc(a.citing_title || a.citing_pmcid) + '</b><div class="counts">' +
+      pill("flat", a.citing_pmcid) +
+      (a.citing_pmid ? pill("flat", "PMID " + a.citing_pmid) : pill("silent", "no PMID in the XML")) +
+      pill("flat", c.references_parsed + " references parsed") +
+      pill(c.with_citance ? "wired" : "refuse", c.with_citance + " carry a citance") +
+      (unlinked > 0 ? pill("silent", unlinked + " do not, and are not offered") : "") +
+      (secs !== undefined ? pill("flat", secs + "s") : "") +
+      '</div></div>', "");
+    // THE COMPARISON IS THE DIAGNOSTIC. A paper with 60 parsed references and 2
+    // carrying a sentence is a citance-linking miss inside the parser, not a
+    // paper with two citations, and only both numbers together say which.
+    var note = $("pmcnote");
+    note.style.display = "block";
+    note.innerHTML = c.with_citance === 0
+      ? 'Not one reference came back with a citing sentence. That is a parser result, not a property of the paper &mdash; <code>link_citances</code> found no marker it could resolve. Nothing here is pickable.'
+      : (unlinked > 0
+        ? 'The ' + unlinked + ' references without a citing sentence are withheld, not hidden: the taxonomy is defined over references a marker in the body points at, and one nothing cites carries no claim to judge.'
+        : 'Every parsed reference resolved to a citing sentence.') +
+        ' A reference with <em>no PMID</em> is shown as such &mdash; the bibliography entry did not print one, and nothing is invented to fill the gap.';
+    var rows = a.references.map(function(r, i){
+      var cc = r.cited_claimed || {};
+      var tags = [];
+      tags.push(cc.claimed_pmid ? "PMID " + cc.claimed_pmid : "no PMID");
+      if(cc.claimed_doi) tags.push("DOI");
+      if(cc.year) tags.push(String(cc.year));
+      if(cc.journal) tags.push(cc.journal);
+      if(r.co_cited_with) tags.push("co-cited with " + r.co_cited_with);
+      if(r.citing_source_section) tags.push(r.citing_source_section);
+      return '<button class="hit" type="button" data-hit="' + i + '" aria-pressed="' +
+        (PMC.picked === i ? "true" : "false") + '">' +
+        '<span class="mk">' + esc(r.cited_marker || String(i + 1)) + '</span><span>' +
+        '<span class="ti">' + esc(cc.title || "(the bibliography entry printed no title)") + '</span>' +
+        '<span class="sn">' + esc(r.citing_sentence || "") + '</span>' +
+        '<span class="tags">' + tags.map(function(t){ return '<span>' + esc(t) + '</span>'; }).join("") +
+        '</span></span></button>';
+    }).join("");
+    $("pmchits").innerHTML = rows ? '<div class="hits">' + rows + '</div>' : "";
+  }
+
+  function pickHit(i){
+    var a = PMC.article;
+    if(!a || !a.references[i]) return;
+    PMC.picked = i;
+    var r = a.references[i], cc = r.cited_claimed || {};
+    $("f_cid").value    = r.citation_id || "";
+    $("f_pmcid").value  = a.citing_pmcid || "";
+    $("f_pmid").value   = a.citing_pmid || "";
+    $("f_sent").value   = r.citing_sentence || "";
+    $("f_ctitle").value = cc.title || "";
+    $("f_cpmid").value  = cc.claimed_pmid || "";
+    $("f_cdoi").value   = cc.claimed_doi || "";
+    $("f_cyear").value  = cc.year == null ? "" : String(cc.year);
+    $("f_cauth").value  = (cc.authors || []).join(", ");
+    $("f_cjrnl").value  = cc.journal || "";
+    // NEITHER THE ABSTRACT NOR THE BODY. Both are separate fetches against a
+    // DIFFERENT paper -- the cited one -- and clearing them here would make a
+    // stale abstract look like the new work's, while blanking them would look
+    // like the new work has none. They stay as they are until you fetch.
+    REAL = {
+      publication_type: cc.publication_type || "",
+      raw: cc.raw || "", volume: cc.volume || "", pages: cc.pages || "",
+      ext_link: cc.ext_link || "",
+      first_author_is_collab: !!cc.first_author_is_collab,
+      from: r.citation_id
+    };
+    paintHits();
+    paintReal();
+    render();
+    $("absnote").textContent = "";
+    stateInto("bodystate", "", "");
+  }
+
+  function paintReal(){
+    var n = $("realnote");
+    if(!REAL){ n.style.display = "none"; n.innerHTML = ""; return; }
+    var carried = ["publication_type","volume","pages","raw","ext_link"]
+      .filter(function(k){ return REAL[k]; });
+    n.style.display = "block";
+    n.innerHTML = carried.length
+      ? 'Carrying ' + carried.length + ' field' + (carried.length === 1 ? "" : "s") +
+        ' from <code>' + esc(REAL.from) + '</code> that no input above shows &mdash; <code>' +
+        carried.join('</code>, <code>') + '</code>. The <strong>Band 1 gate reads these</strong> ' +
+        '(scope exclusion turns on the publication type; the F2 metadata comparison weighs ' +
+        'volume and pages) and the F3&ndash;F7 band ignores them. They describe the reference ' +
+        'as the document printed it, so they will not follow an edit you make above. ' +
+        '<a href="#" id="dropreal">Drop them</a>.'
+      : 'Loaded from <code>' + esc(REAL.from) + '</code>. The bibliography entry printed no ' +
+        'publication type, volume or pages, so the Band 1 gate has nothing extra to compare.';
+  }
+
+  function getAbs(){
+    var pmid = $("f_cpmid").value.trim();
+    var note = $("absnote");
+    if(!/^\d+$/.test(pmid)){
+      note.innerHTML = '<span class="err">Needs the cited work&rsquo;s PMID.</span>';
+      return;
+    }
+    if(!LIVE){ note.innerHTML = '<span class="err">Needs the local runner.</span>'; return; }
+    note.textContent = "Fetching…";
+    $("getabs").disabled = true;
+    post("/api/abstract", { pmid: pmid }).then(function(res){
+      $("getabs").disabled = false;
+      if(!res.ok){ note.innerHTML = '<span class="err">' + esc(res.error || "") + '</span>'; return; }
+      var r = res.result;
+      if(!r.found){
+        // LEFT EXACTLY AS IT WAS. PubMed answering "this record has no abstract"
+        // is a fact about the paper; overwriting the box with nothing would make
+        // it indistinguishable from a fetch that never happened.
+        note.innerHTML = 'PubMed holds <strong>no abstract</strong> for PMID ' + esc(pmid) +
+          ' &mdash; a real state of a real paper, not a failed fetch. The box above is left untouched.';
+        return;
+      }
+      $("f_abs").value = r.abstract;
+      note.innerHTML = esc(String(r.abstract.length)) + ' characters, EFetch <code>db=pubmed</code>, ' +
+        'through the band&rsquo;s own <code>evidence_reader</code>.';
+      render();
+    }).catch(function(err){
+      $("getabs").disabled = false;
+      note.innerHTML = '<span class="err">' + esc(String(err && err.message || err)) + '</span>';
+    });
+  }
+
+  function getBody(){
+    var pmid = $("f_cpmid").value.trim();
+    if(!/^\d+$/.test(pmid)){
+      stateInto("bodystate", '<div class="err">Needs the cited work&rsquo;s PMID: the reader resolves PMID &rarr; PMCID before it can fetch a body.</div>', "x");
+      return;
+    }
+    if(!LIVE) return needLive("bodystate", "Fetching a body");
+    var stop = busy("bodystate", "Resolving PMID " + pmid + " to a PMCID, then EFetch db=pmc");
+    $("getbody").disabled = true;
+    post("/api/fulltext", { pmid: pmid }).then(function(res){
+      stop();
+      $("getbody").disabled = false;
+      if(!res.ok){ stateInto("bodystate", errBlock(res), "x"); return; }
+      var r = res.result, c = r.counts;
+      var bits = '<div class="counts">' +
+        (r.pmcid ? pill("flat", r.pmcid) : pill("silent", "no PMCID")) +
+        pill(r.resolved ? "wired" : "refuse", r.resolved ? "resolved" : "not resolved") +
+        pill(r.retrieval_complete ? "wired" : "silent",
+             r.retrieval_complete ? "retrieval complete" : "retrieval INCOMPLETE") +
+        pill("flat", c.returned + " sections read") +
+        pill(c.f7_admissible ? "wired" : "refuse", c.f7_admissible + " F7-admissible") +
+        (c.dropped_not_body ? pill("silent", c.dropped_not_body + " dropped, not body") : "") +
+        '</div>';
+      var why = "";
+      if(!c.f7_admissible){
+        why = '<div class="flag bad" style="margin-top:11px"><b>Nothing was loaded.</b><br>' +
+          (r.incomplete_reasons.length
+            ? 'The reader reports <b>' + esc(r.incomplete_reasons.join(", ")) + '</b>. '
+            : '') +
+          (r.sections_present.length
+            ? 'It found ' + esc(r.sections_present.join(", ")) + ' and F7 admits none of them: it reads ' +
+              'methods, results, tables and figures only, never the abstract, introduction or discussion, ' +
+              'because those are exactly where authors restate other people&rsquo;s findings.'
+            : 'It found no sections at all &mdash; most often the paper is outside the PMC Open Access subset, ' +
+              'which is a fact about licensing rather than about the paper.') +
+          '</div>';
+      }
+      if(!r.retrieval_complete && c.f7_admissible){
+        why = '<div class="flag" style="margin-top:11px"><b>Retrieval is incomplete: ' +
+          esc(r.incomplete_reasons.join(", ") || "unstated") + '.</b><br>' +
+          'Loaded anyway, and flagged rather than upgraded. <code>retrieval_complete</code> is the ' +
+          'predicate that licenses reading silence as absence &mdash; with it false, a section the ' +
+          'body never mentions cannot be taken as the paper not saying it.</div>';
+      }
+      stateInto("bodystate", bits + why, "");
+      if(!c.f7_admissible) return;
+      if(r.pmcid) $("f_cpmcid").value = r.pmcid;
+      $("secs").innerHTML = "";
+      r.sections.forEach(function(sec){ addSection(sec); });
+      bare();
+      render();
+    }).catch(function(err){
+      stop();
+      $("getbody").disabled = false;
+      stateInto("bodystate", errBlock({kind:"engine", error:String(err && err.message || err)}), "x");
+    });
+  }
+
+  /* ---------------- Band 1: the pre-band gate ----------------
+     A different engine answering a different question, so it gets its own
+     button, its own status line and its own output. Nothing below is computed
+     here: the label, the class and every measurement are read straight out of
+     what run.process_reference returned. */
+
+  //: How each label is rendered and what it MEANS FOR THE VERDICT BELOW, which
+  //: is the only reason someone runs this from a judgment bench.
+  var DISP = {
+    cleared: ["clean", "Band 1 cleared this reference.",
+      "The claimed identifier resolves and the metadata matches. In production this row goes on to the F3–F7 band, so a verdict in step 3 is one production could actually have produced."],
+    same_work: ["clean", "Proved the same work, or a variant of it.",
+      "A deterministic identity rule settled it — a translation, a correction, a canonical retitle. Admitted to the band AND not an F2 clear: it leaves the F2 scoreable denominator rather than counting as a correct citation, because counting it would inflate a precision-only metric."],
+    F1: ["stop", "F1 — the cited work does not exist.",
+      "The identifier is dead or mismatched, it survived the LLM filter, and every database answered and found nothing. In production this reference never reaches the band."],
+    F2: ["stop", "F2 — this is not the work the reference claims.",
+      "The identifier resolves, to a different paper. In production this reference never reaches the band, so any F3–F7 verdict in step 3 is one that could never have been asked for."],
+    F8: ["stop", "F8 — the cited work was retracted before it was cited.",
+      "A retraction notice was in force at least 31 days before the citing paper appeared. Decided in the existence layer, deterministically, and never sent to the band."],
+    unverifiable: ["hold", "Held — no verdict reached.",
+      "Precision-first, and this is the engine working. A lookup that did not answer holds the reference instead of being read as an absence: an accusation that a work exists nowhere has to be backed by having actually looked everywhere."],
+    unscoreable: ["hold", "Not a scoreable comparison.",
+      "The pair cannot bear a title-vs-title comparison at all — a non-article reference, a placeholder, a book cited as a chapter, or an F8 boundary that never arrived. A counted bucket, excluded from the F2 numerator, never silently dropped."],
+    human_review: ["hold", "Queued for a human.",
+      "The deterministic layer could not settle the identity and neither could the searches. Unjudged, and unjudged is never reported as a finding."]
+  };
+
+  function tri(v){
+    // TRUE / FALSE / NOT MEASURED, never a blank. The whole discipline of this
+    // engine is that None and False mean opposite things: False is "we looked
+    // and it is absent", None is "nobody looked". Collapsing them in the display
+    // would undo the distinction the code is built around.
+    if(v === true)  return '<span class="pill wired">true</span>';
+    if(v === false) return '<span class="pill refuse">false</span>';
+    return '<span class="pill flat">not measured</span>';
+  }
+  function val(v){
+    if(v === null || v === undefined || v === "") return '<span class="pill flat">—</span>';
+    return esc(String(v));
+  }
+  function rawrow(label, html){
+    return '<tr><td>' + esc(label) + '</td><td class="m">' + html + '</td></tr>';
+  }
+
+  function paintPb(){
+    var f8 = $("f_f8").checked, dry = $("f_pbdry").checked;
+    var pmid = $("f_pmid").value.trim();
+    $("f8note").innerHTML = f8
+      ? (/^\d+$/.test(pmid)
+          ? 'On. The gate compares the retraction-notice date against the citing paper’s publication date, and reaches that date through <code>citing_pmid</code> — which is set.'
+          : '<strong>On, and it will refuse:</strong> the timing gate needs the <em>citing</em> paper’s PMID, the third field under “The pair”. Without a citing date <code>assess_f8_timing</code> returns unresolved and <code>decide</code> turns that into <code>unscoreable</code> for <em>every</em> pair, before F1 or F2 is weighed — so it refuses rather than hand back a uniform label that means something else.')
+      : 'Off. The retraction question falls back to the tri-state on the cited record alone — is <code>Retracted Publication</code> among its PubMed types — with no notice-date comparison, and F8 cannot be asserted from it.';
+    var parts = ["python -m cre.f1.sandbox_preband packet.json"];
+    if(!f8) parts.push("  --no-f8-timing");
+    if(dry) parts.push("  --dry-run");
+    $("pbcmd").textContent = (dry ? "" : 'ANTHROPIC_API_KEY="$(cat ~/.cre_bench_key)" \\\n') +
+                             parts.join(" \\\n");
+    var b = $("preband");
+    if(b) b.textContent = dry ? "Dry run — no network" : "Run the Band 1 gate";
+  }
+
+  function runPreband(){
+    if(!LIVE) return needLive("pbstate", "The Band 1 gate");
+    var dry = $("f_pbdry").checked;
+    var stop = busy("pbstate", dry
+      ? "Building the reference and resolving the reachable routes"
+      : "Live lookups — PubMed, then Crossref and OpenAlex if the pair is flagged");
+    $("preband").disabled = true;
+    $("pbout").innerHTML = "";
+    post("/api/preband", { packet: build(), dry_run: dry, f8_timing: $("f_f8").checked })
+      .then(function(res){
+        stop();
+        $("preband").disabled = false;
+        if(!res.ok){ stateInto("pbstate", errBlock(res), "x"); return; }
+        stateInto("pbstate", '<span>Done in ' + esc(String(res.elapsed)) + 's.</span>', "running");
+        paintPreband(res.result);
+      }).catch(function(err){
+        stop();
+        $("preband").disabled = false;
+        stateInto("pbstate", errBlock({kind:"engine", error:String(err && err.message || err)}), "x");
+      });
+  }
+
+  function paintPreband(d){
+    var html = ['<div class="rr" style="margin-top:15px">'];
+
+    if(d.dry_run){
+      var pl = d.plan;
+      html.push('<div class="outcome hold"><span class="big">DRY</span><div class="meta">' +
+        'Nothing was looked up. This is what the gate <em>would</em> ask — not a prediction of ' +
+        'the label, which is the engine’s to return.</div></div>');
+      html.push('<div><h3>What it would reach</h3>' + table(["Route",""],
+        pl.reachable_lookups.map(function(x){ return '<tr><td colspan="2">' + esc(x) + '</td></tr>'; }).join("")) +
+        '</div>');
+      html.push('<div><h3>The reference it built</h3>' + table(["Field","Value"],
+        rawrow("citation_id", val(pl.citation_id)) +
+        rawrow("canonical id", tri(pl.canonical_citation_id)) +
+        rawrow("claimed PMID", val(pl.claimed_pmid)) +
+        rawrow("claimed DOI", val(pl.claimed_doi)) +
+        rawrow("citing PMID", val(pl.citing_pmid)) +
+        rawrow("F8 timing", tri(pl.f8_timing)) +
+        rawrow("excluded offline", tri(pl.scope_excluded_offline))) +
+        '<p class="note">A non-canonical <code>citation_id</code> does not stop this bench, but ' +
+        '<code>preband_disposition.build_rows</code> refuses one: a real disposition artifact ' +
+        'requires <code>&lt;citing_pmcid&gt;:&lt;ref_id&gt;</code>.</p></div>');
+      html.push('</div>');
+      $("pbout").innerHTML = html.join("");
+      return;
+    }
+
+    var meta = DISP[d.label] || ["hold", d.label, "This label is outside the disposition schema this page knows."];
+    html.push('<div class="outcome ' + meta[0] + '">' +
+      '<span class="big">' + esc(d.label || "?") + '</span>' +
+      '<div class="meta"><b>' + esc(meta[1]) + '</b><br>' + esc(meta[2]) + '</div></div>');
+
+    if(!d.known_label){
+      html.push('<div class="flag bad"><b>' + esc(d.label) + ' is not in preband_disposition’s ' +
+        'label vocabulary.</b><br>Reported as-is rather than sorted into a class it may not belong ' +
+        'in. If the engine gained a label, this page has not been told about it.</div>');
+    }
+
+    html.push('<div><h3>What it authorises</h3>' + table(["Question","","What it means for step 3"],
+      '<tr><td>Reaches the F3–F7 band</td><td class="m">' + tri(d.band2_admitted) +
+      '</td><td>' + (d.band2_admitted
+        ? 'A verdict in step 3 is one production could have produced.'
+        : 'In production this pair never reaches the band, so an F3–F7 verdict below is one that could never have been asked for.') + '</td></tr>' +
+      '<tr><td>Counts as an F2 clear</td><td class="m">' + tri(d.cleared) +
+      '</td><td>' + (d.cleared !== d.band2_admitted
+        ? 'The two differ, which is the point of carrying both: this row is admitted to the band AND leaves the F2 scoreable denominator. One boolean cannot say that.'
+        : 'Same as the line above for this label.') + '</td></tr>') + '</div>');
+
+    html.push('<div><h3>The engine’s own words</h3>' + table(["Field","Value"],
+      rawrow("class", '<span class="pill ' +
+        (d["class"] === "fault" ? "refuse" : d["class"] === "admit" ? "wired" : "silent") +
+        '">' + esc(d["class"]) + '</span>') +
+      rawrow("confidence", val(d.confidence)) +
+      rawrow("decided_by", val(d.decided_by)) +
+      '<tr><td>rationale</td><td>' + esc(d.rationale || "—") + '</td></tr>') + '</div>');
+
+    var ri = d.resolved_identifier || {};
+    html.push('<div><h3>What Band 1 actually resolved</h3>' + table(["Field","Value"],
+      rawrow("value", val(ri.value)) + rawrow("kind", val(ri.kind)) +
+      rawrow("source", val(ri.source)) + rawrow("status", val(ri.status))) +
+      '<p class="note">Never guessed. An empty value means Band 1 resolved nothing — which is a ' +
+      'different fact from the reference having claimed nothing. This is the field the disposition ' +
+      'artifact carries so the band does not re-derive identity from the claimed PMID and discard ' +
+      'everything resolved by DOI.</p></div>');
+
+    var log = (d.reference || {}).log || {};
+    var ret = (d.reference || {}).retrieved || {};
+    html.push('<div><h3>The evidence it decided on</h3>' + table(["Signal","Value"],
+      rawrow("claimed PMID present", tri(log.pmid_present)) +
+      rawrow("claimed PMID resolved", tri(log.pmid_resolved)) +
+      rawrow("transport status", val(log.pmid_transport_status)) +
+      rawrow("title similarity", val(log.title_similarity)) +
+      rawrow("composite match score", val(log.match_score)) +
+      rawrow("first author matches", tri(log.first_author_match)) +
+      rawrow("authors match", tri(log.author_match)) +
+      rawrow("year matches", tri(log.year_match)) +
+      rawrow("journal matches", tri(log.journal_match)) +
+      rawrow("volume matches", tri(log.volume_match)) +
+      rawrow("pages match", tri(log.pages_match)) +
+      rawrow("DOI matches", tri(log.doi_match)) +
+      rawrow("first-author tripwire", tri(log.author_tripwire)) +
+      rawrow("mismatch flagged", tri(log.mismatch_flagged)) +
+      rawrow("same-work reason", val(log.same_work_reason)) +
+      rawrow("unscoreable reason", val(log.unscoreable_reason)) +
+      rawrow("LLM filter verdict", val(log.llm_verdict)) +
+      rawrow("best title-search score", val(log.title_search_best_score)) +
+      rawrow("DOI lookup status", val(log.doi_lookup_status))) +
+      '<p class="note"><b>not measured</b> is not <b>false</b>, and the engine is built on that ' +
+      'difference: <code>false</code> means it looked and the thing is absent, <code>not ' +
+      'measured</code> means nobody looked. An unanswered lookup can never raise the confidence ' +
+      'of an accusation.</p></div>');
+
+    html.push('<div><h3>Retraction (F8)</h3>' + table(["Field","Value"],
+      rawrow("retracted", tri(log.retracted)) +
+      rawrow("timing status", val(log.f8_timing_status)) +
+      rawrow("timing reason", val(log.f8_timing_reason)) +
+      rawrow("notice date", val(log.f8_notice_date)) +
+      rawrow("earliest citing date", val(log.f8_citing_date_earliest)) +
+      rawrow("gap, days", val(log.f8_timing_gap_days)) +
+      rawrow("boundary attempts", val((log.f8_timing_attempts || []).length))) +
+      '<p class="note">Three states, and the third is load-bearing. <b>not measured</b> means the ' +
+      'lookup failed or there was no resolved record to look up — an EFetch outage must never ' +
+      'read as “not retracted” and let a retracted source clear.</p></div>');
+
+    var hits = log.db_hits || {};
+    var keys = Object.keys(hits);
+    if(keys.length){
+      html.push('<div><h3>Confirmation sweep</h3>' + table(["Database","Best title score"],
+        keys.map(function(k){
+          // NOT COLOURED BY VALUE. A score is a similarity, not a verdict: the
+          // match threshold lives in decide(), is not in this payload, and a
+          // green 60.5 would assert a find that nothing here can support. Only
+          // the one distinction the engine actually draws is drawn.
+          return '<tr' + (hits[k] === null ? ' class="free"' : '') + '><td>' + esc(k) + '</td><td class="m">' +
+            (hits[k] === null ? '<span class="pill silent">no answer</span>'
+                              : esc(String(hits[k]))) +
+            '</td></tr>';
+        }).join("")) +
+        '<p class="note"><b>0.0</b> and <b>no answer</b> are not interchangeable. 0.0 means searched, ' +
+        'answered, found nothing — that is evidence. No answer means the search errored or was ' +
+        'never issued, and is evidence of nothing in either direction. F1 is unreachable unless ' +
+        '<em>every</em> database answered. The scores are similarities against the claimed title; ' +
+        'which of them counts as finding the work is <code>decide</code>&rsquo;s threshold, not a ' +
+        'judgement this page makes.</p></div>');
+    }
+
+    if(ret.title || ret.pmid){
+      html.push('<div><h3>The record PubMed returned</h3>' + table(["Field","Value"],
+        rawrow("title", esc(ret.title || "—")) + rawrow("journal", val(ret.journal)) +
+        rawrow("year", val(ret.year)) + rawrow("PMID", val(ret.pmid)) +
+        rawrow("DOI", val(ret.doi)) +
+        rawrow("publication types", val((ret.publication_types || []).join(", ")))) + '</div>');
+    }
+
+    var rc = d.receipt || {};
+    html.push('<div><h3>Model calls</h3>' + table(["Seam","Calls"],
+      (Object.keys(rc.calls_by_seam || {}).length
+        ? Object.keys(rc.calls_by_seam).map(function(k){
+            return '<tr><td class="m">' + esc(k) + '</td><td class="n">' + rc.calls_by_seam[k] + '</td></tr>';
+          }).join("")
+        : '<tr class="free"><td colspan="2">none — the pair never reached the expensive path</td></tr>') +
+      '<tr><td><b>total</b></td><td class="n"><b>' + (rc.total_calls || 0) + '</b></td></tr>') +
+      '<p class="note">Booked under <code>f1_llm_filter</code>, the same seam name ' +
+      '<code>production_launcher</code> uses, so a bench receipt and a production receipt read the ' +
+      'same way. Zero is the common case: a retracted source, a proved same-work, an unanswered ' +
+      'claimed-PMID fetch and an exact-DOI case all reach the decision without paying for it.</p></div>');
+
+    html.push('<details><summary>The whole thing, as the engine returned it</summary><pre>' +
+      esc(JSON.stringify(d, null, 2)) + '</pre></details>');
+    html.push('</div>');
+    $("pbout").innerHTML = html.join("");
   }
 
   function runLive(){
@@ -976,6 +1584,7 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
       (st.key && st.key.present ? 'from <code>' + esc(st.key.source) + '</code>'
                                 : '<strong>not found</strong>, so dry runs only') + '.';
     $("runbox").style.display = "flex";
+    $("pbbox").style.display = "flex";
     $("cmdwrap").open = false;
     $("cmdsum").textContent = "The equivalent command, to run it yourself";
     $("recintro").textContent =
@@ -1024,6 +1633,17 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
     }
     if(t.id === "addp"){ addPaper(); return; }
     if(t.id === "addsec"){ addSection(); return; }
+    if(t.id === "loadpmc"){ loadPmc(); return; }
+    if(t.id === "getabs"){ getAbs(); return; }
+    if(t.id === "getbody"){ getBody(); return; }
+    if(t.id === "preband"){ runPreband(); return; }
+    if(t.id === "dropreal"){
+      ev.preventDefault();
+      REAL = null; paintReal(); render();
+      return;
+    }
+    var hit = t.closest && t.closest("[data-hit]");
+    if(hit){ pickHit(parseInt(hit.getAttribute("data-hit"), 10)); return; }
     if(t.id === "loadex"){ loadExample(); return; }
     if(t.id === "run"){ runLive(); return; }
     if(t.id === "readrec"){ readRecord(); return; }
@@ -1063,7 +1683,8 @@ summary{font-size:12.5px; color:var(--ink-soft); cursor:pointer; padding:3px 0}
     render();
   });
   document.addEventListener("change", function(ev){
-    if(ev.target.id === "f_dry" || ev.target.id === "f_verify") render();
+    var id = ev.target.id;
+    if(id === "f_dry" || id === "f_verify" || id === "f_f8" || id === "f_pbdry") render();
   });
 
   // ASK, DO NOT ASSUME. Served by sandbox_server this resolves and the page runs
