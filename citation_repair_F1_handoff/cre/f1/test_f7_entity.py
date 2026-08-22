@@ -523,18 +523,36 @@ def test_lexically_different_but_equivalent_relation_proceeds():
     assert assessment.state is EntityState.DIFFERENT_ENTITY_SUPPORTED
 
 
-def test_relation_component_mismatch_holds():
-    (assessment,), _ = run(
+# THE RELATION TUPLE NO LONGER GATES F7 (decision_rule_version
+# f7_entity_scope_v2). These three cases pinned the opposite contract, and that
+# contract is the reason a citation naming the wrong drug went unreported
+# whenever it also paraphrased the finding or dropped a hedge. F7 answers one
+# question -- does the paper's finding concern a different entity -- and a
+# magnitude or wording difference is not evidence about that. Magnitude is F6's,
+# strength and direction are F4's. The components are still COMPARED and still
+# recorded; they just no longer veto.
+def test_relation_component_mismatch_does_not_gate():
+    (assessment,), assessor = run(
         relation_comparator=lambda c, e, *, call_llm: relation_all_match(direction="mismatch"))
-    assert assessment.state is EntityState.UNJUDGEABLE
-    assert "relation_mismatch" in assessment.rationale
+    assert assessment.state is EntityState.DIFFERENT_ENTITY_SUPPORTED
+    # ...and the mismatch is still on the record for F4/F6 to read.
+    tr = assessor.records[0]["tuple_records"][0]
+    assert tr["relation_component_result"]["direction"] == "mismatch"
 
 
-def test_relation_component_unknown_holds():
+def test_relation_component_unknown_does_not_gate():
     (assessment,), _ = run(
         relation_comparator=lambda c, e, *, call_llm: relation_all_match(object="unknown"))
-    assert assessment.state is EntityState.UNJUDGEABLE
-    assert "relation_mismatch" in assessment.rationale
+    assert assessment.state is EntityState.DIFFERENT_ENTITY_SUPPORTED
+
+
+def test_verifier_relation_equivalence_does_not_gate():
+    # Schema E still ANSWERS relation_tuple_equivalent and the answer is kept;
+    # it is simply not one of the four booleans that must hold to accuse.
+    (assessment,), assessor = run(ver=ver_llm(verifier_json(equivalent=False)))
+    assert assessment.state is EntityState.DIFFERENT_ENTITY_SUPPORTED
+    assert assessor.records[0]["tuple_records"][0]["verifier"][
+        "relation_tuple_equivalent"] is False
 
 
 # --------------------------------------------------------------------------

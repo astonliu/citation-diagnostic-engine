@@ -85,7 +85,11 @@ def test_every_f7_verifier_agreement_combination(values):
 
     assessor = build(ver=verifier)
     assessment = assessor((CLAIM,))[0]
-    expected = EntityState.DIFFERENT_ENTITY_SUPPORTED if all(values) else EntityState.UNJUDGEABLE
+    # `equivalent` (index 3) is answered and recorded but does NOT gate: F7 owns
+    # the entity question only (decision_rule_version f7_entity_scope_v2). The
+    # other four still all have to hold.
+    gating = [values[i] for i in (0, 1, 2, 4)]
+    expected = EntityState.DIFFERENT_ENTITY_SUPPORTED if all(gating) else EntityState.UNJUDGEABLE
     assert assessment.state is expected
     assert len(prompts) == 1
     assert "DIFFERENT_ENTITY_SUPPORTED" not in prompts[0]

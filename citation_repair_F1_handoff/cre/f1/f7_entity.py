@@ -313,9 +313,19 @@ class F7Policy:
     # stamped here for the audit record).
     attribution_prompt_version: str = "f7_attribution_v1"   # schema A
     tuples_prompt_version: str = "f7_tuples_v1"             # schema B
-    evidence_prompt_version: str = "f7_evidence_v1"         # schema C
+    evidence_prompt_version: str = "f7_evidence_v2"         # schema C
     relation_prompt_version: str = "f7_relation_v1"         # schema D
     verifier_prompt_version: str = "f7_verifier_v1"         # schema E
+    # F7's SCOPE. v1 required the claimed and evidence relation tuples to be
+    # equivalent on all four components before it would call an entity
+    # substitution -- so a citation that named the wrong drug went unreported
+    # whenever it also paraphrased the finding or dropped a hedge. F7 owns ONE
+    # question, "does the paper's finding concern a different entity than the
+    # one the claim names", and the relation tuple is not that question:
+    # magnitude belongs to F6, strength and direction to F4. v2 records the
+    # relation comparison and stops gating on it. This field is covered by
+    # policy_sha256, so every record says which scope produced it.
+    decision_rule_version: str = "f7_entity_scope_v2"
     authorities_json: str = "{}"      # canonical {type: F7Authority}; empty => UNJUDGEABLE
     cross_ontology_lock: str = ""     # "authority|version|lookup_date" or blank
     generator_model_id: str = ""
@@ -553,6 +563,13 @@ _SCHEMA_E_BOOL_KEYS = (
     "relation_tuple_equivalent", "all_load_bearing_tuples_enumerated",
 )
 _SCHEMA_E_KEYS = frozenset(set(_SCHEMA_E_BOOL_KEYS) | {"rationale"})
+# The verifier still ANSWERS all five (they are parsed, validated, and kept in
+# the record); only these four have to be TRUE for F7 to accuse.
+# `relation_tuple_equivalent` is deliberately absent: see decision_rule_version.
+_SCHEMA_E_REQUIRED_TRUE = (
+    "entities_genuinely_differ", "papers_own_finding", "direct_attribution",
+    "all_load_bearing_tuples_enumerated",
+)
 
 _NORMALIZE_KEYS = frozenset(
     {"authority", "version", "lookup_date", "source_db", "mapping_method",
@@ -844,9 +861,14 @@ No prose or markdown fences.
 
 F7_EVIDENCE_PROMPT = """\
 You read the cited work's OWN body sections and locate, for ONE claimed entity/relation, (1) the
-entity the paper's results actually concern and (2) a DISTINCT relation/outcome the paper reports.
+entity OF THE SAME TYPE the paper's results actually concern and (2) a DISTINCT relation/outcome the
+paper reports.
 
 Rules:
+- entity_type MUST equal CLAIMED ENTITY TYPE below. You are locating the paper's COUNTERPART TO THIS
+    ONE CLAIMED ENTITY, not the paper's main subject. A real claim names several entities -- a drug
+    and the disease it was studied in, a gene and a phenotype -- and each is located separately in
+    its own request. Answering with a different type answers a question about a different tuple.
 - entity_span: a VERBATIM span from a results OR methods section naming the entity the paper studied.
 - relation_span: a DISTINCT VERBATIM span from a results, table, OR figure section reporting the
     outcome (methods alone cannot establish an outcome). It must be a different span than entity_span.
@@ -856,6 +878,7 @@ Rules:
     background, other-literature summary, or a hypothesis attributed elsewhere.
 - Copy spans character-for-character. Never use outside knowledge.
 
+CLAIMED ENTITY TYPE: <<CLAIM_TYPE>>
 CLAIMED ENTITY SURFACE: <<CLAIM_SURFACE>>
 CLAIMED RELATION (predicate/object/direction/population): <<CLAIM_RELATION>>
 
@@ -1218,6 +1241,15 @@ class EntityAssessorRun:
 
         # 4. Evidence entity + relation (schema C).
         evidence_prompt = _fill_prompt(F7_EVIDENCE_PROMPT, {
+            # THE TYPE, WITHOUT WHICH THE LOCATOR ANSWERS THE WRONG QUESTION. It
+            # was asked for "the entity the paper's results actually concern"
+            # given only a surface, so on a claim naming a drug AND a disease it
+            # returned the paper's drug for both tuples -- pairing the claimed
+            # disease against an evidence drug. That is a cross-ontology pair no
+            # comparator can settle, and one unjudgeable tuple holds the whole
+            # claim in the roll-up below, so F7 could not fire on any sentence
+            # naming more than one entity. Which is nearly all of them.
+            "<<CLAIM_TYPE>>": claimed_type,
             "<<CLAIM_SURFACE>>": claimed_tuple["claim_surface"],
             "<<CLAIM_RELATION>>": json.dumps(claimed_tuple["relation"]),
             "<<SECTIONS>>": _render_sections(ctx.body_sections),
@@ -1344,8 +1376,16 @@ class EntityAssessorRun:
         tr["prompt_version"]["relation"] = self.policy.relation_prompt_version
         tr["prompt_sha256"]["relation"] = comparison_d.get("prompt_sha256")
         tr["raw_responses"]["relation"] = comparison_d
-        if not all(comparison_d[k] == "match" for k in _RELATION_TUPLE_KEYS):
-            return finish("UNJUDGEABLE", R_RELATION_MISMATCH)
+        # NOT A GATE (since decision_rule_version f7_entity_scope_v2). The four
+        # components are recorded above and travel in the durable record for F4
+        # and F6 to read, but a relation difference is not evidence about WHICH
+        # ENTITY the paper studied, and F7 answers only that. Gating here meant a
+        # paraphrase ("is attributed to" vs "increases") or a dropped hedge
+        # ("30%" vs "up to 30%") silenced a correct wrong-entity finding. The
+        # guards that DO bear on the entity question all run upstream: analogical
+        # and multi-reference attribution (step 3), papers_own_finding and the
+        # results/methods span kinds (step 4), the confident-id gate (step 6),
+        # and granularity/alias (step 7).
 
         # 9. Independent positive-only verifier (schema E). Receives the full
         # claimed-tuple array but NOT the generator's verdict/rationale.
@@ -1375,7 +1415,7 @@ class EntityAssessorRun:
         tr["verifier"] = verifier
         tr["prompt_sha256"]["verifier"] = _sha256_text(verifier_prompt)
         tr["raw_responses"]["verifier"] = verifier_raw
-        if not all(verifier[key] for key in _SCHEMA_E_BOOL_KEYS):
+        if not all(verifier[key] for key in _SCHEMA_E_REQUIRED_TRUE):
             return finish("UNJUDGEABLE", R_VERIFIER_DISAGREE)
 
         # 10. Confirmed mismatch: the paper supports the relation for a
