@@ -40,6 +40,64 @@ class NonRetryableProviderError(RuntimeError):
     """A permanent provider/configuration failure that must abort the run."""
 
 
+class ProviderCreditExhausted(NonRetryableProviderError):
+    """The account can no longer pay for calls (spent balance / spend cap).
+
+    A distinct type because the right response differs from every other
+    permanent failure: a per-paper loop that merely records one failure and
+    moves on will burn the whole sampled pool against an empty balance. It
+    SUBCLASSES ``NonRetryableProviderError`` so every existing handler keeps
+    working; a caller that wants to abort the run catches this one.
+    """
+
+
+# Provider error `type` values meaning "the account cannot pay for this call".
+# Preferred discriminator: read it off the error body's structured fields.
+_CREDIT_ERROR_TYPES = frozenset({
+    "billing_error", "credit_balance_too_low", "insufficient_credit",
+    "insufficient_credits", "insufficient_quota", "payment_required",
+})
+
+# LAST RESORT, deliberately. Anthropic currently reports an exhausted balance as
+# a generic 400 `invalid_request_error` whose human-readable message is the only
+# thing separating it from any other bad request, so the message is matched too
+# -- against the STRUCTURED `message` field where the provider sent one, and
+# against ``str(exc)`` only when the error carries no structured body at all.
+_CREDIT_MESSAGE_MARKERS = (
+    "credit balance is too low",
+    "credit balance too low",
+    "insufficient credit",
+    "insufficient funds",
+    "spend cap",
+    "spending cap",
+    "spend limit",
+    "spending limit",
+)
+
+
+def _error_payload(exc) -> dict:
+    """The provider's structured error object, or {} if it did not send one."""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        return err if isinstance(err, dict) else body
+    return {}
+
+
+def _is_credit_exhausted(exc) -> bool:
+    """True when a non-retryable provider error means an unpayable account."""
+    payload = _error_payload(exc)
+    if str(payload.get("type") or "").strip().lower() in _CREDIT_ERROR_TYPES:
+        return True
+    if getattr(exc, "status_code", None) == 402:      # HTTP Payment Required
+        return True
+    message = payload.get("message")
+    if not isinstance(message, str) or not message:
+        message = str(exc)                            # documented last resort
+    lowered = message.lower()
+    return any(marker in lowered for marker in _CREDIT_MESSAGE_MARKERS)
+
+
 def _extract_text(msg) -> str:
     """Concatenate the text blocks of a Messages response. Empty string for a
     refusal or an otherwise text-free response (no crash)."""
@@ -64,7 +122,8 @@ def _is_retryable(exc) -> bool:
 
 def make_completer(model: str, api_key: str = "", *, max_tokens: int = 400,
                    max_retries: int = 4, base_backoff: float = 1.0,
-                   max_backoff: float = 30.0) -> Callable[[str], str]:
+                   max_backoff: float = 30.0,
+                   timeout: float = 120.0) -> Callable[[str], str]:
     """Return a complete(prompt)->str backed by the Anthropic SDK.
 
     - Retries transient API errors (429/5xx/overloaded/connection) with backoff;
@@ -72,11 +131,23 @@ def make_completer(model: str, api_key: str = "", *, max_tokens: int = 400,
       'uncertain' -> human_review and the run survives.
     - Re-raises non-retryable errors (auth / bad request) immediately so a
       misconfigured run fails fast instead of silently labelling everything
-      uncertain.
+      uncertain. An exhausted balance raises ``ProviderCreditExhausted`` (a
+      subclass) so a batch caller can abort the run instead of feeding the
+      empty account one paper at a time.
     - Empty / refusal responses yield "" (parse_verdict -> uncertain), no crash.
+
+    ``timeout`` is the per-request socket/read ceiling handed to the SDK. It is
+    explicit and finite on purpose: with no timeout, a connection dropped
+    without a FIN leaves the SSL read blocked forever and the retry loop below
+    never runs, because nothing is ever raised. A timeout surfaces as
+    ``APITimeoutError``, which ``_is_retryable`` already routes into the backoff
+    path -- and, if every attempt times out, into "" -> uncertain -> review.
     """
     from anthropic import Anthropic
-    client = Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
+    # `max_retries` is deliberately NOT passed: the SDK keeps whatever its own
+    # default is and this module keeps its single hand-rolled retry loop below.
+    client = Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"),
+                       timeout=timeout)
 
     def complete(prompt: str) -> str:
         for attempt in range(max_retries + 1):
@@ -90,7 +161,9 @@ def make_completer(model: str, api_key: str = "", *, max_tokens: int = 400,
                     continue
                 if _is_retryable(exc):        # retries exhausted -> skip this ref
                     return ""
-                raise NonRetryableProviderError(str(exc)) from exc
+                cls = (ProviderCreditExhausted if _is_credit_exhausted(exc)
+                       else NonRetryableProviderError)
+                raise cls(str(exc)) from exc
             return _extract_text(msg)
         return ""
     complete.model_id = model

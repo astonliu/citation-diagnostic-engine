@@ -97,6 +97,13 @@ def request_with_retry(session, url, params, *, limiter: RateLimiter | None = No
             delay = _retry_after_seconds(resp)
             if delay is None:
                 delay = min(base_backoff * (2 ** attempt), max_backoff)
+            else:
+                # Prefer the server's pacing when it is shorter than our own
+                # backoff, but never sleep past `max_backoff`: a spent daily
+                # quota comes back as `Retry-After: 52266` (14.5h), and a
+                # sleeping thread cannot be interrupted, so honouring it
+                # literally strands the worker for the rest of the run.
+                delay = min(delay, max_backoff)
             time.sleep(delay)
             continue
         return resp

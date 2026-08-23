@@ -285,6 +285,66 @@ def test_request_with_retry_reraises_connection_error():
     assert len(sess.calls) == 4              # 1 + 3 retries before re-raising
 
 
+def _slept_on_retry_after(monkeypatch, headers, **kw):
+    """Drive one 429 -> 200 exchange and report the sleeps it performed."""
+    slept = []
+    monkeypatch.setattr(ratelimit.time, "sleep", lambda s: slept.append(s))
+
+    def handler(url, p, n):
+        if n < 1:
+            return FakeResponse(429, headers=headers)
+        return FakeResponse(200, text="ok")
+
+    resp = request_with_retry(FakeSession(handler), "http://x", {}, **kw)
+    return resp, slept
+
+
+def test_retry_after_is_clamped_to_max_backoff(monkeypatch):
+    """OpenAlex answered a spent daily quota with `Retry-After: 52266` (14.5h).
+    A sleeping thread cannot be interrupted, so honouring that literally
+    strands the worker for the rest of the run."""
+    resp, slept = _slept_on_retry_after(
+        monkeypatch, {"Retry-After": "52266"}, base_backoff=0.5, max_backoff=8.0)
+    assert resp.status_code == 200
+    assert slept == [8.0]
+    assert slept[0] <= 8.0
+
+
+def test_retry_after_below_ceiling_is_honoured(monkeypatch):
+    """The server's pacing still wins when it asks for less than the ceiling."""
+    _, slept = _slept_on_retry_after(
+        monkeypatch, {"Retry-After": "2"}, base_backoff=0.5, max_backoff=8.0)
+    assert slept == [2.0]
+
+
+def test_retry_after_garbage_falls_back_to_exponential(monkeypatch):
+    _, slept = _slept_on_retry_after(
+        monkeypatch, {"Retry-After": "garbage"}, base_backoff=0.5,
+        max_backoff=8.0)
+    assert slept == [min(0.5 * (2 ** 0), 8.0)]
+
+
+def test_no_retry_after_header_uses_exponential(monkeypatch):
+    _, slept = _slept_on_retry_after(
+        monkeypatch, {}, base_backoff=0.5, max_backoff=8.0)
+    assert slept == [min(0.5 * (2 ** 0), 8.0)]
+
+
+def test_retry_after_clamp_still_retries_not_gives_up(monkeypatch):
+    """The clamp shortens the wait; it must never turn a retry into a
+    give-up (guard PMID 31665581 depends on the 429 path being exhausted,
+    then surfaced as FETCH_RESOLVER_ERROR rather than an absence)."""
+    slept = []
+    monkeypatch.setattr(ratelimit.time, "sleep", lambda s: slept.append(s))
+    sess = FakeSession(
+        lambda u, p, n: FakeResponse(429, headers={"Retry-After": "52266"}))
+    r = request_with_retry(sess, "http://x", {}, max_retries=3,
+                           base_backoff=0.5, max_backoff=8.0)
+    assert r.status_code == 429              # returned, not raised
+    assert len(sess.calls) == 4              # 1 + 3 retries, all attempted
+    assert slept == [8.0, 8.0, 8.0]
+
+
 # --------------------------------------------------------------------------
 # make_completer (Anthropic SDK) -- block extraction + retry classification
 # --------------------------------------------------------------------------
@@ -303,11 +363,14 @@ def _text_block(text):
 
 
 def _install_fake_anthropic(monkeypatch, behavior):
+    """Patch the SDK client; returns the list of constructor kwargs seen."""
     import anthropic
+    built = []
 
     class FakeAnthropic:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, **kw):
             self._n = 0
+            built.append(kw)
             self.messages = types.SimpleNamespace(create=self._create)
 
         def _create(self, **kw):
@@ -315,6 +378,7 @@ def _install_fake_anthropic(monkeypatch, behavior):
             return behavior(self._n)
 
     monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
+    return built
 
 
 def test_completer_extracts_text(monkeypatch):
@@ -356,6 +420,146 @@ def test_completer_raises_on_non_retryable(monkeypatch):
     with pytest.raises(run.NonRetryableProviderError) as caught:
         complete("prompt")
     assert isinstance(caught.value.__cause__, _FakeAPIError)
+    # 401 is a misconfigured key, NOT an unpayable account.
+    assert not isinstance(caught.value, run.ProviderCreditExhausted)
+
+
+# --------------------------------------------------------------------------
+# make_completer -- bounded socket timeout (defect 2)
+# --------------------------------------------------------------------------
+def test_completer_client_has_finite_timeout(monkeypatch):
+    """No timeout => an SSL read on a silently dropped connection blocks
+    forever, and the retry loop never runs because nothing is ever raised."""
+    built = _install_fake_anthropic(monkeypatch, lambda n: _msg())
+    run.make_completer("model-x", api_key="k")
+    assert len(built) == 1
+    timeout = built[0].get("timeout")
+    assert isinstance(timeout, (int, float))
+    assert 0 < timeout < float("inf")
+
+
+def test_completer_timeout_is_overridable(monkeypatch):
+    built = _install_fake_anthropic(monkeypatch, lambda n: _msg())
+    run.make_completer("model-x", api_key="k", timeout=5.0)
+    assert built[0]["timeout"] == 5.0
+
+
+def test_completer_does_not_add_sdk_retries(monkeypatch):
+    """This module owns exactly one retry loop; the SDK must not gain a
+    second one on top of it."""
+    built = _install_fake_anthropic(monkeypatch, lambda n: _msg())
+    run.make_completer("model-x", api_key="k")
+    assert "max_retries" not in built[0]
+
+
+def _timeout_error():
+    import httpx
+    import anthropic
+    return anthropic.APITimeoutError(request=httpx.Request("POST", "http://x"))
+
+
+def test_completer_retries_timeout_then_succeeds(monkeypatch):
+    slept = []
+    monkeypatch.setattr(run.time, "sleep", lambda s: slept.append(s))
+
+    def behavior(n):
+        if n < 3:
+            raise _timeout_error()
+        return _msg(_text_block("ok"))
+
+    _install_fake_anthropic(monkeypatch, behavior)
+    complete = run.make_completer("model-x", api_key="k", base_backoff=0.0)
+    assert complete("prompt") == "ok"
+    assert len(slept) == 2                   # two backoff sleeps, no exception
+
+
+def test_completer_timeout_every_attempt_returns_blank(monkeypatch):
+    """A timeout must stay 'uncertain' -> human review, never a silent clear
+    and never a crash that drops the reference from the population."""
+    _install_fake_anthropic(
+        monkeypatch, lambda n: (_ for _ in ()).throw(_timeout_error()))
+    complete = run.make_completer("model-x", api_key="k", base_backoff=0.0)
+    assert complete("prompt") == ""
+
+
+# --------------------------------------------------------------------------
+# make_completer -- credit exhaustion is its own type (defect 3)
+# --------------------------------------------------------------------------
+_CREDIT_MESSAGE = ("Your credit balance is too low to access the Anthropic "
+                   "API. Please go to Plans & Billing to upgrade or purchase "
+                   "credits.")
+
+
+class _FakeBodyAPIError(Exception):
+    """An SDK-shaped error: status code plus the provider's structured body."""
+    def __init__(self, status_code, err_type, message):
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = {"type": "error",
+                     "error": {"type": err_type, "message": message}}
+
+
+def _raising(exc):
+    return lambda n: (_ for _ in ()).throw(exc)
+
+
+def test_completer_credit_exhaustion_raises_dedicated_type(monkeypatch):
+    exc = _FakeBodyAPIError(400, "invalid_request_error", _CREDIT_MESSAGE)
+    _install_fake_anthropic(monkeypatch, _raising(exc))
+    complete = run.make_completer("model-x", api_key="k")
+    with pytest.raises(run.ProviderCreditExhausted) as caught:
+        complete("prompt")
+    # subclass => every existing `except NonRetryableProviderError` still works
+    assert isinstance(caught.value, run.NonRetryableProviderError)
+    assert caught.value.__cause__ is exc
+
+
+def test_completer_auth_error_is_not_credit_exhaustion(monkeypatch):
+    exc = _FakeBodyAPIError(401, "authentication_error",
+                            "invalid x-api-key")
+    _install_fake_anthropic(monkeypatch, _raising(exc))
+    complete = run.make_completer("model-x", api_key="k")
+    with pytest.raises(run.NonRetryableProviderError) as caught:
+        complete("prompt")
+    assert not isinstance(caught.value, run.ProviderCreditExhausted)
+
+
+def test_completer_ordinary_bad_request_is_not_credit_exhaustion(monkeypatch):
+    exc = _FakeBodyAPIError(400, "invalid_request_error",
+                            "max_tokens: must be greater than 0")
+    _install_fake_anthropic(monkeypatch, _raising(exc))
+    complete = run.make_completer("model-x", api_key="k")
+    with pytest.raises(run.NonRetryableProviderError) as caught:
+        complete("prompt")
+    assert not isinstance(caught.value, run.ProviderCreditExhausted)
+
+
+def test_credit_exhaustion_detected_from_structured_type():
+    """Structured fields are the preferred discriminator, not the message."""
+    exc = _FakeBodyAPIError(400, "billing_error", "see your account")
+    assert run._is_credit_exhausted(exc) is True
+
+
+def test_credit_exhaustion_detected_from_payment_required_status():
+    exc = _FakeBodyAPIError(402, "invalid_request_error", "nope")
+    assert run._is_credit_exhausted(exc) is True
+
+
+def test_credit_exhaustion_message_fallback_without_structured_body():
+    """Last-resort path: no structured body at all, so str(exc) is matched."""
+    assert run._is_credit_exhausted(RuntimeError(_CREDIT_MESSAGE)) is True
+    assert run._is_credit_exhausted(RuntimeError("overloaded")) is False
+
+
+def test_structured_message_wins_over_stringified_exception():
+    """A structured message that is NOT about credit must not be overridden by
+    whatever str(exc) happens to contain."""
+    class _Noisy(_FakeBodyAPIError):
+        def __str__(self):
+            return "credit balance is too low"
+
+    exc = _Noisy(400, "invalid_request_error", "temperature out of range")
+    assert run._is_credit_exhausted(exc) is False
 
 
 # --------------------------------------------------------------------------
