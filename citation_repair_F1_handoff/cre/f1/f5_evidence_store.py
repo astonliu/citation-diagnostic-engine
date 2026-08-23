@@ -10,6 +10,7 @@ import datetime as dt
 import hashlib
 import json
 import re
+import threading
 import unicodedata
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -478,6 +479,17 @@ class F5EvidenceStore:
         self.fetch_notice = fetch_notice
         self.retrieved_at = retrieved_at
         self._cache: dict[str, F5SourcePacket] = {}
+        # WHY THIS CLASS NEEDS LOCKS NOW. ``get`` is reached from parallel Phase 2
+        # workers. Two of its behaviours break under threads without them: the
+        # ``counters`` below are read-modify-write and feed the manifest, and two
+        # concurrent ``get`` calls for the SAME work would each build a packet with
+        # its own ``retrieved_at`` -- two different ``packet_sha256`` values for one
+        # source, hence two packet rows, two judgment-cache keys and a duplicated
+        # paid comparison. The per-work lock makes the second caller find the first
+        # caller's packet in ``_cache`` instead of minting a rival one.
+        self._counter_lock = threading.Lock()
+        self._work_locks_guard = threading.Lock()
+        self._work_locks: dict[tuple, threading.Lock] = {}
         self.counters = {
             "metadata_calls": 0,
             "abstract_calls": 0,
@@ -504,11 +516,22 @@ class F5EvidenceStore:
             raise ValueError("assess_missing_facts must return a sequence, not None")
         return _strings(values, "assess_missing_facts result")
 
+    def _bump(self, name: str) -> None:
+        with self._counter_lock:
+            self.counters[name] += 1
+
     def get(self, work_id: str, *, as_of_date: str) -> F5SourcePacket:
         if not isinstance(work_id, str) or not re.fullmatch(r"[0-9]+", work_id):
             raise ValueError("work_id must be a decimal PMID")
         _iso_date(as_of_date, "as_of_date")
-        self.counters["metadata_calls"] += 1
+        with self._work_locks_guard:
+            work_lock = self._work_locks.setdefault(
+                (work_id, as_of_date), threading.Lock())
+        with work_lock:
+            return self._get_locked(work_id, as_of_date=as_of_date)
+
+    def _get_locked(self, work_id: str, *, as_of_date: str) -> F5SourcePacket:
+        self._bump("metadata_calls")
         metadata = self.fetch_metadata(work_id)
         if not isinstance(metadata, Mapping):
             raise ValueError(f"metadata unavailable for PMID {work_id}")
@@ -517,21 +540,21 @@ class F5EvidenceStore:
             raise ValueError(
                 f"metadata PMID {metadata_id!r} does not match requested {work_id!r}")
 
-        self.counters["abstract_calls"] += 1
+        self._bump("abstract_calls")
         abstract = _normalize_text(self.fetch_abstract(work_id), "abstract")
         missing = self._missing(work_id, abstract, None)
         adaptation = None
         raw_fulltext = None
         fulltext_failed = False
         if missing and self.fetch_fulltext is not None:
-            self.counters["fulltext_attempts"] += 1
+            self._bump("fulltext_attempts")
             raw_fulltext = self.fetch_fulltext(work_id)
             adaptation = adapt_fulltext_sections(raw_fulltext, work_id=work_id)
             if adaptation.source_status == "failure":
                 fulltext_failed = True
-                self.counters["fulltext_failures"] += 1
+                self._bump("fulltext_failures")
             else:
-                self.counters["fulltext_successes"] += 1
+                self._bump("fulltext_successes")
             missing = self._missing(work_id, abstract, adaptation)
 
         tier_value = self.classify_evidence_tier(metadata)
@@ -566,7 +589,7 @@ class F5EvidenceStore:
         })).hexdigest()
         cached = self._cache.get(content_key)
         if cached is not None:
-            self.counters["cache_hits"] += 1
+            self._bump("cache_hits")
             return cached
 
         packet = build_source_packet(

@@ -95,6 +95,44 @@ _JUDGMENT_CACHE_CONTROL_KEY = object()
 _JUDGMENT_CACHE_INIT_LOCK = threading.Lock()
 
 
+def _canonical_json(value) -> str:
+    """A total, stable ordering key for a log row that has no natural id."""
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+#: How each F5 audit log is ordered before it is written, hashed or reported.
+#:
+#: WHY SORT INSTEAD OF LOCKING THE APPEND. ``list.append`` under threads never
+#: corrupts the list, but ARRIVAL order stops being reference order the moment
+#: Phase 2 runs parallel, and a nondeterministic audit-log order must not reach a
+#: manifest hash or a persisted artifact. Sorting on a field the row already
+#: carries makes the order a function of the CONTENT, so serial and parallel runs
+#: write the same bytes without pretending the appends happened in order.
+_AUDIT_LOG_SORT_KEYS = {
+    "source_packet_log": lambda row: (
+        str((row or {}).get("work_id") or ""),
+        str((row or {}).get("packet_sha256") or "")),
+    "thin_source_log": lambda row: str(row or ""),
+    "span_miss_log": lambda row: (
+        str((row or {}).get("key") or ""), _canonical_json((row or {}).get("entry"))),
+    # The retrieval protocol carries no per-call id -- every field in it is part
+    # of what was executed -- so its whole canonical form is the key.
+    "protocol_log": _canonical_json,
+}
+
+
+def sort_audit_log(name: str, rows) -> None:
+    """Sort one F5 audit log IN PLACE into its deterministic order."""
+    key = _AUDIT_LOG_SORT_KEYS.get(name)
+    if key is None or not isinstance(rows, list):
+        return
+    rows.sort(key=key)
+
+
 def retrieval_protocol(*, after_date: str = "", as_of_date: str = "",
                        mesh_terms=(), candidate_cap: int = CANDIDATE_CAP) -> dict:
     """The protocol in READABLE form, for the manifest.
@@ -243,6 +281,11 @@ def make_fetch_comparability_source(
     clock = retrieved_at or (
         lambda: datetime.datetime.now(datetime.timezone.utc).isoformat())
     packet_log = source_packet_log if source_packet_log is not None else []
+    # The dedup scan below is a read-modify-write over a list that Phase 2
+    # workers share, and the thin-source append lands on another. Neither may
+    # interleave with itself: two workers scanning the same absent hash would
+    # both append the same packet row.
+    log_lock = threading.Lock()
     store = None
     if fetch_meta is not None:
         store = F5EvidenceStore(
@@ -258,10 +301,11 @@ def make_fetch_comparability_source(
     def fetch_comparability_source(work_id: str, *, as_of_date: str) -> ComparabilitySource:
         if store is not None:
             packet = store.get(work_id, as_of_date=as_of_date)
-            if not any(
-                    row.get("packet_sha256") == packet.packet_sha256
-                    for row in packet_log):
-                packet_log.append(packet.to_dict())
+            with log_lock:
+                if not any(
+                        row.get("packet_sha256") == packet.packet_sha256
+                        for row in packet_log):
+                    packet_log.append(packet.to_dict())
             source = ComparabilitySource(
                 abstract=packet.abstract, methods=packet.methods,
                 results=packet.results, other_sections=packet.other_sections,
@@ -311,7 +355,8 @@ def make_fetch_comparability_source(
         if thin_source_log is not None and not (
                 source.abstract or source.methods or source.results
                 or source.other_sections):
-            thin_source_log.append(work_id)
+            with log_lock:
+                thin_source_log.append(work_id)
         return source
     fetch_comparability_source.evidence_store = store
     fetch_comparability_source.source_packet_log = packet_log
@@ -490,7 +535,8 @@ def find_supersession_attestation(cited_meta: dict, claim: str, candidate_id: st
 # --------------------------------------------------------------------------
 def make_judge_contradiction(
         complete, *, span_miss_log=None, judgment_cache=None,
-        model_id: "str | None" = None, model_settings=None):
+        model_id: "str | None" = None, model_settings=None,
+        counter_lock=None):
     """``judge_contradiction(cited_source, candidate_source, claim) -> str``.
 
     ``complete(prompt) -> str`` is the model call, injected so this is testable
@@ -503,6 +549,13 @@ def make_judge_contradiction(
     cache = judgment_cache if judgment_cache is not None else {}
     if not isinstance(cache, dict):
         raise ValueError("judgment_cache must be a dict or None")
+    # COUNTERS ARE NOT ATOMIC. ``fn.calls += 1`` on a function attribute is a
+    # read-modify-write and drops increments under threads, and these counters
+    # ARE the manifest's F5 call tallies (``_f5_manifest_block``): a lost
+    # increment is a wrong published number, not a cosmetic one. The lock covers
+    # the increments only -- never the model call, which is the whole point of
+    # running Phase 2 parallel.
+    counters = counter_lock if counter_lock is not None else threading.Lock()
     resolved_model_id = str(
         model_id or getattr(complete, "model_id", "") or "").strip()
     resolved_settings = (
@@ -548,26 +601,35 @@ def make_judge_contradiction(
         ).encode("utf-8")).hexdigest()
 
     def judge_contradiction(cited_source, candidate_source, claim: str) -> str:
-        judge_contradiction.calls += 1
+        with counters:
+            judge_contradiction.calls += 1
         key = cache_key(cited_source, candidate_source, claim)
         owner = False
         if key is not None:
             while True:
+                # NO NESTED LOCKS. The counter lock is taken AFTER this one is
+                # released, never inside it: two locks held in one order here and
+                # the other order anywhere else is the only way this code could
+                # deadlock, and not nesting them means it cannot.
                 with control.lock:
                     cached = cache.get(key)
-                    if isinstance(cached, str):
-                        judge_contradiction.cache_hits += 1
-                        return cached
-                    event = control.inflight.get(key)
-                    if event is None:
+                    event = None if isinstance(cached, str) else (
+                        control.inflight.get(key))
+                    if not isinstance(cached, str) and event is None:
                         event = threading.Event()
                         control.inflight[key] = event
                         owner = True
-                        break
+                if isinstance(cached, str):
+                    with counters:
+                        judge_contradiction.cache_hits += 1
+                    return cached
+                if owner:
+                    break
                 event.wait()
         prompt = fcp.render_prompt(cited_source, candidate_source, claim)
         try:
-            judge_contradiction.model_calls += 1
+            with counters:
+                judge_contradiction.model_calls += 1
             raw = complete(prompt)
             obj = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
 
@@ -584,6 +646,8 @@ def make_judge_contradiction(
                 text, span_source = fcp.resolve_span(entry, units)
                 if (span_source == fcp.SPAN_SOURCE_UNRESOLVED
                         and span_miss_log is not None):
+                    # Appended, not ordered: ``sort_audit_log`` puts the log in
+                    # its deterministic order before anything reads it.
                     span_miss_log.append({"key": span_key, "entry": entry})
                 if span_source == fcp.SPAN_SOURCE_UNRESOLVED:
                     unresolved_span = True
@@ -612,6 +676,12 @@ def make_judge_contradiction(
     judge_contradiction.cache = cache
     judge_contradiction.model_id = resolved_model_id
     judge_contradiction.model_settings = resolved_settings
+    judge_contradiction.counter_lock = counters
+    # DECLARED, not assumed, and only as far as the transport will go: the cache
+    # single-flight above and the locked counters are what make this wrapper safe,
+    # so the remaining question is whether the injected transport is.
+    judge_contradiction.thread_safe = (
+        getattr(complete, "thread_safe", False) is True)
     # CARRIED, NOT COPIED. judgment_run reads its F5 counters off this seam by
     # attribute (``_judge_counter_source``), and the token ledger lives on the
     # transport this closure captured -- unreachable from the call site. Exposing
@@ -624,7 +694,8 @@ def make_judge_contradiction(
     return judge_contradiction
 
 
-def make_verify_contradiction(complete, *, model_id: "str | None" = None):
+def make_verify_contradiction(complete, *, model_id: "str | None" = None,
+                             counter_lock=None):
     """Wrap the independent positive-only F5 verifier transport.
 
     The core renders and strictly parses the versioned verifier prompt because
@@ -635,15 +706,18 @@ def make_verify_contradiction(complete, *, model_id: "str | None" = None):
         raise ValueError("F5 verifier complete must be callable")
     resolved_model_id = str(
         model_id or getattr(complete, "model_id", "") or "").strip()
+    counters = counter_lock if counter_lock is not None else threading.Lock()
 
     def verify_contradiction(prompt: str) -> str:
-        verify_contradiction.calls += 1
-        verify_contradiction.model_calls += 1
+        with counters:
+            verify_contradiction.calls += 1
+            verify_contradiction.model_calls += 1
         return complete(prompt)
 
     verify_contradiction.calls = 0
     verify_contradiction.model_calls = 0
     verify_contradiction.model_id = resolved_model_id
+    verify_contradiction.counter_lock = counters
     verify_contradiction.thread_safe = (
         getattr(complete, "thread_safe", False) is True)
     return verify_contradiction
@@ -653,9 +727,53 @@ def make_verify_contradiction(complete, *, model_id: "str | None" = None):
 # The bundle the runner passes to decide_f5.
 # --------------------------------------------------------------------------
 class F5SeamBundle(dict):
-    """Typed F5 runtime bundle; mutable caches keep Phase 2 serial."""
+    """Typed F5 runtime bundle, with an EARNED Phase 2 parallel claim.
 
-    thread_safe = False
+    ``thread_safe`` was a class-level False, which kept F5 Phase 2 serial
+    whenever the bundle was wired at all -- 1,720 s of one measured run's busy
+    time pinned to one thread. It is now an INSTANCE attribute, computed from
+    what the bundle actually holds, so it can only be True when the two seams
+    that reach a model both declare it. The bundle's own mutable state is what
+    the rest of this module now guards: the judgment cache was already a
+    single-flight under a shared lock, the counters are locked, and the audit
+    logs are appended and then SORTED rather than assumed to arrive in order.
+
+    ``sort_audit_logs`` is not optional housekeeping. A log whose order depends
+    on thread timing must never reach a manifest hash or a persisted artifact,
+    so the run calls this before it reads any of them.
+    """
+
+    def __init__(self, values, *, thread_safe: bool = False,
+                 counter_lock=None, audit_logs=None):
+        super().__init__(values)
+        self.thread_safe = thread_safe is True
+        self.counter_lock = counter_lock
+        self.audit_logs = {
+            name: rows for name, rows in (audit_logs or {}).items()
+            if isinstance(rows, list)}
+
+    def sort_audit_logs(self) -> None:
+        """Put every audit log this bundle owns into its deterministic order."""
+        for name, rows in self.audit_logs.items():
+            sort_audit_log(name, rows)
+
+
+def f5_seams_thread_safe(seams) -> bool:
+    """True only when every model-reaching F5 seam declares thread safety.
+
+    Mirrors ``F7SeamBundle``'s all-seams check. A missing verifier is not a
+    pass: an unwired seam has made no claim, and Phase 2 does not get to assume
+    one on its behalf. The candidate screen is checked only when it is WIRED --
+    it is optional by contract, and an absent screen is not an unanswered
+    question.
+    """
+    seams = seams or {}
+    required = ["judge_contradiction", "verify_contradiction"]
+    if seams.get("screen_candidates") is not None:
+        required.append("screen_candidates")
+    return all(
+        getattr(seams.get(name), "thread_safe", False) is True
+        for name in required)
 
 
 def build_f5_seams(*, fetch_meta, fetch_abstract, search_candidates, complete,
@@ -678,6 +796,11 @@ def build_f5_seams(*, fetch_meta, fetch_abstract, search_candidates, complete,
         raise ValueError("screen_candidates must be callable or None")
     if verifier_complete is complete and verifier_complete is not None:
         raise ValueError("F5 generator and verifier transports must be distinct")
+    # ONE lock for every counter in this bundle. Shared rather than per-seam so a
+    # reader of the manifest's F5 tallies is reading numbers guarded by the same
+    # thing, and so the bundle can hand it out (``bundle.counter_lock``) to
+    # anything that wraps these seams later.
+    counter_lock = threading.Lock()
     notice_resolver = make_check_formal_notice(fetch_meta)
 
     def packet_notice(work_id: str, *, as_of_date: str) -> dict:
@@ -696,34 +819,53 @@ def build_f5_seams(*, fetch_meta, fetch_abstract, search_candidates, complete,
 
     def observed_attestation(cited_meta: dict, claim: str, candidate_id: str,
                              *, as_of_date: str):
-        observed_attestation.calls += 1
+        with counter_lock:
+            observed_attestation.calls += 1
         return find_supersession_attestation(
             cited_meta, claim, candidate_id, as_of_date=as_of_date)
     observed_attestation.calls = 0
+    observed_attestation.thread_safe = True   # a declared stub, and now a locked one
 
-    return F5SeamBundle({
+    fetch_source = make_fetch_comparability_source(
+        fetch_abstract, fetch_fulltext, fetch_meta=fetch_meta,
+        assess_missing_facts=assess_missing_facts,
+        fact_assessor_version=fact_assessor_version,
+        fetch_notice=packet_notice,
+        source_packet_log=source_packet_log,
+        thin_source_log=thin_source_log, retrieved_at=retrieved_at)
+    judge = make_judge_contradiction(
+        complete, span_miss_log=span_miss_log,
+        judgment_cache=judgment_cache, model_id=judgment_model_id,
+        model_settings=judgment_model_settings, counter_lock=counter_lock)
+    verifier = (
+        make_verify_contradiction(
+            verifier_complete, model_id=verifier_model_id,
+            counter_lock=counter_lock)
+        if verifier_complete is not None else None)
+    seams = {
         "check_formal_notice": notice_resolver,
         "classify_evidence_tier": classify_evidence_tier,
-        "fetch_comparability_source": make_fetch_comparability_source(
-            fetch_abstract, fetch_fulltext, fetch_meta=fetch_meta,
-            assess_missing_facts=assess_missing_facts,
-            fact_assessor_version=fact_assessor_version,
-            fetch_notice=packet_notice,
-            source_packet_log=source_packet_log,
-            thin_source_log=thin_source_log, retrieved_at=retrieved_at),
+        "fetch_comparability_source": fetch_source,
         "retrieve_superseding_candidates": make_retrieve_superseding_candidates(
             search_candidates, cap=cap, protocol_log=protocol_log),
         "find_supersession_attestation": observed_attestation,
-        "judge_contradiction": make_judge_contradiction(
-            complete, span_miss_log=span_miss_log,
-            judgment_cache=judgment_cache, model_id=judgment_model_id,
-            model_settings=judgment_model_settings),
-        "verify_contradiction": (
-            make_verify_contradiction(
-                verifier_complete, model_id=verifier_model_id)
-            if verifier_complete is not None else None),
+        "judge_contradiction": judge,
+        "verify_contradiction": verifier,
         "screen_candidates": screen_candidates,
-    })
+    }
+    return F5SeamBundle(
+        seams,
+        thread_safe=f5_seams_thread_safe(seams),
+        counter_lock=counter_lock,
+        audit_logs={
+            # The log the fetch seam ACTUALLY writes: it substitutes its own
+            # list when the caller passes none, and the substitute is the one
+            # that has rows in it.
+            "source_packet_log": fetch_source.source_packet_log,
+            "thin_source_log": thin_source_log,
+            "span_miss_log": span_miss_log,
+            "protocol_log": protocol_log,
+        })
 
 
 def make_f5_evidence_builder(fetch_meta, *, as_of_date: str):
@@ -873,12 +1015,19 @@ def build_pubmed_f5_runtime(*, complete, as_of_date: str, api_key: str = "",
         api_key=api_key, email=email or DEFAULT_EMAIL, session=session,
         cache_dir=cache_dir, timeout=timeout, max_retries=max_retries)
     memory: dict[str, "dict | None"] = {}
+    # Per-PMID, not global: two workers looking up DIFFERENT works must not wait
+    # on each other, and two looking up the SAME one must not both pay for it.
+    memory_guard = threading.Lock()
+    memory_locks: dict[str, threading.Lock] = {}
 
     def fetch_meta(work_id: str):
         key = str(work_id or "").strip()
-        if key not in memory:
-            memory[key] = finder.fetch_metadata(key)
-        value = memory[key]
+        with memory_guard:
+            lock = memory_locks.setdefault(key, threading.Lock())
+        with lock:
+            if key not in memory:
+                memory[key] = finder.fetch_metadata(key)
+            value = memory[key]
         return dict(value) if isinstance(value, dict) else None
 
     def fetch_abstract(work_id: str) -> str:

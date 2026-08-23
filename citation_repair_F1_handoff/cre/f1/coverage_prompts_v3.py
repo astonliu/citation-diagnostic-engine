@@ -96,12 +96,15 @@ prompt package is sealed here (DEC-044 defers the batch freeze).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from . import sentence_spans as ss
+from .anthropic_transport import CACHE_BREAK_MARKER
 from .recording_adapter import PaidCallMeter
 from .coverage_aggregate import fulltext_judge_dict_v3, no_usable_fulltext_dict
 
@@ -291,7 +294,7 @@ Evidence: [discussion] s1 Soil texture varied little across sites. s2 Nitrogen e
 END OF EXAMPLES
 
 ATOMIC CLAIM
-<<ATOMIC_CLAIM>>
+<<<CACHE_BREAK>>><<ATOMIC_CLAIM>>
 
 CITED-PAPER FULL TEXT (labelled sections, sentence ids)
 <evidence>
@@ -301,6 +304,24 @@ CITED-PAPER FULL TEXT (labelled sections, sentence ids)
 Return ONLY one JSON object with exactly these keys: engages_subject, contradicts,
 unconfirmed_specifics, rationale, evidence_spans. No other text, and no second object.
 """
+
+# WHERE THE PROMPT IS CUT FOR BILLING, spelled literally so it is visible where it
+# happens. Everything above the marker is the STATIC header -- instructions, rules
+# and worked examples, ~4.3 k tokens, byte-identical on every call of the run --
+# and everything below it varies per claim. ``anthropic_transport`` removes the
+# marker and turns it into a cache breakpoint, and the blocks it returns
+# concatenate back to these bytes minus the marker, so the model sees exactly the
+# token stream it saw before: a BILLING change, not a prompt change.
+#
+# THE MARKER IS ON THE SAME LINE as ``<<ATOMIC_CLAIM>>`` on purpose. On its own
+# line it would leave an extra newline behind when removed, and "the bytes are
+# unchanged" would stop being true.
+#
+# Checked at import, like the F5 prompt's: a template that lost or doubled the
+# marker must fail here and not at the first live call, where a lost breakpoint is
+# invisible except in the bill.
+assert COVERAGE_PROMPT_V3.count(CACHE_BREAK_MARKER) == 1, (
+    "the v3 coverage prompt must carry exactly one cache breakpoint marker")
 
 
 # ==========================================================================
@@ -362,9 +383,18 @@ def render_prompt(atomic_claim: str, sections) -> str:
     paper. A single regex pass substitutes each slot exactly once and never rescans
     what it inserted, so injected placeholder text survives verbatim as inert
     characters."""
+    # THE MARKER IS OURS, and exactly one of it may exist: the adapter refuses a
+    # prompt carrying two. Both substituted values are untrusted -- a model wrote
+    # the claim, a fetched paper wrote the sections -- so a marker appearing
+    # inside either would otherwise turn a hostile or unlucky paper into a raised
+    # transport error for the whole reference. It is removed from the values, the
+    # same thing the adapter does to the template's own copy, so the model never
+    # sees it either way.
     filled = {
-        "<<ATOMIC_CLAIM>>": atomic_claim,
-        "<<EVIDENCE_SECTIONS>>": render_evidence_sections(sections),
+        "<<ATOMIC_CLAIM>>": str(atomic_claim or "").replace(
+            CACHE_BREAK_MARKER, ""),
+        "<<EVIDENCE_SECTIONS>>": render_evidence_sections(sections).replace(
+            CACHE_BREAK_MARKER, ""),
     }
     return _SLOT_RE.sub(lambda match: filled[match.group(0)], COVERAGE_PROMPT_V3)
 
@@ -703,8 +733,58 @@ def fulltext_of(evidence) -> Optional[dict]:
     return fulltext if isinstance(fulltext, dict) else None
 
 
+def _claim_verdicts(claims, sections, call_llm, meter, claim_executor):
+    """One parsed verdict per claim, in claim order, serially or overlapped.
+
+    THE METER IS THE DELICATE PART. ``PaidCallMeter`` is deliberately THREAD-LOCAL
+    -- ``judgment_run`` reads it as a before/after delta on the thread that judged
+    the record -- so a worker thread bumping it would book the call against a
+    tally nobody reads, and the record would report zero paid coverage calls. So a
+    worker records its attempt in a slot of its own and the CALLING thread folds
+    the total in afterwards, in a ``finally``: an attempt that raised was still
+    paid for, and it is still counted.
+    """
+    if claim_executor is None:
+        verdicts = []
+        for claim in claims:
+            prompt = render_prompt(claim, sections)
+            meter.bump()
+            verdicts.append(parse_coverage_v3(call_llm(prompt)))
+        return verdicts
+
+    claims = list(claims)
+    attempted = [0] * len(claims)
+
+    def ask(index: int, claim) -> "CoverageVerdictV3":
+        prompt = render_prompt(claim, sections)
+        attempted[index] = 1          # one slot, one writer: no lock needed
+        return parse_coverage_v3(call_llm(prompt))
+
+    futures = [claim_executor.submit(ask, index, claim)
+               for index, claim in enumerate(claims)]
+    try:
+        # EVERY future is resolved before anything is raised. Returning at the
+        # first failure would leave sibling calls running against state this
+        # function is about to stop owning, and would lose their attempts from
+        # the tally.
+        verdicts, failures = [], []
+        for future in futures:
+            try:
+                verdicts.append(future.result())
+            except Exception as exc:                       # noqa: BLE001
+                failures.append(exc)
+    finally:
+        for _ in range(sum(attempted)):
+            meter.bump()
+    if failures:
+        # The FIRST failure in claim order, which is the one the serial loop
+        # would have raised.
+        raise failures[0]
+    return verdicts
+
+
 def make_coverage_judge_v3(
-    call_llm: Callable[[str], str]
+    call_llm: Callable[[str], str], *, claim_executor=None
 ) -> Callable[[list, dict], list]:
     """A ``coverage_judge(claims, evidence) -> list[dict]`` over the FULL TEXT.
 
@@ -725,12 +805,48 @@ def make_coverage_judge_v3(
     raises is an evidence-selection MISS -- no spans, or prose that would not align --
     because raising there quarantined the whole reference and destroyed every claim on
     it, and because the literature treats selection failure as a recall miss (Sarol,
-    Recall@20 = 0.54, item retained)."""
+    Recall@20 = 0.54, item retained).
+
+    ``claim_executor`` OVERLAPS THE PER-CLAIM CALLS and is the one thing here that
+    is about cost rather than correctness: coverage was 42% of a measured run's
+    busy time and every claim in the loop is independent -- same sections, same id
+    map, same prompt bytes, no shared mutable state. Pass an executor whose
+    concurrency is bounded (and, if the caller also runs references in parallel,
+    bounded together with them -- nested fan-out multiplies otherwise) and the
+    claims are dispatched together; leave it None and the loop is the serial loop
+    it always was.
+
+    WHAT STAYS IDENTICAL with an executor: the prompt for each claim, the parse,
+    the label check, span resolution, and the ORDER and CONTENT of the returned
+    verdicts, all of which are computed in claim order on the calling thread from
+    replies that are merely fetched concurrently.
+
+    WHAT CHANGES, and only on the error path: a claim whose reply cannot be
+    interpreted still raises the same exception for the same claim, but the calls
+    for the claims after it have already been dispatched and PAID. Serially they
+    would never have been made. The meter is told about every call that was
+    actually attempted, so the recorded spend stays true; it is the spend itself
+    that is higher on a reference that fails.
+    """
     # ONE CALL PER CLAIM IS BILLED (see above), and one seam invocation is not
     # one call -- so the tally is taken here, inside the closure over the
     # transport, where the calls actually happen. The fail-closed empty-evidence
     # return below never reaches the model and is left unmetered on purpose.
     meter = PaidCallMeter()
+    if claim_executor is not None and not callable(
+            getattr(claim_executor, "submit", None)):
+        raise ValueError("claim_executor must expose submit() or be None")
+    # THE ONE NUMBER THE DEFERRED BODY-CACHE DECISION TURNS ON, recorded here
+    # because it cannot be recovered afterwards. Moving the cited-paper body
+    # above the claim would let it be cached per paper, and the saving is
+    # entirely a function of CLAIMS PER BODY -- a record join says 2.64 on a
+    # 14-record subset, body-size clustering says 7.41 over all calls, and
+    # judgment_predictions.jsonl cannot settle it because it does not persist
+    # cited_fulltext.sections for every record. One row per seam invocation with
+    # the body's hash and its claim count settles it exactly, and changes not one
+    # byte of any prompt.
+    body_log: list = []
+    body_log_lock = threading.Lock()
 
     def coverage_judge(claims: list, evidence: dict) -> list:
         fulltext = fulltext_of(evidence) or {}
@@ -743,15 +859,21 @@ def make_coverage_judge_v3(
         # makes silence mean absence -- get a confident established=False and an F6
         # out of no evidence at all. A hold is the only honest answer when there is
         # nothing to read.
-        if not render_evidence_sections(sections):
+        rendered_sections = render_evidence_sections(sections)
+        if not rendered_sections:
             return [no_usable_fulltext_dict() for _ in claims]
+        with body_log_lock:
+            body_log.append({
+                "body_sha256": hashlib.sha256(
+                    rendered_sections.encode("utf-8")).hexdigest(),
+                "body_chars": len(rendered_sections),
+                "claims": len(list(claims)),
+            })
         labels = supplied_labels(sections)
         units_by_label = ss.segment_sections(sections)
         out = []
-        for claim in claims:
-            prompt = render_prompt(claim, sections)
-            meter.bump()
-            verdict = parse_coverage_v3(call_llm(prompt))
+        for verdict in _claim_verdicts(claims, sections, call_llm, meter,
+                                       claim_executor):
             for entry in verdict.evidence_spans:
                 if entry["label"] not in labels:
                     raise ValueError(
@@ -765,4 +887,7 @@ def make_coverage_judge_v3(
         return out
 
     coverage_judge.paid_call_meter = meter
+    # Appended in arrival order and never hashed into anything; sort it before
+    # reporting if the order matters to the reader.
+    coverage_judge.body_log = body_log
     return coverage_judge

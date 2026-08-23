@@ -72,7 +72,7 @@ import os
 import re
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Callable, Iterable, Optional
 
 from . import judgment_band as jb
@@ -687,6 +687,15 @@ def _read_jsonl_lines(path: str) -> list:
         return []
     with open(path, encoding="utf-8") as f:
         return [line.rstrip("\n") for line in f if line.strip()]
+
+
+#: How many documents may have their Phase 1 in flight ahead of the document
+#: being resolved. ONE is deliberate and sufficient: the point is to have
+#: coverage work available while a document's Phase 2 drains, and one document of
+#: references is already more work than a worker pool of 32 can hold. A deeper
+#: queue would buy nothing and would hold more documents' records in memory
+#: before their checkpoint.
+_DOCUMENT_LOOKAHEAD = 1
 
 
 def _preserve_torn_tail(out_dir: str, lines: list) -> str:
@@ -1748,6 +1757,12 @@ def _cocitation_overlay(items: "list[dict]") -> dict:
         "by_citation_id": by_citation_id,
         "group_records": group_records,
         "groups": len(groups),
+        # THE IDS, not only their count. ``sentence_groups`` is a SET SIZE and
+        # therefore not additive: every group-less item carries the same empty
+        # sentence id, so a caller that aggregates one co-citation group at a
+        # time must union the ids and count once, or it turns one collapsed
+        # bucket into one bucket per item.
+        "sentence_group_ids": sorted(sentence_groups),
         "sentence_groups": len(sentence_groups),
         "members_in_cocitation_groups": members_in_groups,
         "group_size_distribution": size_distribution,
@@ -2037,10 +2052,13 @@ def _instrument_f5_seams(seams: dict) -> tuple[dict, dict]:
     wrapper counts the call that actually ran; retrieval protocol details are
     copied only when that seam exposes an executed-protocol log.
     """
+    # Imported here, like every other f5_seams reference in this module: the F5
+    # path is optional and this file must import with F5 unwired.
+    from . import f5_seams as _f5s
     observed = {"retrieval_calls": 0, "attestation_calls": 0,
                 "judge_calls": 0, "judge_model_calls": 0,
                 "judge_cache_hits": 0, "verifier_calls": 0,
-                "retrieval_protocols": []}
+                "retrieval_protocols": [], "_protocols_consumed": 0}
     evidence_store = getattr(
         seams.get("fetch_comparability_source"), "evidence_store", None)
     observed["evidence_store_counters"] = (
@@ -2061,12 +2079,18 @@ def _instrument_f5_seams(seams: dict) -> tuple[dict, dict]:
         def call(*args, **kwargs):
             with observation_lock:
                 observed[counter] += 1
-                before = len(getattr(fn, "executed_protocols", ()))
             result = fn(*args, **kwargs)
             if name == "retrieve_superseding_candidates":
+                # DRAINED, never sliced from a per-call baseline. Under parallel
+                # Phase 2 two callers reading their own "before" length would both
+                # copy the same new protocols and the manifest would report a
+                # retrieval that ran once as having run twice. One shared consumed
+                # count is exact whatever the interleaving.
                 with observation_lock:
                     protocols = list(getattr(fn, "executed_protocols", ()))
-                    observed["retrieval_protocols"].extend(protocols[before:])
+                    consumed = observed["_protocols_consumed"]
+                    observed["retrieval_protocols"].extend(protocols[consumed:])
+                    observed["_protocols_consumed"] = len(protocols)
             return result
         for attribute in ("model_id", "model_settings", "thread_safe"):
             if hasattr(fn, attribute):
@@ -2082,7 +2106,34 @@ def _instrument_f5_seams(seams: dict) -> tuple[dict, dict]:
     if callable(seams.get("verify_contradiction")):
         wrapped["verify_contradiction"] = observe(
             "verify_contradiction", "verifier_calls")
+    # THE BUNDLE'S CLAIM MUST SURVIVE INSTRUMENTATION. ``dict(seams)`` drops the
+    # F5SeamBundle type, and with it ``thread_safe`` -- which is the value the
+    # Phase 2 gate reads. Rebuilding the bundle here (rather than recomputing the
+    # claim from the wrappers) keeps the decision with the code that owns the
+    # bundle's mutable state; a plain injected dict still makes no claim.
+    if isinstance(seams, _f5s.F5SeamBundle):
+        wrapped = _f5s.F5SeamBundle(
+            wrapped, thread_safe=seams.thread_safe,
+            counter_lock=seams.counter_lock, audit_logs=seams.audit_logs)
     return wrapped, observed
+
+
+def _sort_f5_audit_logs(f5_seams, f5_runtime) -> None:
+    """Put every F5 audit log into content order before anything reads it.
+
+    Appends from parallel Phase 2 workers arrive in thread-completion order. That
+    order must not reach a manifest, a hash or a persisted artifact, so every log
+    is sorted on a field it already carries, once, here -- after the run loop and
+    before the manifest is assembled.
+    """
+    from . import f5_seams as _f5s
+    if isinstance(f5_seams, _f5s.F5SeamBundle):
+        f5_seams.sort_audit_logs()
+    if isinstance(f5_runtime, dict):
+        _f5s.sort_audit_log(
+            "source_packet_log", f5_runtime.get("source_packet_log"))
+        _f5s.sort_audit_log(
+            "protocol_log", f5_runtime.get("retrieval_protocols"))
 
 
 def _f5_manifest_block(f5_policy, f5_records, f5_runtime) -> dict:
@@ -2586,8 +2637,9 @@ def run_natural_judgment(
     reference work inside a document, while the co-citation barrier, counter
     folds, durable records, annotation queue and hash chain all commit in the
     original parser order.  Prompts, evidence scope, parsers, policies and retry
-    rules are unchanged.  F5/F7 Phase 2 remains serial when either stateful seam
-    bundle is wired; Phase 1 still overlaps safely.
+    rules are unchanged.  F5/F7 Phase 2 runs parallel only when every wired
+    stateful seam bundle DECLARES ``thread_safe`` -- a bundle that makes no claim
+    keeps Phase 2 serial -- while Phase 1 overlaps regardless.
     """
     if (isinstance(max_workers, bool) or not isinstance(max_workers, int)
             or not 1 <= max_workers <= 32):
@@ -2906,6 +2958,44 @@ def run_natural_judgment(
     side_fh = open(sidecar_path, "a", encoding="utf-8")
     groups_fh = open(groups_path, "a", encoding="utf-8")
 
+    # DURABLE OUTPUT IS BUFFERED TO THE CHECKPOINT BOUNDARY.
+    #
+    # WHY. Predictions were written per reference while the checkpoint advanced
+    # per DOCUMENT, so an interrupt after the first record of a document and
+    # before its checkpoint left rows on disk that the resume -- which skips only
+    # checkpointed documents -- then wrote a second time. The window was the
+    # whole of Phase 2, and document pipelining widens it further.
+    #
+    # The fix is to make the document BOTH the write granularity and the
+    # checkpoint granularity, which is what this file's own resume documentation
+    # has always claimed. Records are composed, hashed and chained in reference
+    # order exactly as before -- only the moment of writing moves -- so the bytes
+    # of every artifact are unchanged. An interrupt now leaves either the whole
+    # document or none of it, and a crash INSIDE the flush is a torn tail, which
+    # ``_recover_chain`` already preserves and refuses rather than truncating.
+    # EVERY append-mode artifact belongs here, not merely the predictions. The
+    # co-citation group rows are computed BEFORE Phase 2 and were written there:
+    # the window between "group rows durable" and "checkpoint durable" spanned
+    # the whole of Phase 2, so a crash inside it replayed the document and
+    # appended every group record a second time -- the same duplication path,
+    # in the one artifact that was left out of the buffer.
+    out_buffer: dict = {"pred": [], "side": [], "queue": [], "review": [],
+                        "groups": []}
+
+    def flush_emitted() -> None:
+        """Write one document's buffered output, in the crash-invariant order."""
+        # predictions >= sidecar >= manifest, at every instant, including
+        # mid-flush: a reader can never see a chain link for a record that is
+        # not on disk.
+        for handle, key in ((pred_fh, "pred"), (side_fh, "side"),
+                            (queue_fh, "queue"), (review_fh, "review"),
+                            (groups_fh, "groups")):
+            if not out_buffer[key]:
+                continue
+            handle.write("".join(line + "\n" for line in out_buffer[key]))
+            handle.flush()
+            out_buffer[key].clear()
+
     # Every F5 record produced this run, for the discovery queue and the manifest
     # tallies. Collected at emit so it follows the same crash invariant as the
     # predictions themselves.
@@ -2974,16 +3064,16 @@ def run_natural_judgment(
         for failure in failures:
             key = str(failure.get("text_sha256") or _canonical_sha256(failure))
             sentence_partition_diagnostics[key] = dict(failure)
-        # Write order pins the crash invariant: predictions >= sidecar >= manifest.
-        pred_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        pred_fh.flush()
+        # Composed and chained HERE, in reference order, and written at the
+        # document boundary by ``flush_emitted``. The bytes and their order are
+        # what they always were.
+        out_buffer["pred"].append(json.dumps(rec, ensure_ascii=False))
         psha = _canonical_sha256(rec)
         prev_link = _chain_link(prev_link, psha)
         chain_count += 1
-        side_fh.write(json.dumps(
+        out_buffer["side"].append(json.dumps(
             {"citation_id": rec["citation_id"], "prediction_sha256": psha,
-             "link": prev_link}, ensure_ascii=False) + "\n")
-        side_fh.flush()
+             "link": prev_link}, ensure_ascii=False))
         bump(rec["disposition"])
         for _label in rec.get("label") or ():
             emitted_labels[_label] = emitted_labels.get(_label, 0) + 1
@@ -3029,12 +3119,11 @@ def run_natural_judgment(
                 "atomic_claims": rec["atomic_claims"],
                 "evidence": rec["evidence"],
             })
-            queue_fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            queue_fh.flush()
+            out_buffer["queue"].append(json.dumps(payload, ensure_ascii=False))
         elif rec["human_review_required"]:
             nonlocal human_review_records
             human_review_records += 1
-            review_fh.write(json.dumps({
+            out_buffer["review"].append(json.dumps({
                 "citation_id": rec["citation_id"],
                 "citing_pmcid": rec.get("citing_pmcid"),
                 "terminal_outcome": rec["terminal_outcome"],
@@ -3054,16 +3143,23 @@ def run_natural_judgment(
                 # A contract failure a human cannot see is a ticket nobody can act
                 # on.
                 "failed_model_responses": rec.get("failed_model_responses") or [],
-            }, ensure_ascii=False) + "\n")
-            review_fh.flush()
+            }, ensure_ascii=False))
 
     worker_pool = (ThreadPoolExecutor(
         max_workers=max_workers, thread_name_prefix="cre-judgment")
         if max_workers > 1 else None)
+    # PHASE 2 PARALLELISM IS EARNED PER BUNDLE, and F5 no longer fails the test
+    # by construction. Each stateful bundle declares thread safety only when the
+    # seams that reach a model declare it and its own mutable state is guarded
+    # (F5: a single-flight judgment cache, locked counters, sorted audit logs);
+    # an unwired bundle is vacuously safe, and anything that makes no claim is
+    # treated as unsafe.
     f7_parallel_safe = (f7_seams is None
                         or getattr(f7_seams, "thread_safe", False) is True)
+    f5_parallel_safe = (f5_seams is None
+                        or getattr(f5_seams, "thread_safe", False) is True)
     phase2_parallel = (
-        worker_pool is not None and f5_seams is None and f7_parallel_safe)
+        worker_pool is not None and f5_parallel_safe and f7_parallel_safe)
 
     def coverage_attempt(item: dict, claims_cache, order: int) -> tuple:
         # Each worker owns its tally.  Shared counter mutation would make a
@@ -3110,141 +3206,223 @@ def run_natural_judgment(
             return rec, exc
 
     t0 = time.time()
+
+    def _submit_document(fn: str) -> dict:
+        """Parse, select and SUBMIT one document's Phase 1. Never waits.
+
+        Returned as a plan rather than acted on, so the caller can keep the pool
+        fed with document N+1's Phase 1 while document N is still in Phase 2 --
+        and so a document that cannot be judged at all still takes its turn in
+        document order instead of checkpointing out of turn.
+        """
+        nonlocal refs_seen, docs_processed
+        pmcid = jb._pmcid_from_filename(fn)
+        docs_processed += 1
+        print(f"[judgment-run] doc {docs_processed}: {pmcid} "
+              f"| elapsed {time.time() - t0:.0f}s | pairs {refs_seen}")
+        try:
+            refs = parse_pmc_xml(os.path.join(xml_dir, fn), source_pmcid=pmcid)
+        except Exception as e:                        # noqa: BLE001 - best effort
+            if production:
+                # The preflight parsed this document successfully; a second
+                # pass failing means the two passes disagree about the
+                # population. Skipping would silently shrink it.
+                raise PrebandContractError(
+                    f"production: {pmcid} parsed in the preflight but FAILED "
+                    f"during execution ({type(e).__name__}: {e}); the "
+                    "validated population is not the judged population")
+            print(f"[judgment-run-parse-skip] {pmcid}: {e}")
+            return {"pmcid": pmcid, "skip": {"pmcid": pmcid, "error": str(e)}}
+
+        # THE HASH-PINNED CITATION SELECTION, APPLIED HERE AND NOWHERE
+        # ELSE: after the real parser has produced the real Reference
+        # objects, before any of them is judged. Narrowing the POPULATION at
+        # this point leaves every surviving reference running the identical
+        # code path it would on a whole-corpus run -- which is the only way a
+        # subset run's numbers mean the same thing as the full run's. `None`
+        # (the ordinary case) returns the list unchanged.
+        refs = csel.apply_selection(refs, selection)
+        if not refs:
+            print(f"[judgment-run-selection-skip] {pmcid}: "
+                  "no selected references in this document")
+            return {"pmcid": pmcid, "skip": {"pmcid": pmcid}}
+
+        # PHASE 1 over the whole document. A co-citation group verdict needs
+        # every member's coverage, so nothing is emitted until the document's
+        # coverage is complete. `pending` preserves REF ORDER exactly, so the
+        # emit sequence, the record shapes and the hash chain are unchanged --
+        # only the moment of writing moves, from per reference to per
+        # document, which is already the checkpoint granularity.
+        pending: list = []
+        # THE RELEASE UNIT of each pending entry, parallel to ``pending``:
+        # the citance group a reference belongs to, or None for a row that
+        # never reaches Phase 1 and so joins no group.
+        #
+        # WHY THE CITANCE GROUP AND NOT THE PARTITION KEY. Phase 2 needs its
+        # reference's co-citation verdict, and that verdict needs every
+        # member of the unit the claims were judged in. ``cocitation.partition``
+        # keys on the marker CLUSTER where attribution narrowed the sentence
+        # -- a key only Phase 1 can know -- but a cluster id is
+        # ``"<citance_group_id>:c<NN>"``, so every partition is contained in
+        # one citance group. The citance group is therefore the smallest unit
+        # that is both known before Phase 1 and closed under partitioning:
+        # releasing it can never split a group across two overlays.
+        release_keys: list = []
+        marker_scope.tally_document(scope_counts, refs)
+        # Atomic claims are a pure function of the citing sentence, so one
+        # citance citing [52,53,54,55] extracts ONCE instead of once per
+        # reference. Scoped to the document -- a citance is a within-document
+        # object -- which captures the whole fanout while keeping the cache
+        # bounded on a corpus run.
+        claims_cache = (_OrderedClaimsCache()
+                        if worker_pool is not None else {})
+        for order, ref in enumerate(refs):
+            refs_seen += 1
+            executed_ids.add(ref.citation_id)
+            # THE BAND-1 LABEL IS READ FIRST, and counted regardless of which
+            # gate goes on to exclude the row. It used to be read only after
+            # the exclusion check below had already `continue`d, which lost
+            # every label on a reference with no citance or no cited PMID --
+            # the exact population F1/F2/F8 fire on.
+            cleared, disp_label, preband_label = _preband(ref.citation_id, disp)
+            if isinstance(preband_label, str) and preband_label.strip():
+                ck = preband_label.strip()
+                preband_label_census[ck] = preband_label_census.get(ck, 0) + 1
+            # THE IDENTIFIER BAND 1 RESOLVED, read from the disposition
+            # artifact rather than re-derived from the reference. This is the
+            # whole of the handoff fix: `jb.exclusion_reason` below now sees
+            # what Band 1 actually found, instead of re-checking the CLAIMED
+            # pmid and discarding a reference Band 1 had already cleared.
+            identifier = (disp_obj.identifier(ref.citation_id)
+                          if disp_obj is not None else {})
+            if identifier:
+                identifier_kinds[identifier.get("kind") or "none"] = (
+                    identifier_kinds.get(identifier.get("kind") or "none", 0)
+                    + 1)
+            reason = jb.exclusion_reason(ref, resolved_identifier=identifier)
+            if reason is not None:                    # no citance / no cited work
+                pending.append((_excluded_record(
+                    ref, reason, resolved_identifier=identifier), None))
+                release_keys.append(None)
+                continue
+            if not cleared:
+                rec = _excluded_record(ref, disp_label, preband_label,
+                                       resolved_identifier=identifier)
+                pending.append((rec, None))
+                release_keys.append(None)
+                if disp_label == DISP_EXCLUDED_PREBAND:
+                    k = str(preband_label)
+                    preband_by_label[k] = preband_by_label.get(k, 0) + 1
+                continue
+
+            item = jb.build_item(ref, resolved_identifier=identifier)
+            if item is None:                          # defensive; exclusion caught above
+                pending.append((_excluded_record(
+                    ref, DISP_EXCLUDED_NO_CITANCE,
+                    resolved_identifier=identifier), None))
+                release_keys.append(None)
+                continue
+
+            # Review check (optional injected lookup; cached per pmid).
+            pmid = item["cited_pmid"]
+            if pubtypes_lookup is not None:
+                if pmid not in pubtype_cache:
+                    pubtype_cache[pmid] = pubtypes_lookup(pmid)
+                item["cited_is_review"] = jb.is_review(pubtype_cache[pmid])
+
+            if worker_pool is None:
+                result = coverage_attempt(item, claims_cache, order)
+            else:
+                claims_cache.register(item["citing_sentence"], order)
+                result = worker_pool.submit(
+                    coverage_attempt, item, claims_cache, order)
+            # A future placeholder is resolved below.  On the one-worker
+            # path the tuple is already complete, preserving the original
+            # call sequence and failure semantics.
+            pending.append(result)
+            release_keys.append(
+                cocitation.group_id_of(item)
+                or f"~solo~{item['citation_id']}")
+
+
+        return {"pmcid": pmcid, "pending": pending,
+                "release_keys": release_keys}
+
     try:
+        # ONE DOCUMENT OF LOOKAHEAD. Document N+1's Phase 1 is submitted before
+        # document N is resolved, so the pool has coverage work to run while N's
+        # Phase 2 drains instead of standing idle at a barrier -- the second of
+        # the two drains per document, and the one that grows with the worker
+        # count.
+        #
+        # WHAT DOES NOT MOVE: records commit in original reference order within a
+        # document and documents commit in corpus order, because the processing
+        # half below runs one document at a time in the order they were
+        # submitted. A finished document therefore cannot checkpoint ahead of an
+        # earlier one.
         scanned = 0
+        inflight: list = []
+        plans = []
         for fn in files:
-            pmcid = jb._pmcid_from_filename(fn)
-            if pmcid in done:                             # resume: already processed
+            if jb._pmcid_from_filename(fn) in done:        # resume: already done
                 continue
             if max_docs is not None and scanned >= max_docs:
                 break
             scanned += 1
-            docs_processed += 1
-            print(f"[judgment-run] doc {docs_processed}: {pmcid} "
-                  f"| elapsed {time.time() - t0:.0f}s | pairs {refs_seen}")
-            try:
-                refs = parse_pmc_xml(os.path.join(xml_dir, fn), source_pmcid=pmcid)
-            except Exception as e:                        # noqa: BLE001 - best effort
-                if production:
-                    # The preflight parsed this document successfully; a second
-                    # pass failing means the two passes disagree about the
-                    # population. Skipping would silently shrink it.
-                    raise PrebandContractError(
-                        f"production: {pmcid} parsed in the preflight but FAILED "
-                        f"during execution ({type(e).__name__}: {e}); the "
-                        "validated population is not the judged population")
-                print(f"[judgment-run-parse-skip] {pmcid}: {e}")
-                ckpt_fh.write(json.dumps({"pmcid": pmcid, "error": str(e)}) + "\n")
+            plans.append(fn)
+        # One sentinel per lookahead slot drains the documents still in flight;
+        # every plan is processed exactly once and in corpus order.
+        for fn in plans + [None] * _DOCUMENT_LOOKAHEAD:
+            if fn is not None:
+                inflight.append(_submit_document(fn))
+                if len(inflight) <= _DOCUMENT_LOOKAHEAD:
+                    continue
+            if not inflight:
+                continue
+            plan = inflight.pop(0)
+            pmcid = plan["pmcid"]
+            if plan.get("skip") is not None:
+                # A document with nothing judgeable still takes its turn: its
+                # checkpoint may not overtake an earlier document's.
+                flush_emitted()
+                ckpt_fh.write(json.dumps(plan["skip"]) + "\n")
                 ckpt_fh.flush()
                 done.add(pmcid)
                 _write_json_atomic(manifest_path, progress_manifest())
                 continue
+            pending = plan["pending"]
+            release_keys = plan["release_keys"]
 
-            # THE HASH-PINNED CITATION SELECTION, APPLIED HERE AND NOWHERE
-            # ELSE: after the real parser has produced the real Reference
-            # objects, before any of them is judged. Narrowing the POPULATION at
-            # this point leaves every surviving reference running the identical
-            # code path it would on a whole-corpus run -- which is the only way a
-            # subset run's numbers mean the same thing as the full run's. `None`
-            # (the ordinary case) returns the list unchanged.
-            refs = csel.apply_selection(refs, selection)
-            if not refs:
-                print(f"[judgment-run-selection-skip] {pmcid}: "
-                      "no selected references in this document")
-                ckpt_fh.write(json.dumps({"pmcid": pmcid}) + "\n")
-                ckpt_fh.flush()
-                done.add(pmcid)
-                _write_json_atomic(manifest_path, progress_manifest())
-                continue
-
-            # PHASE 1 over the whole document. A co-citation group verdict needs
-            # every member's coverage, so nothing is emitted until the document's
-            # coverage is complete. `pending` preserves REF ORDER exactly, so the
-            # emit sequence, the record shapes and the hash chain are unchanged --
-            # only the moment of writing moves, from per reference to per
-            # document, which is already the checkpoint granularity.
-            pending: list = []
-            marker_scope.tally_document(scope_counts, refs)
-            # Atomic claims are a pure function of the citing sentence, so one
-            # citance citing [52,53,54,55] extracts ONCE instead of once per
-            # reference. Scoped to the document -- a citance is a within-document
-            # object -- which captures the whole fanout while keeping the cache
-            # bounded on a corpus run.
-            claims_cache = (_OrderedClaimsCache()
-                            if worker_pool is not None else {})
-            for order, ref in enumerate(refs):
-                refs_seen += 1
-                executed_ids.add(ref.citation_id)
-                # THE BAND-1 LABEL IS READ FIRST, and counted regardless of which
-                # gate goes on to exclude the row. It used to be read only after
-                # the exclusion check below had already `continue`d, which lost
-                # every label on a reference with no citance or no cited PMID --
-                # the exact population F1/F2/F8 fire on.
-                cleared, disp_label, preband_label = _preband(ref.citation_id, disp)
-                if isinstance(preband_label, str) and preband_label.strip():
-                    ck = preband_label.strip()
-                    preband_label_census[ck] = preband_label_census.get(ck, 0) + 1
-                # THE IDENTIFIER BAND 1 RESOLVED, read from the disposition
-                # artifact rather than re-derived from the reference. This is the
-                # whole of the handoff fix: `jb.exclusion_reason` below now sees
-                # what Band 1 actually found, instead of re-checking the CLAIMED
-                # pmid and discarding a reference Band 1 had already cleared.
-                identifier = (disp_obj.identifier(ref.citation_id)
-                              if disp_obj is not None else {})
-                if identifier:
-                    identifier_kinds[identifier.get("kind") or "none"] = (
-                        identifier_kinds.get(identifier.get("kind") or "none", 0)
-                        + 1)
-                reason = jb.exclusion_reason(ref, resolved_identifier=identifier)
-                if reason is not None:                    # no citance / no cited work
-                    pending.append((_excluded_record(
-                        ref, reason, resolved_identifier=identifier), None))
+            # PHASE 1 RESOLUTION, and where Phase 2 is allowed to start.
+            #
+            # Every shared tally is still folded on the MAIN thread and every
+            # record still commits in original reference order. What changes is
+            # that a resolved slot no longer waits for the whole document: as
+            # soon as the last member of one citance group clears Phase 1, that
+            # group's co-citation overlay is final and its members' Phase 2 work
+            # is dispatched. The document-wide drain -- W-1 idle workers waiting
+            # on the slowest coverage call before any Phase 2 call could start --
+            # is what that removes.
+            #
+            # Slots are filled by index, so completion order is invisible
+            # downstream. The tallies folded here are all commutative sums, which
+            # is why folding them as slots complete is the same arithmetic.
+            slots: list = [None] * len(pending)
+            group_indices: dict = {}
+            outstanding: dict = {}
+            for slot_index, release_key in enumerate(release_keys):
+                if release_key is None:
                     continue
-                if not cleared:
-                    rec = _excluded_record(ref, disp_label, preband_label,
-                                           resolved_identifier=identifier)
-                    pending.append((rec, None))
-                    if disp_label == DISP_EXCLUDED_PREBAND:
-                        k = str(preband_label)
-                        preband_by_label[k] = preband_by_label.get(k, 0) + 1
-                    continue
+                group_indices.setdefault(release_key, []).append(slot_index)
+                outstanding[release_key] = outstanding.get(release_key, 0) + 1
+            overlay_by_key: dict = {}
+            phase2_futures: dict = {}
 
-                item = jb.build_item(ref, resolved_identifier=identifier)
-                if item is None:                          # defensive; exclusion caught above
-                    pending.append((_excluded_record(
-                        ref, DISP_EXCLUDED_NO_CITANCE,
-                        resolved_identifier=identifier), None))
-                    continue
-
-                # Review check (optional injected lookup; cached per pmid).
-                pmid = item["cited_pmid"]
-                if pubtypes_lookup is not None:
-                    if pmid not in pubtype_cache:
-                        pubtype_cache[pmid] = pubtypes_lookup(pmid)
-                    item["cited_is_review"] = jb.is_review(pubtype_cache[pmid])
-
-                if worker_pool is None:
-                    result = coverage_attempt(item, claims_cache, order)
-                else:
-                    claims_cache.register(item["citing_sentence"], order)
-                    result = worker_pool.submit(
-                        coverage_attempt, item, claims_cache, order)
-                # A future placeholder is resolved below in parser order.  On
-                # the one-worker path the tuple is already complete, preserving
-                # the original call sequence and failure semantics.
-                pending.append(result)
-
-            # Resolve Phase 1 in original reference order and fold every shared
-            # tally on the main thread.  Workers may finish in any order; none
-            # can commit observable run state out of order.
-            resolved_pending: list = []
-            for entry in pending:
-                if isinstance(entry, Future):
-                    entry = entry.result()
+            def _fill_slot(slot_index: int, entry) -> None:
                 # Excluded records were appended directly as (rec, None).
                 if len(entry) == 2:
-                    resolved_pending.append(entry)
-                    continue
+                    slots[slot_index] = entry
+                    return
                 rec, extra_or_item, local_scope_counts, error = entry
                 _merge_marker_scope_counts(scope_counts, local_scope_counts)
                 if error is not None:
@@ -3259,85 +3437,132 @@ def run_natural_judgment(
                     rec["ts"] = int(time.time())
                     print(f"[judgment-run-stage-failure] "
                           f"{rec['citation_id']}: coverage: {error}")
-                    resolved_pending.append((rec, None))
-                    continue
+                    slots[slot_index] = (rec, None)
+                    return
                 if rec.get("fulltext_incomplete_hold") is True:
                     # Its OWN tally, never `counts`. `counts` is one entry per
                     # emitted record and is summed into `total_records`, so an
                     # extra key there would corrupt the record count rather than
                     # add a statistic -- same reason f4_counts is separate.
                     fulltext_counts["no_usable_fulltext"] += 1
-                resolved_pending.append((rec, extra_or_item))
-            pending = resolved_pending
+                slots[slot_index] = (rec, extra_or_item)
 
-            # CO-CITATION AGGREGATION over the judged pairs of this document.
-            judged_items = [extra[0] for _rec, extra in pending if extra is not None]
-            overlay = _cocitation_overlay(judged_items)
-            doc_group_records = overlay["group_records"]
+            def _release(release_key: str) -> None:
+                """One citance group has cleared Phase 1: aggregate and dispatch.
+
+                The overlay is computed over THIS group's judged items only. That
+                is the same overlay the document-wide pass would produce for
+                these members, because a partition key is either the citance
+                group, a marker cluster inside it, or a solo id -- never a key
+                shared with another citance group.
+                """
+                members = [slots[i][1][0] for i in group_indices[release_key]
+                           if slots[i] is not None and slots[i][1] is not None]
+                overlay_by_key[release_key] = _cocitation_overlay(members)
+                if not phase2_parallel:
+                    # Serial Phase 2 runs in reference order after Phase 1, as
+                    # it always has: dispatching here would reorder the model
+                    # calls of a run whose whole promise is that it did not.
+                    return
+                for slot_index in group_indices[release_key]:
+                    rec, extra = slots[slot_index]
+                    if extra is None:
+                        continue
+                    item, claims, verdicts = extra
+                    flags, summary = overlay_by_key[release_key][
+                        "by_citation_id"].get(item["citation_id"], ((), None))
+                    if summary is not None:
+                        rec["cocitation"] = summary
+                    phase2_futures[slot_index] = worker_pool.submit(
+                        finish_attempt, rec, item, claims, verdicts, flags)
+
+            def _resolved(slot_index: int, entry) -> None:
+                _fill_slot(slot_index, entry)
+                release_key = release_keys[slot_index]
+                if release_key is None:
+                    return
+                outstanding[release_key] -= 1
+                if outstanding[release_key] == 0:
+                    _release(release_key)
+
+            phase1_futures = {}
+            for slot_index, entry in enumerate(pending):
+                if isinstance(entry, Future):
+                    phase1_futures[entry] = slot_index
+                else:
+                    _resolved(slot_index, entry)
+            for future in as_completed(phase1_futures):
+                _resolved(phase1_futures[future], future.result())
+
+            # CO-CITATION ACCOUNTING for the document, folded once, in
+            # first-appearance group order so the artifact and every count are
+            # what a serial run wrote. ``group_indices`` is insertion-ordered by
+            # first appearance, which is the order the document-wide partition
+            # produced.
+            doc_group_records: list = []
+            sentence_group_ids: set = set()
+            for release_key in group_indices:
+                overlay = overlay_by_key.get(release_key)
+                if overlay is None:              # a group nothing resolved for
+                    continue
+                doc_group_records.extend(overlay["group_records"])
+                sentence_group_ids.update(overlay["sentence_group_ids"])
+                cocitation_counts["groups"] += overlay["groups"]
+                cocitation_counts["members_in_cocitation_groups"] += overlay[
+                    "members_in_cocitation_groups"]
+                for size, n in overlay["group_size_distribution"].items():
+                    group_sizes[size] = group_sizes.get(size, 0) + n
             for record in doc_group_records:
                 cocitation_counts["group_claims_covered"] += record["claims_covered"]
                 cocitation_counts["group_claims_uncovered"] += record["claims_uncovered"]
                 cocitation_counts["group_claims_unknown"] += record["claims_unknown"]
-            cocitation_counts["groups"] += overlay["groups"]
-            cocitation_counts["sentence_groups"] += overlay["sentence_groups"]
+            # A SET SIZE, counted once per document: every group-less item shares
+            # the empty sentence id, and summing per-group counts would report
+            # that one collapsed bucket once per item.
+            cocitation_counts["sentence_groups"] += len(sentence_group_ids)
             cocitation_counts["cocitation_groups"] += len(doc_group_records)
-            cocitation_counts["members_in_cocitation_groups"] += overlay[
-                "members_in_cocitation_groups"]
-            for size, n in overlay["group_size_distribution"].items():
-                group_sizes[size] = group_sizes.get(size, 0) + n
             for record in doc_group_records:
-                groups_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-            groups_fh.flush()
+                out_buffer["groups"].append(
+                    json.dumps(record, ensure_ascii=False))
 
-            # PHASE 2 computes independently but commits in original ref order.
-            # F5/F7 seam bundles may carry internal mutable audit state not owned
-            # by this orchestrator, so their Phase 2 remains serial rather than
-            # assuming thread safety and risking a semantic change.
-            if not phase2_parallel:
-                for rec, extra in pending:
-                    if extra is None:
-                        emit(rec)
-                        continue
+            # PHASE 2 COMMITS IN ORIGINAL REFERENCE ORDER, whichever path ran.
+            # An F5/F7 seam bundle carries internal mutable state this
+            # orchestrator does not own, so it runs parallel only when the bundle
+            # itself declares thread safety; otherwise this loop stays serial
+            # rather than assuming it and risking a semantic change.
+            for slot_index, (rec, extra) in enumerate(slots):
+                if extra is None:
+                    emit(rec)
+                    slots[slot_index] = None
+                    continue
+                if slot_index in phase2_futures:
+                    rec, error = phase2_futures[slot_index].result()
+                else:
                     item, claims, verdicts = extra
-                    cid = item["citation_id"]
-                    flags, summary = overlay["by_citation_id"].get(
-                        cid, ((), None))
+                    overlay = overlay_by_key.get(release_keys[slot_index], {})
+                    flags, summary = (overlay.get("by_citation_id") or {}).get(
+                        item["citation_id"], ((), None))
                     if summary is not None:
                         rec["cocitation"] = summary
                     rec, error = finish_attempt(
                         rec, item, claims, verdicts, flags)
-                    if error is not None:
-                        _preserve_stage_failure(rec, "F3_F7", error)
-                    emit(rec)
-            else:
-                phase2_pending: list = []
-                for rec, extra in pending:
-                    if extra is None:
-                        phase2_pending.append((rec, None, None))
-                        continue
-                    item, claims, verdicts = extra
-                    cid = item["citation_id"]
-                    flags, summary = overlay["by_citation_id"].get(
-                        cid, ((), None))
-                    if summary is not None:
-                        rec["cocitation"] = summary
-                    result = worker_pool.submit(
-                        finish_attempt, rec, item, claims, verdicts, flags)
-                    phase2_pending.append((result, item, extra))
+                if error is not None:
+                    _preserve_stage_failure(rec, "F3_F7", error)
+                emit(rec)
+                # RELEASED as soon as it is composed. A record carries its
+                # evidence, including the cited paper's full text, and with one
+                # document of lookahead two documents' slots are resident at
+                # once; the buffered line is all that is still needed.
+                slots[slot_index] = None
+                phase2_futures.pop(slot_index, None)
 
-                for result, item, extra in phase2_pending:
-                    if extra is None:
-                        emit(result)
-                        continue
-                    rec, error = result.result()
-                    if error is not None:
-                        _preserve_stage_failure(rec, "F3_F7", error)
-                    emit(rec)
-
+            # THE CHECKPOINT BOUNDARY, in the only order that is recoverable:
+            # every record durable, then the checkpoint that says so, then the
+            # manifest anchor.
+            flush_emitted()
             ckpt_fh.write(json.dumps({"pmcid": pmcid}) + "\n")
             ckpt_fh.flush()
             done.add(pmcid)
-            # Checkpoint boundary: advance the manifest anchor atomically.
             _write_json_atomic(manifest_path, progress_manifest())
     finally:
         if worker_pool is not None:
@@ -3348,6 +3573,12 @@ def run_natural_judgment(
         ckpt_fh.close()
         side_fh.close()
         groups_fh.close()
+
+    # Deterministic audit-log order, once, before the manifest or any artifact
+    # reads one. Phase 2 workers append in completion order; nothing downstream
+    # may inherit that order.
+    if f5_seams is not None:
+        _sort_f5_audit_logs(f5_seams, f5_runtime)
 
     # Module hashes were captured BEFORE execution (see `_module_hashes` at the
     # top of this function): read here, they could describe a module edited
@@ -3427,6 +3658,8 @@ def run_natural_judgment(
             "f5_f7_phase2_serialized": not phase2_parallel,
             **({"f7_thread_safe_parallel": True}
                if f7_seams is not None and phase2_parallel else {}),
+            **({"f5_thread_safe_parallel": True}
+               if f5_seams is not None and phase2_parallel else {}),
             "quality_invariants": (
                 "Prompts, models, evidence scope, parsers, policies, verifier "
                 "gates, per-sentence extraction reuse, terminal filtering, "

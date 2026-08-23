@@ -124,6 +124,7 @@ def validate_candidate_screen_batch(
 # --------------------------------------------------------------------------
 import hashlib
 import json
+import threading
 
 #: Bumped independently of :data:`CANDIDATE_SCREEN_VERSION`, which versions the
 #: CONTRACT above and is stamped on every screened candidate. This versions the
@@ -344,13 +345,21 @@ def make_candidate_screen(complete, *,
     if not callable(complete):
         raise ValueError("candidate screen needs a callable completion seam")
     log = render_log if render_log is not None else []
+    # The screen runs inside F5, which runs inside a parallel Phase 2. ``+=`` on
+    # a function attribute is a read-modify-write, and this counter is reported
+    # as what the screen actually did; the lock covers the increment only, never
+    # the model call. The render log is appended under it too, so a row is never
+    # interleaved with a counter update, and it is sorted by its reader.
+    counter_lock = threading.Lock()
 
     def screen(*, claim: str, candidates) -> CandidateScreenBatch:
-        screen.calls += 1
+        with counter_lock:
+            screen.calls += 1
         prompt, handles, stats = render_screen_prompt(
             claim, candidates, abstract_chars=abstract_chars,
             max_prompt_tokens=max_prompt_tokens)
-        log.append(stats)
+        with counter_lock:
+            log.append(stats)
         raw = complete(prompt)
         batch = parse_screen_batch(raw, handles, prompt=prompt)
         # Validate here as well as in the detector. The detector's failure mode
@@ -364,6 +373,10 @@ def make_candidate_screen(complete, *,
     screen.parser_version = CANDIDATE_SCREEN_PARSER_VERSION
     screen.contract_version = CANDIDATE_SCREEN_VERSION
     screen.render_log = log
+    screen.counter_lock = counter_lock
+    # DECLARED, not assumed: the counter is locked and the parse is pure, so what
+    # remains is whether the injected transport is safe to call concurrently.
+    screen.thread_safe = getattr(complete, "thread_safe", False) is True
     return screen
 
 

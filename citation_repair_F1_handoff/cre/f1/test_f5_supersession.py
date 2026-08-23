@@ -13,6 +13,7 @@ fail-closed strict-JSON parsing, the frozen-engine mapping through
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pytest
@@ -1664,3 +1665,70 @@ def test_an_unscreened_batch_keeps_exact_retrieval_order():
              for row in record["candidate_assessments"]}
     assert by_id["W2"]["reason"] != "deep_comparison_budget_exhausted"
     assert by_id["W3"]["reason"] == "deep_comparison_budget_exhausted"
+
+
+# ==========================================================================
+# THE SCREEN IN SHADOW -- wired, recorded, routing on nothing
+# ==========================================================================
+# The gate is wired before there is anything to validate it against: batch003
+# produced zero F5 findings from 56 deep comparisons, so a dropped candidate
+# cannot yet be shown to be a candidate worth dropping. Shadow mode runs the real
+# screen on the real prompt, records its verdict, and rewrites every
+# clear_mismatch to uncertain -- the ONLY decision the detector routes on -- so
+# the batch stays comparable to one run with no screen at all.
+def test_a_shadow_screen_still_deep_compares_every_candidate():
+    candidates = (candidate("W2"), candidate("W3"))
+    seams, calls = make_seams(candidates=candidates)
+    seen = []
+
+    def shadow(**kwargs):
+        # What the real screen decided...
+        decided = screen_batch(
+            screen_row("W2", "clear_mismatch", relevance="mismatch",
+                       relation="neutral"),
+            screen_row("W3", "clear_mismatch", relevance="mismatch",
+                       relation="neutral"))
+        seen.extend(row.decision for row in decided.decisions)
+        # ...and what shadow mode hands back.
+        return dataclasses.replace(decided, decisions=tuple(
+            dataclasses.replace(row, decision="uncertain")
+            for row in decided.decisions))
+
+    seams["screen_candidates"] = shadow
+    policy = F5Policy(candidate_screen_enabled=True)
+    _temporal, records = decide_f5(
+        CLAIMS, SUPPORTED, EVIDENCE, policy=policy, **seams)
+
+    record = records[0]
+    assert seen == ["clear_mismatch", "clear_mismatch"]
+    # Every candidate was still deep-compared: the recorded verdicts are the
+    # verdicts an unscreened run would have produced.
+    assert calls["judge"] == 2
+    assert record["candidate_screen_status"] == "complete"
+    assert record["cost_stage_counts"]["screen_clear_mismatch"] == 0
+    assert record["cost_stage_counts"]["screen_uncertain"] == 2
+    assert not any(row["reason"] == "abstract_screen_clear_mismatch"
+                   for row in record["candidate_assessments"])
+    validate_f5_record(record, policy)
+
+
+def test_a_screen_that_raises_costs_its_call_and_nothing_else():
+    candidates = (candidate("W2"), candidate("W3"))
+    seams, calls = make_seams(candidates=candidates)
+
+    def broken(**_kwargs):
+        raise RuntimeError("screen transport is down")
+
+    seams["screen_candidates"] = broken
+    policy = F5Policy(candidate_screen_enabled=True)
+    _temporal, records = decide_f5(
+        CLAIMS, SUPPORTED, EVIDENCE, policy=policy, **seams)
+
+    record = records[0]
+    # Fail OPEN: an optional cost optimization that broke is not evidence of
+    # absence, so every candidate proceeds through the source-bound path.
+    assert calls["judge"] == 2
+    assert record["candidate_screen_status"] == "failure_open_to_deep_comparison"
+    assert all(row["screen_decision"] == "not_performed"
+               for row in record["candidate_assessments"])
+    validate_f5_record(record, policy)
