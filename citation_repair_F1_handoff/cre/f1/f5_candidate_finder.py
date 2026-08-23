@@ -164,49 +164,77 @@ def _month(value: str) -> "int | None":
     return _MONTHS.get(raw.casefold())
 
 
+def _node_interval(node) -> "tuple[str, str, str, str] | None":
+    """One date node -> earliest/latest ISO plus precision and the raw text."""
+    year_text = (node.findtext("Year") or "").strip()
+    month_text = (node.findtext("Month") or "").strip()
+    day_text = (node.findtext("Day") or "").strip()
+    if not year_text:
+        medline = (node.findtext("MedlineDate") or "").strip()
+        match = re.search(r"(?<!\d)(18|19|20)\d{2}(?!\d)", medline)
+        if not match:
+            return None
+        year_text = match.group(0)
+        month_match = re.search(
+            r"\b(" + "|".join(re.escape(k) for k in sorted(
+                _MONTHS, key=len, reverse=True)) + r")\b",
+            medline.casefold())
+        month_text = month_match.group(1) if month_match else ""
+        day_text = ""
+    try:
+        year = int(year_text)
+    except ValueError:
+        return None
+    month = _month(month_text)
+    try:
+        day = int(day_text) if day_text else None
+    except ValueError:
+        day = None
+    raw = "-".join(x for x in (year_text, month_text, day_text) if x)
+    try:
+        if month is None:
+            lo, hi, precision = _dt.date(year, 1, 1), _dt.date(year, 12, 31), "year"
+        elif day is None:
+            lo = _dt.date(year, month, 1)
+            hi = _dt.date(year, month, calendar.monthrange(year, month)[1])
+            precision = "month"
+        else:
+            lo = hi = _dt.date(year, month, day)
+            precision = "day"
+    except ValueError:
+        return None
+    return lo.isoformat(), hi.isoformat(), precision, raw
+
+
 def _date_interval(article) -> "tuple[str, str, str, str] | None":
     """Return earliest/latest ISO dates plus precision/raw publication date."""
     date_nodes = list(article.findall(".//Article/ArticleDate"))
     date_nodes += list(article.findall(".//Article/Journal/JournalIssue/PubDate"))
     for node in date_nodes:
-        year_text = (node.findtext("Year") or "").strip()
-        month_text = (node.findtext("Month") or "").strip()
-        day_text = (node.findtext("Day") or "").strip()
-        if not year_text:
-            medline = (node.findtext("MedlineDate") or "").strip()
-            match = re.search(r"(?<!\d)(18|19|20)\d{2}(?!\d)", medline)
-            if not match:
-                continue
-            year_text = match.group(0)
-            month_match = re.search(
-                r"\b(" + "|".join(re.escape(k) for k in sorted(
-                    _MONTHS, key=len, reverse=True)) + r")\b",
-                medline.casefold())
-            month_text = month_match.group(1) if month_match else ""
-            day_text = ""
-        try:
-            year = int(year_text)
-        except ValueError:
-            continue
-        month = _month(month_text)
-        try:
-            day = int(day_text) if day_text else None
-        except ValueError:
-            day = None
-        raw = "-".join(x for x in (year_text, month_text, day_text) if x)
-        try:
-            if month is None:
-                lo, hi, precision = _dt.date(year, 1, 1), _dt.date(year, 12, 31), "year"
-            elif day is None:
-                lo = _dt.date(year, month, 1)
-                hi = _dt.date(year, month, calendar.monthrange(year, month)[1])
-                precision = "month"
-            else:
-                lo = hi = _dt.date(year, month, day)
-                precision = "day"
-        except ValueError:
-            continue
-        return lo.isoformat(), hi.isoformat(), precision, raw
+        interval = _node_interval(node)
+        if interval is not None:
+            return interval
+    return None
+
+
+def _issue_interval(article) -> "tuple[str, str, str, str] | None":
+    """The JOURNAL ISSUE publication date ONLY -- never ``ArticleDate``.
+
+    The two disagree, and on exactly the records F8 needs. When PubMed converts
+    a record into its own retraction notice it replaces the title with
+    ``"Retraction."`` and moves the JournalIssue PubDate to the issue the
+    retraction appears in, but LEAVES ``ArticleDate Electronic`` at the original
+    article's e-publication date. Measured 2026-08-23: 31758846 carries
+    ArticleDate 2019-11-23 and PubDate 2023 Jan. ``_date_interval`` prefers
+    ArticleDate, so dating that notice from ``pub_date`` puts the retraction
+    four years before it happened -- and turns a 2021 citation, which is CLEAR,
+    into an F8 accusation. The notice date is the issue date, and this is the
+    only field that reports it.
+    """
+    for node in article.findall(".//Article/Journal/JournalIssue/PubDate"):
+        interval = _node_interval(node)
+        if interval is not None:
+            return interval
     return None
 
 
@@ -224,6 +252,7 @@ def _parse_pubmed_xml(xml_text: str) -> dict[str, dict]:
         if interval is None:
             continue
         date_lo, date_hi, precision, raw_date = interval
+        issue = _issue_interval(article)
         title = _text(article.find(".//Article/ArticleTitle"))
         abstract_parts = []
         for node in article.findall(".//Article/Abstract/AbstractText"):
@@ -267,6 +296,13 @@ def _parse_pubmed_xml(xml_text: str) -> dict[str, dict]:
                 comments_corrections.append({
                     "ref_type": ref_type,
                     "pmid": linked_pmid,
+                    # PubMed emits a RetractionIn with a RefSource and NO PMID
+                    # for a whole publisher class. Discarding RefSource left
+                    # those relationships with nothing to date the notice by, so
+                    # F8 could not fire on any of them; it is the only evidence
+                    # PubMed supplies for that shape. See f5_notice's
+                    # ``_unlinked_subject_state``.
+                    "ref_source": _text(node.find("RefSource")),
                     "note": _text(node.find("Note")),
                 })
         doi = ""
@@ -313,6 +349,11 @@ def _parse_pubmed_xml(xml_text: str) -> dict[str, dict]:
             "pub_date_latest": date_hi,
             "pub_date_precision": precision,
             "pub_date_raw": raw_date,
+            # The issue date, kept SEPARATELY from pub_date -- see
+            # ``_issue_interval`` for the four-year disagreement that makes the
+            # distinction load-bearing for F8.
+            "issue_pub_date": issue[0] if issue else "",
+            "issue_pub_date_latest": issue[1] if issue else "",
             "authors": authors,
             "authors_full": authors_full,
             "mesh": mesh_terms,
@@ -346,6 +387,19 @@ def _valid_metadata_record(record, pmid: str) -> bool:
             return False
     if not isinstance(record.get("doi"), str):
         return False
+    issue_lo = record.get("issue_pub_date")
+    issue_hi = record.get("issue_pub_date_latest")
+    if not isinstance(issue_lo, str) or not isinstance(issue_hi, str):
+        return False
+    if bool(issue_lo) != bool(issue_hi):
+        return False
+    if issue_lo:
+        try:
+            if _iso_date(issue_lo, "cached issue_pub_date") > _iso_date(
+                    issue_hi, "cached issue_pub_date_latest"):
+                return False
+        except ValueError:
+            return False
     for key in (
             "registry_ids", "version_work_ids", "cohort_ids", "dataset_ids",
             "demonstrably_distinct_from"):
@@ -356,10 +410,15 @@ def _valid_metadata_record(record, pmid: str) -> bool:
     if not isinstance(links, list):
         return False
     for link in links:
+        # The key set is EXACT, ``ref_source`` included, which is also how a
+        # record cached before RefSource was captured is invalidated: it fails
+        # this check and is re-fetched rather than silently costing the
+        # no-PMID-notice routes their only evidence.
         if (not isinstance(link, dict)
-                or set(link) != {"ref_type", "pmid", "note"}
+                or set(link) != {"ref_type", "pmid", "ref_source", "note"}
                 or not isinstance(link["ref_type"], str)
                 or not isinstance(link["pmid"], str)
+                or not isinstance(link["ref_source"], str)
                 or not isinstance(link["note"], str)):
             return False
     return True

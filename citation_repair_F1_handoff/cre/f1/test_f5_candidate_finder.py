@@ -129,6 +129,7 @@ def test_pubmed_metadata_keeps_notice_version_doi_and_trial_identity():
       <CommentsCorrectionsList>
         <CommentsCorrections RefType="UpdateOf"><PMID>103</PMID></CommentsCorrections>
         <CommentsCorrections RefType="RetractionIn"><PMID>105</PMID></CommentsCorrections>
+        <CommentsCorrections RefType="ErratumIn"><RefSource>10.1234/example</RefSource></CommentsCorrections>
       </CommentsCorrectionsList>
     </MedlineCitation><PubmedData><ArticleIdList>
       <ArticleId IdType="doi">10.1234/example</ArticleId>
@@ -138,9 +139,13 @@ def test_pubmed_metadata_keeps_notice_version_doi_and_trial_identity():
     assert row["registry_ids"] == ["clinicaltrialsgov:NCT00000001"]
     assert row["doi"] == "10.1234/example"
     assert row["version_work_ids"] == ["103"]
+    # RefSource is kept even when -- especially when -- the row links no PMID:
+    # it is the only evidence PubMed supplies for that relationship shape.
     assert row["comments_corrections"] == [
-        {"ref_type": "UpdateOf", "pmid": "103", "note": ""},
-        {"ref_type": "RetractionIn", "pmid": "105", "note": ""},
+        {"ref_type": "UpdateOf", "pmid": "103", "ref_source": "", "note": ""},
+        {"ref_type": "RetractionIn", "pmid": "105", "ref_source": "", "note": ""},
+        {"ref_type": "ErratumIn", "pmid": "",
+         "ref_source": "10.1234/example", "note": ""},
     ]
 
 

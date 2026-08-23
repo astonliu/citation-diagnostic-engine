@@ -206,7 +206,15 @@ _NOTICE_LOOKUP_STATUS = frozenset(
 # not be compared is not a notice that was checked and cleared.
 _NOTICE_DATE_STATUS = frozenset(
     {"not_applicable", "compared", "absent", "unparseable",
-     "as_of_unavailable", "boundary_uncertain", "after_cutoff"})
+     "as_of_unavailable", "boundary_uncertain", "after_cutoff",
+     # PubMed linked a subject relationship (e.g. RetractionIn) that carries NO
+     # notice PMID, and none of the RefSource routes could date it either. A
+     # distinct value from "absent" because the two hold for different reasons:
+     # "absent" is a linked record whose dates did not arrive, this one is a
+     # relationship PubMed never gave an addressable notice for. Keeping them
+     # apart is what lets F8 report WHICH boundary is missing instead of one
+     # undiagnosable reason for both.
+     "notice_pmid_absent"})
 # WHICH SIDE OF THE RETRACTION a publication type puts this work on. PubMed's
 # "Retracted Publication" (this article WAS retracted) and "Retraction of
 # Publication" / "Retraction Notice" (this article IS the notice) mean OPPOSITE

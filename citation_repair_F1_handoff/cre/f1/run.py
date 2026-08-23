@@ -212,7 +212,7 @@ def process_reference(ref: Reference, complete, *, ncbi_key="",
                       sim_threshold=85.0, match_threshold=85.0,
                       author_tripwire=True, session=None,
                       retraction_cache: dict | None = None,
-                      f8_fetch_meta=None) -> Reference:
+                      f8_fetch_meta=None, f8_resolve_doi=None) -> Reference:
     # SCOPE EXCLUSION, BEFORE ANY LOOKUP. A reference that is not a research
     # article and carries no PMID, DOI or title has nothing to look up and no
     # claim inside the taxonomy. Deciding it here costs no network call and,
@@ -248,7 +248,8 @@ def process_reference(ref: Reference, complete, *, ncbi_key="",
         # RETRY THE BOUNDARY BEFORE HOLDING. Every F8_UNRESOLVED reason names
         # something that did not ARRIVE, not something that was decided.
         assessment, attempts = assess_f8_timing_with_retry(
-            cited_pmid, ref.source_pmid, fetch_meta=f8_fetch_meta)
+            cited_pmid, ref.source_pmid, fetch_meta=f8_fetch_meta,
+            resolve_doi_to_pmid=f8_resolve_doi)
         ref.log.f8_timing_reason = assessment.reason
         ref.log.f8_timing_attempts = [
             {"attempt": a.attempt, "status": a.status, "reason": a.reason}
@@ -331,7 +332,7 @@ def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
         sim_threshold=85.0, match_threshold=85.0, author_tripwire=True,
         refs: Iterable[Reference] | None = None,
         complete: Callable[[str], str] | None = None,
-        f8_timing: bool = False, f8_fetch_meta=None) -> dict:
+        f8_timing: bool = False, f8_fetch_meta=None, f8_resolve_doi=None) -> dict:
     """Run Band 1 over the exact corpus.
 
     ``complete`` is an injectable production seam so the full-system launcher
@@ -356,6 +357,22 @@ def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
                 f8_memory[key] = finder.fetch_metadata(key)
             value = f8_memory[key]
             return dict(value) if isinstance(value, dict) else None
+
+        if f8_resolve_doi is None:
+            # The DOI route of the no-linked-notice path. Reached ONLY by a
+            # RetractionIn whose RefSource is a DOI that is not the record's
+            # own, so it costs nothing on the ordinary linked-PMID path.
+            # Memoized on the DOI for the same reason f8_memory exists.
+            from .ncbi_meta import DEFAULT_EMAIL as _EMAIL, ncbi_doi_to_pmid
+            f8_doi_memory: dict[str, str] = {}
+
+            def f8_resolve_doi(doi):
+                key = str(doi or "").strip().casefold()
+                if key not in f8_doi_memory:
+                    f8_doi_memory[key] = ncbi_doi_to_pmid(
+                        key, api_key=ncbi_key,
+                        email=openalex_mailto or _EMAIL, session=session)
+                return f8_doi_memory[key]
     stream = refs if refs is not None else iter_pmc_dir(pmc_dir)
 
     prediction_records, log_records = [], []
@@ -375,7 +392,8 @@ def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
                               match_threshold=match_threshold,
                               author_tripwire=author_tripwire, session=session,
                               retraction_cache=retraction_cache,
-                              f8_fetch_meta=f8_fetch_meta if f8_timing else None)
+                              f8_fetch_meta=f8_fetch_meta if f8_timing else None,
+                              f8_resolve_doi=f8_resolve_doi if f8_timing else None)
         except NonRetryableProviderError:
             raise
         except Exception as e:                # noqa: BLE001 - quarantine, never abort

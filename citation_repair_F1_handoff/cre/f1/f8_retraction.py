@@ -22,6 +22,12 @@ F8_BOUNDARY_ATTEMPTS = 2
 #: The F8_UNRESOLVED reasons a retry can plausibly clear: something did not
 #: arrive. Enumerated rather than "everything", so a reason whose cause is
 #: structural is not re-fetched to reproduce the same answer at cost.
+#: ``notice_pmid_absent_refsource_undatable`` is deliberately ABSENT from this
+#: set. It is the one F8_UNRESOLVED reason that is STRUCTURAL: PubMed answered,
+#: and its answer is that the RetractionIn relationship names no addressable
+#: notice and no datable RefSource. Re-fetching reproduces the same answer at
+#: cost. A DOI resolver that did not ANSWER is a different outcome and reports
+#: ``retraction_notice_or_date_unresolved``, which is retried.
 F8_RETRYABLE_REASONS = frozenset({
     "cited_metadata_failure",
     "citing_metadata_failure",
@@ -55,7 +61,8 @@ class F8TimingAttempt:
 
 
 def assess_f8_timing_with_retry(cited_pmid: str, citing_pmid: str, *, fetch_meta,
-                                attempts: int = F8_BOUNDARY_ATTEMPTS
+                                attempts: int = F8_BOUNDARY_ATTEMPTS,
+                                resolve_doi_to_pmid=None
                                 ) -> "tuple[F8TimingAssessment, list]":
     """:func:`assess_f8_timing`, retried while the BOUNDARY is what is missing.
 
@@ -73,7 +80,8 @@ def assess_f8_timing_with_retry(cited_pmid: str, citing_pmid: str, *, fetch_meta
     assessment = None
     for attempt in range(1, max(1, int(attempts)) + 1):
         assessment = assess_f8_timing(cited_pmid, citing_pmid,
-                                      fetch_meta=fetch_meta)
+                                      fetch_meta=fetch_meta,
+                                      resolve_doi_to_pmid=resolve_doi_to_pmid)
         attempt_log.append(F8TimingAttempt(
             attempt, assessment.status, assessment.reason))
         if assessment.status != F8_UNRESOLVED:
@@ -83,8 +91,8 @@ def assess_f8_timing_with_retry(cited_pmid: str, citing_pmid: str, *, fetch_meta
     return assessment, attempt_log
 
 
-def assess_f8_timing(cited_pmid: str, citing_pmid: str, *, fetch_meta
-                     ) -> F8TimingAssessment:
+def assess_f8_timing(cited_pmid: str, citing_pmid: str, *, fetch_meta,
+                     resolve_doi_to_pmid=None) -> F8TimingAssessment:
     """Apply the registered >=31-day rule, holding every missing boundary."""
     cited = str(cited_pmid or "").strip()
     citing = str(citing_pmid or "").strip()
@@ -117,7 +125,8 @@ def assess_f8_timing(cited_pmid: str, citing_pmid: str, *, fetch_meta
         return F8TimingAssessment(F8_UNRESOLVED, reason="citing_date_unavailable")
 
     notice = resolve_formal_notice(
-        cited, as_of_date=citing_day_raw, fetch_meta=fetch_meta)
+        cited, as_of_date=citing_day_raw, fetch_meta=fetch_meta,
+        resolve_doi_to_pmid=resolve_doi_to_pmid)
     if notice.notice_resolution == "resolved_clear":
         return F8TimingAssessment(
             F8_CLEAR, citing_date_earliest=citing_day_raw,
@@ -161,9 +170,18 @@ def assess_f8_timing(cited_pmid: str, citing_pmid: str, *, fetch_meta
             reason="only_non_retraction_notice_in_force")
     if (notice.notice_kind != "retraction"
             or notice.notice_resolution != "flagged" or not notice.date):
+        # A HOLD THAT SAYS WHICH BOUNDARY IS MISSING. Both branches hold, and
+        # neither is ever a fire; they differ in whether a retry can help and in
+        # what a reader has to go look at. ``notice_pmid_absent`` means PubMed
+        # linked a retraction relationship carrying no notice PMID and no
+        # datable RefSource -- the correct verdict for a work PubMed holds no
+        # boundary for, and one that only a non-PubMed retraction source could
+        # ever close.
         return F8TimingAssessment(
             F8_UNRESOLVED, citing_date_earliest=citing_day_raw,
-            reason="retraction_notice_or_date_unresolved")
+            reason=("notice_pmid_absent_refsource_undatable"
+                    if notice.date_status == "notice_pmid_absent"
+                    else "retraction_notice_or_date_unresolved"))
     try:
         notice_day = date.fromisoformat(notice.date)
     except ValueError:

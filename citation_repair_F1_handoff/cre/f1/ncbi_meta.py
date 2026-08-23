@@ -143,6 +143,58 @@ def _ncbi_params(base: dict, api_key: str, email: str) -> dict:
     return params
 
 
+#: ESearch, for the one lookup F8 needs that no other resolver here performs.
+ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+
+_DOI_SHAPE = re.compile(r"^10\.\d{4,9}/\S+$")
+
+
+def ncbi_doi_to_pmid(doi: str, api_key: str = "", email: str = "",
+                     session=None) -> str:
+    """The PMID PubMed indexes under ``doi``, or ``""`` when it indexes none.
+
+    The DOI route of F8's no-linked-notice path: PubMed emits a ``RetractionIn``
+    naming the notice ONLY by ``RefSource``, and when that RefSource is a DOI
+    that is not the record's own, this is what turns it back into a record that
+    can be dated. ``[AID]`` is the Article Identifier field, which is where
+    PubMed files the DOI.
+
+    RAISES :class:`RetrievalUnavailable` -- it does not swallow -- on a
+    transport failure, a non-200, or a body that is not JSON. The distinction
+    this module exists to keep: "PubMed has no record under this DOI" is a fact
+    about the literature and returns ``""``; "the lookup did not answer" is a
+    fact about the network, and an F8 boundary that reads the second as the
+    first would let an outage decide whether a citation is accused.
+    """
+    value = str(doi or "").strip()
+    if not _DOI_SHAPE.match(value):
+        return ""
+    params = _ncbi_params(
+        {"db": "pubmed", "retmode": "json", "retmax": "2",
+         "term": f"{value}[AID]"}, api_key, email)
+    try:
+        r = request_with_retry(session, ESEARCH, params, limiter=NCBI,
+                               timeout=20)
+    except requests.RequestException as exc:
+        raise RetrievalUnavailable(f"doi esearch transport failure: {exc}") from exc
+    if r is None or r.status_code != 200:
+        code = "no response" if r is None else r.status_code
+        raise RetrievalUnavailable(f"doi esearch returned {code}")
+    try:
+        data = r.json()
+    except ValueError as exc:
+        raise RetrievalUnavailable(f"doi esearch body is not JSON: {exc}") from exc
+    result = (data or {}).get("esearchresult") if isinstance(data, dict) else None
+    if not isinstance(result, dict):
+        raise RetrievalUnavailable("doi esearch payload has no esearchresult")
+    ids = [str(x).strip() for x in (result.get("idlist") or [])
+           if str(x).strip().isdigit()]
+    # AMBIGUITY IS NOT AN ANSWER. A DOI that indexes to more than one PubMed
+    # record identifies no single notice, and picking the first would date the
+    # boundary from a record nothing established is the right one.
+    return ids[0] if len(ids) == 1 else ""
+
+
 def ncbi_pubtypes(pmid: str, api_key: str = "", email: str = "",
                   session=None) -> "list[str] | None":
     """PubMed publication types for a PMID via EFetch (medline/text).
