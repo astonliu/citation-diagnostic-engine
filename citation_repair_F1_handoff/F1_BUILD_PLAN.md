@@ -15,7 +15,13 @@
 ## Assumptions (state, adjust if wrong)
 - PMC Open Access XML is the input substrate; you can pull a slice via the OA service or an existing local subset.
 - NCBI API key in hand (≈10 req/s). Anthropic API in hand. Add a Crossref polite-pool `mailto` and an OpenAlex `mailto`.
-- LLM filter = Claude Opus (your stronger-than-Topaz's-Haiku lever; the one citable F1 improvement).
+- LLM filter = **Claude Haiku 4.5** (`claude-haiku-4-5`), per DEC-084 (2026-08-24), on cost: Opus 5
+  measured $4.5988 for 327 complete papers and does not scale to a multi-thousand-paper run.
+  **This is not a model-side improvement over Topaz.** CITADEL used Claude 3.5 Haiku, zero-shot;
+  Haiku 4.5 is a later model in the same tier. The claim the paper may make is "a later Haiku,
+  same prompt-free zero-shot posture" — not "a stronger model than theirs." The F1 stage is a
+  faithful reimplementation with no citable model lever. Supersedes the Opus framing this line
+  carried until 2026-08-24. Opus-run and Haiku-run papers are separate strata (DEC-083).
 - Three databases, not four: PubMed, Crossref, OpenAlex. **Skip Google Scholar** (no API, rate-limit fragile, not reproducible). Note the omission in the paper.
 - F2 (wrong reference) falls out of the same pipeline for free — capture it, but F1 is the focus.
 
@@ -23,7 +29,7 @@
 
 ## Phase 0 — Setup & locked decisions (~30 min)
 - [ ] Create module dir: `cre/f1/` with `parser.py`, `lookup.py`, `compare.py`, `llm_filter.py`, `confirm.py`, `decide.py`, `run.py`, `schema.py`.
-- [ ] `config.yaml`: NCBI key, Anthropic key, Crossref mailto, OpenAlex mailto, rate limits, similarity threshold, Opus model pin string.
+- [ ] `config.yaml`: NCBI key, Anthropic key, Crossref mailto, OpenAlex mailto, rate limits, similarity threshold, Band-1 model pin string (`claude-haiku-4-5`).
 - [ ] Lock the **unverifiable** decision: references without a claimed PMID route to a separate `unverifiable` bucket and are **never** labeled F1. (Precedent: Topaz excluded the same ~23%.)
 - [ ] Lock the **precision-first** stance: when in doubt the system clears or sends to human review; it does not flag. A false F1 is an accusation; that error is the expensive one.
 - [ ] Decide output: per-reference JSON log with every stage's outcome (needed later for recall characterization + stage-resolution distribution).
@@ -34,7 +40,7 @@
 - [ ] **1c PMID lookup** (`lookup.py`): EFetch PubMed for the *claimed* PMID. Capture retrieved title/authors/journal/year. Record dead/invalid PMIDs explicitly (strong fabrication signal).
 - [ ] **1d Metadata comparison** (`compare.py`): normalize titles (lowercase, strip punctuation, collapse whitespace), `rapidfuzz.fuzz.token_sort_ratio`. Add corroborating checks: first-author surname match, year match. Output a mismatch flag + score.
 - [ ] **1e Mismatch flagging + artifact filter**: flag refs below threshold. Pattern-strip obvious parsing artifacts (truncated strings, encoding noise) before they reach the LLM.
-- [ ] **1f LLM filter** (`llm_filter.py`): Opus, structured JSON output, runs **only on the flagged subset**. Input = claimed metadata + retrieved record. Output ∈ {`fabrication`, `formatting_discrepancy`, `reference_error`, `uncertain`}. Prompt anchored on Topaz's own example (abbreviated/informal title that resolves to a real indexed paper = formatting discrepancy, not fabrication).
+- [ ] **1f LLM filter** (`llm_filter.py`): Haiku 4.5 (was Opus until DEC-084), structured JSON output, runs **only on the flagged subset**. Input = claimed metadata + retrieved record. Output ∈ {`fabrication`, `formatting_discrepancy`, `reference_error`, `uncertain`}. Prompt anchored on Topaz's own example (abbreviated/informal title that resolves to a real indexed paper = formatting discrepancy, not fabrication).
 - [ ] **1g Multi-DB confirmation** (`confirm.py`): for LLM survivors, search **claimed title + first author** (not the PMID) across:
   - PubMed ESearch `…[Title]`
   - Crossref `works?query.bibliographic=` (with mailto)

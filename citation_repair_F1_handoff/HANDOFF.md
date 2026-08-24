@@ -1,6 +1,6 @@
 # CRE F1 Stage — Handoff to Claude Code
 
-This package is the F1 (fabricated citation) detection stage of the Citation Repair Engine — a reimplementation of the Topaz et al. (Lancet 2026) verification pipeline, with a Claude Opus LLM filter replacing their Haiku step. Files are in `cre/f1/`.
+This package is the F1 (fabricated citation) detection stage of the Citation Repair Engine — a reimplementation of the Topaz et al. (Lancet 2026) verification pipeline. The LLM filter runs on **Claude Haiku 4.5** (`claude-haiku-4-5`) as of DEC-084 (2026-08-24), switched from Claude Opus 5 on cost. Topaz's CITADEL used Claude 3.5 Haiku zero-shot, so this is the **same model tier, a later model** — the stage carries no model-side improvement over theirs, and any earlier text here claiming an Opus lever is superseded. Files are in `cre/f1/`.
 
 ## Context you need
 
