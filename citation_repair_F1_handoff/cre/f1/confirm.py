@@ -30,6 +30,7 @@ from rapidfuzz import fuzz
 from .schema import Reference
 from .lookup import _normalize
 from .ratelimit import NCBI, CROSSREF, OPENALEX, request_with_retry
+from . import openalex_telemetry
 
 PUBMED_ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_ESUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
@@ -156,7 +157,19 @@ def search_crossref(title: str, mailto: str = "", s=requests) -> float | None:
         return None
 
 
-def search_openalex(title: str, mailto: str = "", s=requests) -> float | None:
+def search_openalex(title: str, mailto: str = "", s=requests, *,
+                    api_key: str = "") -> float | None:
+    """OpenAlex's best title-match score for ``title``, or None if it did not answer.
+
+    ``api_key`` authenticates the call. OpenAlex metered its API in 2026: an
+    anonymous caller gets $0.10/day and then 409s, a free key gets $1/day. A 409
+    lands on ``_json_or_none``, which returns None, so a spent allowance is an
+    UNANSWERED search and ``fully_answered`` refuses F1 -- which is correct, and
+    is also why the key matters: without one this leg stops answering a few
+    hundred references into a corpus run and F1 becomes structurally unreachable
+    for every reference after that. The parameter is authentication and billing
+    only; when it is empty the request is byte-identical to the keyless one.
+    """
     # See search_pubmed: a search that was never issued has no score.
     if not title:
         return None
@@ -164,8 +177,11 @@ def search_openalex(title: str, mailto: str = "", s=requests) -> float | None:
         params = {"filter": f"title.search:{title}", "per-page": 3}
         if mailto:
             params["mailto"] = mailto
-        data = _json_or_none(request_with_retry(s, OPENALEX_URL, params,
-                                                limiter=OPENALEX, timeout=20))
+        if api_key:
+            params["api_key"] = api_key
+        data = _json_or_none(openalex_telemetry.request(
+            openalex_telemetry.LEG_CONFIRM, s, OPENALEX_URL, params,
+            limiter=OPENALEX, timeout=20))
         if data is None:
             return None
         items = data.get("results")
@@ -184,11 +200,19 @@ def search_openalex(title: str, mailto: str = "", s=requests) -> float | None:
 
 
 def confirm(ref: Reference, api_key="", crossref_mailto="", openalex_mailto="",
-            match_threshold: float = 85.0, s=requests) -> dict:
+            match_threshold: float = 85.0, s=requests, *,
+            openalex_api_key: str = "") -> dict:
     """Search all three; record per-db best scores; return the dict.
 
     `match_threshold` is accepted for call-site symmetry but applied later in
     found_anywhere(); confirm() only gathers raw best-match scores.
+
+    ``api_key`` is NCBI's; ``openalex_api_key`` is OpenAlex's, and they are
+    separate parameters because they authenticate separate providers. Without
+    the OpenAlex one this function returns ``openalex: None`` for every
+    reference once the anonymous daily allowance is spent, which is honest but
+    makes ``fully_answered`` -- and therefore F1 -- unreachable for the rest of
+    the run.
     """
     title = ref.claimed.title
     # Independent providers have independent rate limiters and can overlap.  Do
@@ -196,16 +220,21 @@ def confirm(ref: Reference, api_key="", crossref_mailto="", openalex_mailto="",
     # transport creates independent requests. Injectable test transports remain
     # supported.
     transport = requests if isinstance(s, _REQUESTS_SESSION_TYPE) else s
+    # (fn, positional args, keyword args). The keyword slot exists because the
+    # two provider keys are NOT interchangeable: `api_key` here is NCBI's and is
+    # positional on search_pubmed, while OpenAlex's is keyword-only, so passing
+    # either one positionally to the wrong search is impossible.
     calls = {
-        "pubmed": (search_pubmed, (title, api_key, transport)),
+        "pubmed": (search_pubmed, (title, api_key, transport), {}),
         "crossref": (search_crossref,
-                     (title, crossref_mailto, transport)),
+                     (title, crossref_mailto, transport), {}),
         "openalex": (search_openalex,
-                     (title, openalex_mailto, transport)),
+                     (title, openalex_mailto, transport),
+                     {"api_key": openalex_api_key}),
     }
     with ThreadPoolExecutor(max_workers=len(calls)) as pool:
-        futures = {name: pool.submit(fn, *args)
-                   for name, (fn, args) in calls.items()}
+        futures = {name: pool.submit(fn, *args, **kwargs)
+                   for name, (fn, args, kwargs) in calls.items()}
         hits = {name: futures[name].result() for name in calls}
     ref.log.db_hits = hits
     return hits

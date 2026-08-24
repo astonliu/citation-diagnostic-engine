@@ -25,6 +25,7 @@ from .schema import (Reference, RetrievedRecord, FETCH_NOT_ATTEMPTED,
                      FETCH_ANSWERED_RECORD, FETCH_ANSWERED_ABSENT,
                      FETCH_RESOLVER_ERROR, fetch_answered)
 from .ratelimit import NCBI, request_with_retry
+from . import openalex_telemetry
 from .biblio_match import (match_score, flag_verdict, best_match,
                            VERDICT_SAME_WORK_VARIANT,
                            _crossref_candidates, _openalex_candidates,
@@ -300,12 +301,19 @@ def _maybe_rerank(claimed, candidates, accept, bm):
     return reranked if reranked is not None else bm
 
 
-def _parallel_noid_candidates(claimed, session, n=5):
-    """Crossref + OpenAlex no-PMID candidates, overlapped and stably merged."""
+def _parallel_noid_candidates(claimed, session, n=5, *, openalex_api_key=""):
+    """Crossref + OpenAlex no-PMID candidates, overlapped and stably merged.
+
+    ``openalex_api_key`` authenticates the OpenAlex leg. It is the leg that
+    empties a metered allowance (``search=`` tier, one call per PMID-less
+    reference), and an unauthenticated 409 comes back here as an empty candidate
+    list -- see the errors caveat on ``retrieve_candidates`` below.
+    """
     transport = requests if isinstance(session, _REQUESTS_SESSION_TYPE) else session
     with ThreadPoolExecutor(max_workers=2) as pool:
         crossref = pool.submit(_crossref_candidates, claimed, n, transport)
-        openalex = pool.submit(_openalex_candidates, claimed, n, transport)
+        openalex = pool.submit(_openalex_candidates, claimed, n, transport,
+                               api_key=openalex_api_key)
         candidates = crossref.result() + openalex.result()
 
     deduped = []
@@ -326,14 +334,25 @@ def _parallel_noid_candidates(claimed, session, n=5):
     return deduped
 
 
-def retrieve_candidates(claimed, n=5, session=None):
-    """Injectable no-PMID retrieval seam; production overlaps providers."""
-    return _parallel_noid_candidates(claimed, session, n=n)
+def retrieve_candidates(claimed, n=5, session=None, *, openalex_api_key=""):
+    """Injectable no-PMID retrieval seam; production overlaps providers.
+
+    KNOWN GAP, NOT FIXED HERE. Unlike ``biblio_match.retrieve_candidates``, this
+    seam accepts no ``errors`` list and passes none down, so a provider fault --
+    including an OpenAlex 409 from a spent daily allowance -- arrives at
+    ``fuzzy_biblio_lookup`` as an empty candidate list, indistinguishable from a
+    healthy search that found nothing. Closing it changes which references reach
+    ``undetermined`` via retrieval_incomplete, which is an F2 disposition change
+    and needs its own spec; it is recorded rather than patched in silently. See
+    ``test_openalex_api_key.py`` for the test that pins the current behaviour.
+    """
+    return _parallel_noid_candidates(claimed, session, n=n,
+                                     openalex_api_key=openalex_api_key)
 
 
 def fuzzy_biblio_lookup(ref: Reference, threshold: float = 85.0,
-                        session: requests.Session | None = None
-                        ) -> RetrievedRecord:
+                        session: requests.Session | None = None, *,
+                        openalex_api_key: str = "") -> RetrievedRecord:
     """Structured bibliographic lookup for references with no claimed PMID.
 
     Retrieves candidates concurrently from Crossref bibliographic search +
@@ -354,7 +373,9 @@ def fuzzy_biblio_lookup(ref: Reference, threshold: float = 85.0,
     confirmation path (its own all-errored guard), never straight to F1. Uses the
     shared CROSSREF / OPENALEX rate limiters.
     """
-    candidates = retrieve_candidates(ref.claimed, session=session)
+    candidates = retrieve_candidates(
+        ref.claimed, session=session,
+        **openalex_telemetry.openalex_key_kwarg(openalex_api_key))
     if not candidates:                       # both DBs errored or found nothing
         return RetrievedRecord(resolved=False)
     accept = threshold / 100.0
@@ -451,7 +472,8 @@ def _live_quarantines_variant(verdict: str, match, *,
 
 def compare_and_flag(ref: Reference, threshold: float = 85.0,
                      author_tripwire: bool = True,
-                     session: requests.Session | None = None) -> bool:
+                     session: requests.Session | None = None, *,
+                     openalex_api_key: str = "") -> bool:
     """Populate the log and return True if this reference is a CANDIDATE
     (dead PMID, claimed PMID resolves to a low-similarity title, or -- with the
     trip-wire on -- a similar title whose authors lack the claimed first author).
@@ -484,8 +506,9 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
         # title/name lookup, which is also required before an absent DOI may
         # support F1.
         if ref.claimed.claimed_doi:
-            doi_result = lookup_exact_doi(ref.claimed.claimed_doi,
-                                          s=session or requests)
+            doi_result = lookup_exact_doi(
+                ref.claimed.claimed_doi, s=session or requests,
+                **openalex_telemetry.openalex_key_kwarg(openalex_api_key))
             log.doi_lookup_status = doi_result.status
             log.doi_lookup_normalized = doi_result.normalized_doi
             log.doi_provider_statuses = dict(doi_result.providers)
@@ -496,8 +519,10 @@ def compare_and_flag(ref: Reference, threshold: float = 85.0,
                      if doi_result is not None
                      and doi_result.status == DOI_FOUND
                      and doi_result.record is not None
-                     else fuzzy_biblio_lookup(ref, threshold=threshold,
-                                              session=session))
+                     else fuzzy_biblio_lookup(
+                         ref, threshold=threshold, session=session,
+                         **openalex_telemetry.openalex_key_kwarg(
+                             openalex_api_key)))
         if (doi_result is not None
                 and doi_result.status == DOI_ANSWERED_ABSENT
                 and retrieved.resolved

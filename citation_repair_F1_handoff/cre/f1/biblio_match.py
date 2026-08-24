@@ -36,6 +36,7 @@ from rapidfuzz.distance import JaroWinkler
 
 from .schema import ClaimedRef, RetrievedRecord
 from .ratelimit import CROSSREF, OPENALEX, request_with_retry
+from . import openalex_telemetry
 from .textnorm import fold_bibliographic_text, fold_chemical_charges
 from .work_identity import (assess_same_work, first_author_equivalent,
                             doi_equivalent, journal_equivalent,
@@ -1551,11 +1552,38 @@ def _crossref_candidates(claimed: Claimed, n: int, session,
 
 
 def _openalex_candidates(claimed: Claimed, n: int, session,
-                         errors: Optional[list] = None) -> list[RetrievedRecord]:
+                         errors: Optional[list] = None, *,
+                         api_key: str = "",
+                         mailto: str = "") -> list[RetrievedRecord]:
+    """OpenAlex ``search=`` candidates for a PMID-less reference.
+
+    THE EXPENSIVE LEG. OpenAlex metered its API in 2026 and prices ``search=``
+    at $0.001 -- ten times the ``filter=`` tier confirm.py uses -- and this
+    fires on EVERY PMID-less reference, so it is the leg that empties a daily
+    allowance. ``api_key`` authenticates it; a spent allowance 409s, which
+    ``_json`` turns into an empty candidate list, and an empty candidate list is
+    where F2 recall goes to die.
+
+    It stays on ``search=`` deliberately. Switching to ``filter=title.search:``
+    would cut the bill 10x and would also change WHICH candidates come back,
+    which changes F2 and F1 outcomes -- a judgment change wearing a billing
+    change's clothes. If cost ever forces it, it needs its own spec and its own
+    before/after diff.
+
+    ``mailto`` joins the polite pool. It is a seam, not yet wired from the
+    entrypoints: threading it would add a query parameter to runs that set only
+    a mailto and no key, and this change is required to leave the keyless
+    request byte-identical.
+    """
+    params = {"search": claimed.title, "per-page": n}
+    if api_key:
+        params["api_key"] = api_key
+    if mailto:
+        params["mailto"] = mailto
     try:
-        resp = request_with_retry(session, OPENALEX_URL,
-                                  {"search": claimed.title, "per-page": n},
-                                  limiter=OPENALEX, timeout=20)
+        resp = openalex_telemetry.request(
+            openalex_telemetry.LEG_CANDIDATES, session, OPENALEX_URL, params,
+            limiter=OPENALEX, timeout=20)
     except requests.RequestException:
         if errors is not None:
             errors.append("openalex_candidates")
@@ -1574,7 +1602,8 @@ def _openalex_candidates(claimed: Claimed, n: int, session,
 
 def retrieve_candidates(claimed: Claimed, n: int = 5,
                         session: requests.Session | None = None,
-                        errors: Optional[list] = None) -> list[RetrievedRecord]:
+                        errors: Optional[list] = None, *,
+                        openalex_api_key: str = "") -> list[RetrievedRecord]:
     """Query Crossref ``query.bibliographic`` and OpenAlex ``search`` and parse
     the top-n of each into ``RetrievedRecord``. Dedup by DOI, then by normalized
     title. Reuses the shared CROSSREF / OPENALEX rate limiters.
@@ -1585,7 +1614,8 @@ def retrieve_candidates(claimed: Claimed, n: int = 5,
     (retrieval_incomplete, spec §14.6) instead of conflating it with a clean miss
     -- a flaky run must not silently shrink the scoreable population."""
     cands = _crossref_candidates(claimed, n, session, errors=errors) + \
-        _openalex_candidates(claimed, n, session, errors=errors)
+        _openalex_candidates(claimed, n, session, errors=errors,
+                             api_key=openalex_api_key)
 
     deduped: list[RetrievedRecord] = []
     seen_doi: set[str] = set()

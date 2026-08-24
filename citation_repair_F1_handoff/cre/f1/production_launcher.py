@@ -61,6 +61,7 @@ import subprocess
 from datetime import date
 
 from . import citation_selection
+from . import openalex_telemetry
 from . import preband_contract as pc
 from .judgment_run import run_natural_judgment
 
@@ -747,14 +748,22 @@ def _ncbi_f3_seams(ncbi_key: str, email: str):
     return resolve_pmcid, fetch_reflist
 
 
-def _openalex_abstract_seam(mailto: str):
-    """``doi -> abstract`` bound to one session and the polite-pool mailto."""
+def _openalex_abstract_seam(mailto: str, api_key: str = ""):
+    """``doi -> abstract`` bound to one session, the polite-pool mailto and the key.
+
+    The key is bound here, not left to the caller, for the same reason the seam
+    itself is: a run that forgets it does not fail. OpenAlex meters an anonymous
+    caller at $0.10/day and then 409s, and a 409 here returns ``""``, which the
+    judgment band reads as "this paper has no abstract" and terminates the
+    reference UNJUDGEABLE. A billing state must not read as a fact about a paper.
+    """
     import requests as _requests
     from .doi_lookup import fetch_openalex_abstract
     session = _requests.Session()
 
     def seam(doi: str) -> str:
-        return fetch_openalex_abstract(doi, s=session, mailto=mailto)
+        return fetch_openalex_abstract(doi, s=session, mailto=mailto,
+                                       api_key=api_key)
 
     return seam
 
@@ -769,6 +778,7 @@ def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
                 temperature=None, assistant_prefill=None,
                 anthropic_key: str = "", ncbi_key: str = "",
                 crossref_mailto: str = "", openalex_mailto: str = "",
+                openalex_api_key: str = "",
                 f1_complete=None,
                 f5_seams=None, f5_evidence_builder=None, f5_policy=None,
                 f7_seams=None, f7_evidence_builder=None, f7_policy=None,
@@ -910,12 +920,18 @@ def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
               f"parsed references selected "
               f"(cohort {selection.cohort_sha256[:12]})")
 
+    # Band 1's OpenAlex accounting window (see openalex_telemetry): Band 1 and
+    # Band 2 spend the same daily allowance from different legs, and a manifest
+    # that merged them could not say which one ran the account dry.
+    band1_openalex_before = openalex_telemetry.snapshot()
     run_band1(
         xml_dir, dataset_path, log_path, model=model,
         anthropic_key=anthropic_key, ncbi_key=ncbi_key,
         crossref_mailto=crossref_mailto,
-        openalex_mailto=openalex_mailto, refs=band1_refs,
+        openalex_mailto=openalex_mailto,
+        openalex_api_key=openalex_api_key, refs=band1_refs,
         complete=recorded_band1_complete, f8_timing=True)
+    band1_openalex_calls = openalex_telemetry.delta(band1_openalex_before)
     attestations = _band1_attestations(
         log_path, snapshot_date=band1_snapshot_date)
     tree_commit = tree["code_commit"]
@@ -932,7 +948,7 @@ def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
     # DOI-only reference, which is a wrong terminal answer produced by a throttle.
     if "fetch_openalex_abstract" not in run_kwargs:
         run_kwargs["fetch_openalex_abstract"] = _openalex_abstract_seam(
-            openalex_mailto)
+            openalex_mailto, openalex_api_key)
 
     manifest = launch(
         repo_dir=repo_dir, pkg_dir=pkg_dir, xml_dir=xml_dir,
@@ -947,6 +963,7 @@ def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         f5_policy=f5_policy, f7_seams=f7_seams,
         f7_evidence_builder=f7_evidence_builder, f7_policy=f7_policy,
         citation_selection_path=citation_selection_path,
+        openalex_api_key=openalex_api_key,
         **run_kwargs)
     manifest["full_launch"] = {
         "entrypoint": "production_launcher.launch_full",
@@ -956,6 +973,8 @@ def launch_full(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         "preband_manifest_path": disposition_manifest["manifest_path"],
         "band1_label_counts": disposition_manifest["label_counts"],
         "band1_check_attestations": attestations,
+        "band1_openalex_calls": band1_openalex_calls,
+        "openalex_authenticated": bool(openalex_api_key),
         "all_taxonomies_wired": True,
         "citation_selection": (
             {**selection.binding(), "source_run_proof": selection_proof}
@@ -973,12 +992,20 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
            temperature=None, assistant_prefill=None,
            f5_seams=None, f5_evidence_builder=None, f5_policy=None,
            f7_seams=None, f7_evidence_builder=None, f7_policy=None,
+           openalex_api_key: str = "",
            **run_kwargs) -> dict:
     """Verify every precondition, run in production mode, verify the receipt.
 
     Returns the run manifest with a ``launch_receipt`` block. Raises
     ``LaunchRefused`` before starting if any precondition fails, and after the
     run if the adapter receipt contradicts what was declared.
+
+    ``openalex_api_key`` is consumed here rather than forwarded: this band's
+    only OpenAlex leg is the injected ``fetch_openalex_abstract`` seam, which
+    ``launch_full`` has already bound to the key. What this function does with
+    the parameter is RECORD it -- as a boolean, never the key itself -- beside
+    the band's per-leg OpenAlex call tallies, so a manifest can be read to find
+    out whether the run was authenticated and whether it ran out of allowance.
     """
     # --- model authorization (DEC-065) ---------------------------------
     allowed = list(authorized_models or [])
@@ -1049,6 +1076,9 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
     # --- clean HEAD and runtime bytes ----------------------------------
     tree = verify_tree(repo_dir, pkg_dir)
 
+    # This band's OpenAlex window. Opened after the preconditions so a refused
+    # launch contributes no calls to anybody's tally.
+    band2_openalex_before = openalex_telemetry.snapshot()
     manifest = run_natural_judgment(
         xml_dir, out_dir,
         preband_disposition=preband_disposition,
@@ -1062,6 +1092,7 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         **({"assistant_prefill": resolved_prefill}
            if resolved_prefill is not None else {}),
         production=True, **run_kwargs)
+    band2_openalex_calls = openalex_telemetry.delta(band2_openalex_before)
 
     receipt = verify_receipt(adapter_receipt, model=model,
                              temperature=resolved_temperature)
@@ -1083,6 +1114,10 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
             "defeats it. Owning the transport is the only stronger check and is "
             "outside this repo."
         ),
+    }
+    manifest["openalex_calls"] = {
+        "authenticated": bool(openalex_api_key),
+        **band2_openalex_calls,
     }
     pc.assert_reportable_run(manifest, manifest["predictions_path"])
     _persist_finished_manifest(manifest)

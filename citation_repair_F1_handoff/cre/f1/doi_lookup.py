@@ -13,6 +13,7 @@ evidence.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import quote
@@ -21,6 +22,7 @@ import requests
 
 from .biblio_match import _coerce_year, _crossref_record, _openalex_record
 from .ratelimit import CROSSREF, DATACITE, OPENALEX, request_with_retry
+from . import openalex_telemetry
 from .schema import RetrievedRecord
 from .work_identity import _norm_doi, doi_equivalent
 
@@ -175,10 +177,19 @@ def _datacite(doi: str, s) -> tuple[str, Optional[RetrievedRecord]]:
     return PROVIDER_FOUND, rec
 
 
-def _openalex(doi: str, s) -> tuple[str, Optional[RetrievedRecord]]:
+def _openalex(doi: str, s, api_key: str = "") -> tuple[str, Optional[RetrievedRecord]]:
+    """The exact-DOI OpenAlex provider. ``api_key`` authenticates the metered API.
+
+    A 409 from a spent allowance is PROVIDER_ERROR, not PROVIDER_ABSENT, because
+    ``_json`` returns None for any non-200 -- a provider that could not be paid
+    has not testified that the DOI is missing.
+    """
+    params = {"filter": f"doi:{doi}", "per-page": 1}
+    if api_key:
+        params["api_key"] = api_key
     try:
-        resp = request_with_retry(
-            s, OPENALEX_WORKS, {"filter": f"doi:{doi}", "per-page": 1},
+        resp = openalex_telemetry.request(
+            openalex_telemetry.LEG_DOI, s, OPENALEX_WORKS, params,
             limiter=OPENALEX, timeout=20)
     except requests.RequestException:
         return PROVIDER_ERROR, None
@@ -245,7 +256,8 @@ def reconstruct_inverted_abstract(index) -> str:
     return " ".join(token for _position, token in pairs).strip()
 
 
-def fetch_openalex_abstract(doi: str, *, s=requests, mailto: str = "") -> str:
+def fetch_openalex_abstract(doi: str, *, s=requests, mailto: str = "",
+                            api_key: str = "") -> str:
     """The cited work's abstract from OpenAlex, by DOI. ``""`` when there is none.
 
     WHY THIS EXISTS. 80 of the natural run's 562 references were Band-1 cleared
@@ -259,6 +271,14 @@ def fetch_openalex_abstract(doi: str, *, s=requests, mailto: str = "") -> str:
     paper has no abstract", which is a wrong terminal answer produced by a
     throttle.
 
+    ``api_key`` is the same argument one step further along. Since OpenAlex
+    metered its API, an unauthenticated caller does not merely get throttled --
+    it gets $0.10 of usage a day and then a flat 409, and every 409 here is
+    another reference terminated UNJUDGEABLE for want of an abstract that
+    OpenAlex holds. This seam is off the Band-1 path, so it cannot manufacture
+    an F1; it can only lose references, silently, which is why the launcher
+    supplies the key rather than trusting a caller to remember.
+
     Returns ``""`` on absence, on any transport or decode failure, and on a
     malformed index. The caller treats an empty result as "no abstract" and
     terminates the reference UNJUDGEABLE -- never as a licence to guess.
@@ -270,9 +290,12 @@ def fetch_openalex_abstract(doi: str, *, s=requests, mailto: str = "") -> str:
               "select": "id,doi,abstract_inverted_index"}
     if mailto:
         params["mailto"] = mailto
+    if api_key:
+        params["api_key"] = api_key
     try:
-        resp = request_with_retry(s, OPENALEX_WORKS, params,
-                                  limiter=OPENALEX, timeout=20)
+        resp = openalex_telemetry.request(
+            openalex_telemetry.LEG_ABSTRACT, s, OPENALEX_WORKS, params,
+            limiter=OPENALEX, timeout=20)
     except requests.RequestException:
         return ""
     data = _json(resp)
@@ -291,8 +314,14 @@ def fetch_openalex_abstract(doi: str, *, s=requests, mailto: str = "") -> str:
     return reconstruct_inverted_abstract(item.get("abstract_inverted_index"))
 
 
-def lookup_exact_doi(value: str, *, s=requests) -> ExactDoiResult:
-    """Check one mechanically-normalized DOI against all configured providers."""
+def lookup_exact_doi(value: str, *, s=requests,
+                     openalex_api_key: str = "") -> ExactDoiResult:
+    """Check one mechanically-normalized DOI against all configured providers.
+
+    ``openalex_api_key`` authenticates the OpenAlex provider only. The other
+    three need no key: the DOI proxy and Crossref have no paid tier the engine
+    touches, and DataCite is open.
+    """
     doi = _norm_doi(value)
     if not doi:
         return ExactDoiResult(doi, DOI_NOT_ATTEMPTED)
@@ -302,7 +331,9 @@ def lookup_exact_doi(value: str, *, s=requests) -> ExactDoiResult:
         "doi_proxy": _doi_proxy,
         "crossref": _crossref,
         "datacite": _datacite,
-        "openalex": _openalex,
+        # Bound rather than listed bare so the uniform (doi, transport) call
+        # below stays uniform and no provider can be handed another's key.
+        "openalex": partial(_openalex, api_key=openalex_api_key),
     }
     with ThreadPoolExecutor(max_workers=len(functions)) as pool:
         futures = {name: pool.submit(fn, doi, transport)

@@ -21,6 +21,7 @@ from .parser import iter_pmc_dir
 from .lookup import fetch_pubmed, compare_and_flag
 from .llm_filter import llm_filter
 from .confirm import confirm
+from . import openalex_telemetry
 from .decide import decide
 from .ncbi_meta import ncbi_pubtypes, is_retracted
 from .ratelimit import configure_ncbi
@@ -209,6 +210,7 @@ def retraction_state(ref: Reference, *, ncbi_key: str = "", session=None,
 
 def process_reference(ref: Reference, complete, *, ncbi_key="",
                       crossref_mailto="", openalex_mailto="",
+                      openalex_api_key="",
                       sim_threshold=85.0, match_threshold=85.0,
                       author_tripwire=True, session=None,
                       retraction_cache: dict | None = None,
@@ -265,8 +267,9 @@ def process_reference(ref: Reference, complete, *, ncbi_key="",
     else:
         ref.log.retracted = retraction_state(
             ref, ncbi_key=ncbi_key, session=session, cache=retraction_cache)
-    flagged = compare_and_flag(ref, sim_threshold,
-                               author_tripwire=author_tripwire, session=session)
+    flagged = compare_and_flag(
+        ref, sim_threshold, author_tripwire=author_tripwire, session=session,
+        **openalex_telemetry.openalex_key_kwarg(openalex_api_key))
 
     # Not flagged -> cleared / unverifiable (both the PMID and no-ID paths).
     if not flagged:
@@ -302,7 +305,9 @@ def process_reference(ref: Reference, complete, *, ncbi_key="",
         hits = None
         if ref.log.doi_lookup_status != DOI_FOUND:
             hits = confirm(ref, ncbi_key, crossref_mailto, openalex_mailto,
-                           match_threshold, s=session or requests)
+                           match_threshold, s=session or requests,
+                           **openalex_telemetry.openalex_key_kwarg(
+                               openalex_api_key))
         return decide(ref, flagged, None, hits, match_threshold)
 
     # expensive path (flagged survivors only -- PMID candidates and no-ID
@@ -318,17 +323,20 @@ def process_reference(ref: Reference, complete, *, ncbi_key="",
         # unqueried. The search runs first now; a human is asked only if it also
         # cannot settle the identity.
         hits = confirm(ref, ncbi_key, crossref_mailto, openalex_mailto,
-                       match_threshold, s=session or requests)
+                       match_threshold, s=session or requests,
+                       **openalex_telemetry.openalex_key_kwarg(
+                           openalex_api_key))
         return decide(ref, flagged, verdict, hits, match_threshold)
 
     hits = confirm(ref, ncbi_key, crossref_mailto, openalex_mailto,
-                   match_threshold, s=session or requests)
+                   match_threshold, s=session or requests,
+                   **openalex_telemetry.openalex_key_kwarg(openalex_api_key))
     return decide(ref, flagged, verdict, hits, match_threshold)
 
 
 def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
         model: str, anthropic_key="", ncbi_key="",
-        crossref_mailto="", openalex_mailto="",
+        crossref_mailto="", openalex_mailto="", openalex_api_key="",
         sim_threshold=85.0, match_threshold=85.0, author_tripwire=True,
         refs: Iterable[Reference] | None = None,
         complete: Callable[[str], str] | None = None,
@@ -339,6 +347,16 @@ def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
     can bind Band-1 model calls to the same adapter receipt as Band 2.  Direct
     callers retain the historical behaviour: when it is omitted, this function
     constructs the Anthropic transport itself.
+
+    ``openalex_api_key`` authenticates every OpenAlex leg this run touches
+    (confirmation title search, no-PMID candidate retrieval, exact-DOI lookup).
+    Leaving it empty is supported and sends byte-identical requests to the
+    keyless engine -- but OpenAlex meters an anonymous caller at $0.10/day and
+    then returns 409, so a corpus-scale keyless run stops getting OpenAlex
+    answers partway through, ``fully_answered`` goes False for every reference
+    after that, and F1 becomes structurally unreachable. The per-leg call and
+    status tallies printed at the end of the run are how that is observed rather
+    than inferred from a dead run.
     """
     complete = complete or make_completer(model, anthropic_key)
     configure_ncbi(bool(ncbi_key))            # bump NCBI rate when a key is present
@@ -375,6 +393,11 @@ def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
                 return f8_doi_memory[key]
     stream = refs if refs is not None else iter_pmc_dir(pmc_dir)
 
+    # The OpenAlex accounting window for this run. Cumulative counters, read as
+    # a delta, so a caller that already made OpenAlex calls in this process is
+    # not charged to this run and vice versa.
+    openalex_before = openalex_telemetry.snapshot()
+
     prediction_records, log_records = [], []
     # Seeded so a run that produced no F1 reports a ZERO rather than a missing
     # key -- see f1_status below. Other labels keep the observed-only behavior.
@@ -388,6 +411,7 @@ def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
             process_reference(ref, complete, ncbi_key=ncbi_key,
                               crossref_mailto=crossref_mailto,
                               openalex_mailto=openalex_mailto,
+                              openalex_api_key=openalex_api_key,
                               sim_threshold=sim_threshold,
                               match_threshold=match_threshold,
                               author_tripwire=author_tripwire, session=session,
@@ -425,4 +449,18 @@ def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
     # Read-only; precision-vs-human is computed separately once adjudications
     # exist (eval_report.summarize(log_records, gold=...)).
     print(eval_report.format_report(eval_report.summarize(log_records)))
+    # OPENALEX ACCOUNTING, PRINTED WHETHER OR NOT ANYTHING WENT WRONG. A run
+    # that quietly stopped being able to pay OpenAlex looks, in every other
+    # artifact, exactly like a run over a corpus that OpenAlex does not index.
+    openalex_calls = openalex_telemetry.delta(openalex_before)
+    print(f"[openalex-calls] keyed={bool(openalex_api_key)} "
+          f"total={openalex_calls['total']} "
+          f"quota_exhausted={openalex_calls['quota_exhausted']} "
+          f"per_leg={openalex_calls['leg_totals']}")
+    if openalex_calls["quota_exhausted"]:
+        print("[openalex-quota] OpenAlex returned 409 (spent allowance) on "
+              f"{openalex_calls['quota_exhausted']} call(s). Every affected "
+              "confirmation search is UNANSWERED, so F1 was unreachable for "
+              "those references -- this is an API-access artifact, not a base "
+              "rate.")
     return counts
