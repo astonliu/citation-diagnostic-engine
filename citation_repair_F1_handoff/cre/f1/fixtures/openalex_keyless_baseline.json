@@ -1153,8 +1153,8 @@
   },
   {
     "citation_id": "pmid-dead-unfindable|fabrication",
-    "confidence": "HIGH",
-    "label": "F1",
+    "confidence": "MED",
+    "label": "human_review",
     "log": {
       "citance": "PMC1",
       "citation_id": "pmid-dead-unfindable|fabrication",
@@ -1177,8 +1177,8 @@
         "written_title_excised": "",
         "year": 2019
       },
-      "confidence": "HIGH",
-      "label": "F1",
+      "confidence": "MED",
+      "label": "human_review",
       "log": {
         "author_match": null,
         "author_tripwire": null,
@@ -1187,7 +1187,7 @@
           "openalex": 0.0,
           "pubmed": 0.0
         },
-        "decided_by": "confirm_not_found_f1",
+        "decided_by": "confirm_not_found_human_review",
         "doi_lookup_normalized": "",
         "doi_lookup_status": "",
         "doi_match": null,
@@ -1228,7 +1228,7 @@
         "volume_match": null,
         "year_match": null
       },
-      "rationale": "Claimed title not found in PubMed, Crossref, or OpenAlex; claimed PMID did not resolve.",
+      "rationale": "Claimed title not found in PubMed, Crossref, or OpenAlex and the claimed PMID did not resolve. No work was identified, so neither non-existence (F1) nor a wrong-reference finding (F2) is demonstrable on this evidence: the sweep is title-based over three databases and cannot separate a fabrication from a legitimate source they do not index. Held for human adjudication.",
       "retrieved": {
         "alternate_titles": [],
         "authors": [],
@@ -1253,7 +1253,7 @@
       "source_pmid": "",
       "source_title": ""
     },
-    "rationale": "Claimed title not found in PubMed, Crossref, or OpenAlex; claimed PMID did not resolve."
+    "rationale": "Claimed title not found in PubMed, Crossref, or OpenAlex and the claimed PMID did not resolve. No work was identified, so neither non-existence (F1) nor a wrong-reference finding (F2) is demonstrable on this evidence: the sweep is title-based over three databases and cannot separate a fabrication from a legitimate source they do not index. Held for human adjudication."
   },
   {
     "citation_id": "pmid-match|formatting_discrepancy",

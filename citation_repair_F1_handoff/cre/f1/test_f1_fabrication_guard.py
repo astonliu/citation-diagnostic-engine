@@ -190,7 +190,7 @@ def test_matrix_efetch_429_title_found_in_crossref_is_not_f1():
 
     sess = FakeSession(handler)
     out = run.process_reference(ref, _fabrication_llm, session=sess)
-    assert out.label != S.F1
+    assert out.label not in (S.F1, S.F2)
     assert out.label == S.HUMAN_REVIEW
     assert out.log.decided_by == "pmid_fetch_no_answer"
     # the transport failure is NAMED, not merely implied
@@ -214,7 +214,7 @@ def test_matrix_efetch_connection_error_partial_searches_is_not_f1():
     out = run.process_reference(ref, _fabrication_llm,
                                 session=FakeSession(handler))
     assert out.label == S.HUMAN_REVIEW
-    assert out.label != S.F1
+    assert out.label not in (S.F1, S.F2)
 
 
 def test_transport_failure_short_circuits_before_paying_for_evidence():
@@ -239,11 +239,22 @@ def test_transport_failure_short_circuits_before_paying_for_evidence():
     assert set(sess.urls) == {EFETCH}
 
 
-# --- acceptance matrix row 3: the true positive must survive ---------------
-def test_matrix_genuine_dead_pmid_all_searches_empty_is_still_f1():
-    """Row 3: 200 empty body + three healthy empty searches -> F1 SURVIVES.
+# --- acceptance matrix row 3: complete empty evidence reaches the end -------
+def test_matrix_genuine_dead_pmid_all_searches_empty_is_held_not_accused():
+    """Row 3, as rewritten 2026-08-25.
 
-    The guard that this spec did not simply disable F1.
+    200 empty body + three healthy empty searches used to be the F1 true
+    positive, and this row existed to prove the retrieval guards had not simply
+    disabled F1. That route no longer accuses at all: a dead PMID plus a title
+    our three title searches could not match supports neither non-existence (F1)
+    nor a wrong-reference finding (F2, which has no work to name here), so the
+    row is HELD (see ``decide.py``).
+
+    What the row still defends is that the evidence is COMPLETE when it gets
+    there -- the fetch ANSWERED-ABSENT, all three searches answered -- so the
+    hold is a judgement about what that evidence supports, not a guard firing.
+    Distinguishing it from the incomplete-sweep holds below is the point of
+    asserting ``decided_by``.
     """
     ref = _ref()
 
@@ -254,9 +265,10 @@ def test_matrix_genuine_dead_pmid_all_searches_empty_is_still_f1():
 
     out = run.process_reference(ref, _fabrication_llm,
                                 session=FakeSession(handler))
-    assert out.label == S.F1
-    assert out.confidence == "HIGH"
-    assert out.log.decided_by == "confirm_not_found_f1"
+    assert out.label == S.HUMAN_REVIEW
+    assert out.log.decided_by == "confirm_not_found_human_review"
+    # ...and it got there on COMPLETE evidence, not on a guard.
+    assert out.log.db_hits == {"pubmed": 0.0, "crossref": 0.0, "openalex": 0.0}
     assert out.log.pmid_transport_status == S.FETCH_ANSWERED_ABSENT
 
 
@@ -287,13 +299,16 @@ def test_all_errored_keeps_its_established_reason_code():
     assert out.log.decided_by == "confirm_all_errored"
 
 
-def test_complete_empty_search_evidence_still_fires_f1():
+def test_complete_empty_search_evidence_reaches_the_hold_not_a_guard():
+    """Complete evidence is distinguishable from incomplete evidence even
+    though both now end in human_review -- the reason code separates them."""
     ref = _ref()
     ref.log.pmid_present = True
     ref.log.pmid_resolved = True
     out = decide(ref, True, S.V_FABRICATION,
                  {"pubmed": 0.0, "crossref": 0.0, "openalex": 0.0})
-    assert out.label == S.F1
+    assert out.label == S.HUMAN_REVIEW
+    assert out.log.decided_by == "confirm_not_found_human_review"
 
 
 def test_fully_answered_predicate():
@@ -331,7 +346,7 @@ def test_confirm_reports_none_for_a_titleless_reference():
     ref = Reference("c1", "", ClaimedRef(title="", claimed_pmid="1"))
     hits = confirm.confirm(ref, s=FakeSession(lambda url, p: FakeResponse()))
     assert hits == {"pubmed": None, "crossref": None, "openalex": None}
-    # ...and such evidence can never reach F1.
+    # ...and such evidence can never reach a finding.
     assert confirm.fully_answered(hits) is False
 
 
@@ -352,7 +367,7 @@ def test_matrix_no_title_dead_pmid_is_unscoreable_not_f1():
     sess = FakeSession(handler)
     out = run.process_reference(ref, _fabrication_llm, session=sess)
     assert out.label == S.UNSCOREABLE
-    assert out.label != S.F1
+    assert out.label not in (S.F1, S.F2)
     assert out.log.unscoreable_reason == "no_claimed_title"
     assert sess.urls == [EFETCH]
 
@@ -563,7 +578,10 @@ def test_unexpected_exception_quarantines_the_row_and_the_batch_completes(
     assert boom.label == S.HUMAN_REVIEW              # unjudged is never a finding
     assert boom.log.decided_by == "quarantine_exception"
     assert "AttributeError" in boom.log.notes
-    assert good_before.label == S.F1 and good_after.label == S.F1
+    # The neighbours were JUDGED (they reach the end of decide()), which is what
+    # separates them from the quarantined row -- not merely 'also human_review'.
+    for ok in (good_before, good_after):
+        assert ok.log.decided_by == "confirm_not_found_human_review"
 
 
 # =====================================================================
@@ -654,10 +672,14 @@ def test_incomplete_confirmation_is_counted(tmp_path, monkeypatch):
 # =====================================================================
 # Regression guard -- the fix must not disable F1
 # =====================================================================
-def test_f1_still_reachable_end_to_end_after_every_guard():
-    """One consolidated true-positive: dead PMID that ANSWERED, a claimed title
-    that WAS searched for, three databases that ALL answered and found nothing.
-    Every guard added by this spec is satisfied, and F1 fires."""
+def test_full_evidence_reaches_the_end_of_decide_after_every_guard():
+    """Dead PMID that ANSWERED, a claimed title that WAS searched for, three
+    databases that ALL answered and found nothing: every guard added by this
+    spec is satisfied and the row reaches the terminal branch on its merits.
+
+    Since 2026-08-25 that branch holds rather than accuses (see ``decide.py``),
+    so what this asserts is the ROUTE, plus the three searches actually being
+    bought -- a guard that short-circuited early would fail both."""
     ref = _ref()
 
     def handler(url, params):
@@ -667,6 +689,7 @@ def test_f1_still_reachable_end_to_end_after_every_guard():
 
     sess = FakeSession(handler)
     out = run.process_reference(ref, _fabrication_llm, session=sess)
-    assert out.label == S.F1
+    assert out.label == S.HUMAN_REVIEW
+    assert out.log.decided_by == "confirm_not_found_human_review"
     assert out.log.db_hits == {"pubmed": 0.0, "crossref": 0.0, "openalex": 0.0}
     assert ESEARCH in sess.urls and CROSSREF in sess.urls and OPENALEX in sess.urls

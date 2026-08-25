@@ -9,6 +9,46 @@ is wrong, stop and report rather than reconciling silently.
 
 ---
 
+> ### AMENDMENT, 2026-08-25 — the route this spec hardens no longer produces `F1`
+>
+> **This document is a historical record of the 2026-08-16 work and has not been rewritten.**
+> Every acceptance row, table, and worked example below that shows
+> `label=F1 … decided_by=confirm_not_found_f1` now reads
+> `label=human_review … decided_by=confirm_not_found_human_review`.
+>
+> **What changed.** That route — claimed PMID answered-and-absent (or resolving to
+> another paper), survives the LLM filter, claimed title found in none of the three
+> databases that all answered — was disconnected from `F1` **and** from `F2`:
+>
+> * not `F1`, because the sweep is three **title** searches over databases that do
+>   not span the literature, run with the claimed title, which is the very field a
+>   misprinted reference gets wrong. "We could not match it" is a statement about our
+>   matching, not about the world, and `F1` asserts that no such work exists.
+> * not `F2` either, because unlike every other `F2` route (`confirm_found_f2`,
+>   `exact_doi_metadata_mismatch_f2`) this one identifies **no work at all** — there
+>   is nothing to call the printed metadata wrong *about*, and nothing to point a
+>   repair at.
+>
+> The row is now **held for human adjudication**, the same call the no-PMID branch
+> already made on the same evidence (`noid_confirm_not_found_human_review`).
+>
+> **`F1` remains reachable**, on the exact-DOI route
+> (`exact_doi_absent_confirm_not_found_f1`), where the DOI system itself reports
+> ANSWERED-ABSENT on a registered identifier — an authority that can actually report
+> a non-existence. The other `F2` routes are untouched.
+>
+> **Nothing in this spec is retracted.** Every guard it specifies still stands and is
+> still tested; they now govern which rows reach a *hold* rather than which reach an
+> *accusation*. The one guard whose wording it changes is the acceptance matrix's
+> "the true positive must survive" row, which now asserts that complete, healthy,
+> empty evidence reaches the terminal branch on its merits rather than being
+> short-circuited by a guard.
+>
+> Code of record: `cre/f1/decide.py` (terminal branch), `tools/F1_CALIBRATION_PROBE.py`
+> (probe A, amended the same day).
+
+---
+
 ## Objective
 
 **Current behavior.** A partial NCBI outage causes a real, PubMed-indexed paper to be labelled `F1`

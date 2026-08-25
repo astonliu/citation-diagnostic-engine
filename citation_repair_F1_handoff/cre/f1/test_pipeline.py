@@ -16,9 +16,13 @@ u=Reference("u","",ClaimedRef(title="x")); u.log.pmid_present=False
 assert decide(u,False,None,None).label==S.UNVERIFIABLE
 c=Reference("c","",ClaimedRef(title="x",claimed_pmid="1")); c.log.pmid_present=True; c.log.title_similarity=99
 assert decide(c,False,None,None).label==S.CLEARED
+# Dead/mismatched PMID + a title none of the three searches matched -> HELD.
+# That evidence supports neither F1 (no such work exists) nor F2 (it names no
+# work at all), so it goes to a human (decide.py, 2026-08-25).
 fab=Reference("fb","",ClaimedRef(title="x",claimed_pmid="1")); fab.log.pmid_present=True; fab.log.pmid_resolved=True
-assert decide(fab,True,S.V_FABRICATION,{"pubmed":10,"crossref":0,"openalex":0}).label==S.F1
-# ...but an unanswered search holds it: F1 needs every database to have replied.
+assert decide(fab,True,S.V_FABRICATION,{"pubmed":10,"crossref":0,"openalex":0}).label==S.HUMAN_REVIEW
+# ...but an unanswered search holds it: the absence route needs every database
+# to have replied.
 fabh=Reference("fbh","",ClaimedRef(title="x",claimed_pmid="1")); fabh.log.pmid_present=True; fabh.log.pmid_resolved=True
 assert decide(fabh,True,S.V_FABRICATION,{"pubmed":10,"crossref":0,"openalex":None}).label==S.HUMAN_REVIEW
 f2=Reference("f2","",ClaimedRef(title="x",claimed_pmid="1")); f2.log.pmid_present=True; f2.log.pmid_resolved=True
@@ -40,9 +44,9 @@ try:
     confmod.search_pubmed=lambda *a,**k:5.0; confmod.search_crossref=lambda *a,**k:0.0; confmod.search_openalex=lambda *a,**k:0.0
     r=Reference("e2e","",ClaimedRef(title="Fabricated quantum neuro synthesis",claimed_pmid="123"))
     runmod.process_reference(r, lambda p:'{"verdict":"fabrication","reason":"invented"}', ncbi_key="", session=None)
-    assert r.label==S.F1
+    assert r.label==S.HUMAN_REVIEW
     pred=r.to_prediction()
-    assert pred.label==S.F1 and pred.evidence["decided_by"]=="confirm_not_found_f1"
+    assert pred.evidence["decided_by"]=="confirm_not_found_human_review"
 finally:
     runmod.fetch_pubmed=_saved["fetch_pubmed"]
     confmod.search_pubmed=_saved["search_pubmed"]

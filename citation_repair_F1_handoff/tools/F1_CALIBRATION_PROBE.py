@@ -4,12 +4,23 @@ WHY THIS EXISTS. ``docs/F1_BAND1_HAIKU_SWITCH_SPEC.md`` makes two probes the gat
 on switching ``llm_filter`` from ``claude-opus-5`` to ``claude-haiku-4-5``:
 
   Probe A  a dead PMID whose claimed work is absent from all three databases
-           must come out **F1**. If a weaker model calls that reference
-           ``formatting_discrepancy``, ``decide()`` clears it and F1 stops firing
-           SILENTLY -- no error, no zero-count anomaly a batch would surface,
-           just a taxonomy that never fires. Probe A is the only thing between
-           that and a paid run.
-  Probe B  PMID 31665581 with the record's own title must **clear**, never F1.
+           must SURVIVE the model filter and reach the terminal absence route
+           (``confirm_not_found_human_review``). If a weaker model calls that
+           reference ``formatting_discrepancy``, ``decide()`` clears it and the
+           route stops firing SILENTLY -- no error, no zero-count anomaly a
+           batch would surface, just a stage that never fires. Probe A is the
+           only thing between that and a paid run.
+
+           AMENDED 2026-08-25: probe A asserted ``F1 HIGH``. That route no
+           longer accuses -- three empty title searches cannot establish that no
+           such work exists, and the route names no work, so it supports neither
+           F1 nor F2 (see ``decide.py``) -- and it now HOLDS the row for human
+           adjudication. What probe A gates is unchanged, because the label was
+           never the thing being measured: it is whether the MODEL returns a
+           surviving verdict on a reference that deserves one. That is now
+           asserted directly, on ``llm_verdict`` and the reason code, which is
+           what the gate was reading the label as a proxy for.
+  Probe B  PMID 31665581 with the record's own title must **clear**.
 
 Probe B as written never reaches the model -- an exact metadata match is not
 flagged, so ``llm_filter`` is not called at all. Asserting that is still worth
@@ -21,11 +32,11 @@ its purpose is honest about which part it tests:
 
   * it is the JSON-parse and verdict-plumbing row. A model whose output does not
     parse shows up here as ``uncertain`` with ``unparseable LLM output``.
-  * its never-F1 outcome is DETERMINISTIC, not a model result: ``found_anywhere``
-    already forecloses F1 for all four verdicts (fabrication -> F2,
-    reference_error -> F2, formatting -> cleared, uncertain -> cleared by title
-    identity). It proves the conjunction holds under the new model; it does not
-    prove the new model is well calibrated.
+  * its never-accused-by-absence outcome is DETERMINISTIC, not a model result:
+    ``found_anywhere`` forecloses the absence route for all four verdicts
+    (fabrication -> F2, reference_error -> F2, formatting -> cleared, uncertain
+    -> cleared by title identity). It proves the conjunction holds under the new
+    model; it does not prove the new model is well calibrated.
 
 So the calibration weight sits on Probe A. A is the row a weaker model can
 actually break.
@@ -135,8 +146,19 @@ class CountingCompleter:
         return raw
 
 
+#: The terminal route for "claimed PMID answered-absent, claimed title found in
+#: none of the three databases that all answered". A model that calls probe A a
+#: formatting discrepancy never reaches it.
+ABSENCE_ROUTE = "confirm_not_found_human_review"
+
+#: The verdicts that SURVIVE the filter. Either one carries probe A to the route
+#: above; the gate is about surviving at all, not about which of the two.
+SURVIVING = (S.V_FABRICATION, S.V_REFERENCE_ERROR)
+
+
 def probe_a(complete):
-    """Dead PMID + work absent everywhere -> F1. Guards recall."""
+    """Dead PMID + work absent everywhere -> survives the filter and reaches the
+    terminal absence route. Guards recall."""
     ref = Reference("probeA", "citance",
                     ClaimedRef(title="A plausible sounding study of nothing",
                                claimed_pmid="99999999", authors=["Smith J"],
@@ -150,7 +172,13 @@ def probe_a(complete):
         return _searches_all_empty(url, params)
 
     out = run.process_reference(ref, complete, session=FakeSession(handler))
-    ok = (out.label == S.F1 and out.confidence == "HIGH"
+    # The model half of the gate: a surviving verdict. A weaker model answering
+    # `formatting_discrepancy` fails HERE, which is the whole point of probe A.
+    # The reason code is asserted alongside it so that a pipeline change which
+    # short-circuits the row before the terminal branch also fails, rather than
+    # passing on a verdict that no longer reaches anything.
+    ok = (out.log.llm_verdict in SURVIVING
+          and out.log.decided_by == ABSENCE_ROUTE
           and out.log.pmid_transport_status == S.FETCH_ANSWERED_ABSENT)
     return ok, out
 
@@ -168,19 +196,19 @@ def probe_b(complete):
         return _searches_all_empty(url, params)
 
     out = run.process_reference(ref, complete, session=FakeSession(handler))
-    ok = out.label == S.CLEARED and out.label != S.F1
+    ok = out.label == S.CLEARED and out.label not in (S.F1, S.F2)
     return ok, out
 
 
 def probe_b_prime(complete):
     """Flagged reference whose claimed work IS findable -> reaches the model,
-    and cannot be F1 under any of the four verdicts.
+    and cannot be accused on an absence under any of the four verdicts.
 
     The claimed PMID resolves to an unrelated real record (the mismatch that
     flags), and Crossref answers with the claimed title (the hit that forecloses
-    F1). This row exists to exercise ``llm_filter`` end to end -- prompt built,
-    call made, JSON parsed, verdict recorded on the log -- on a reference where
-    no model answer can produce an accusation.
+    the absence route). This row exists to exercise ``llm_filter`` end to end --
+    prompt built, call made, JSON parsed, verdict recorded on the log -- on a
+    reference where no model answer can produce an accusation from an absence.
     """
     claimed = "A plausible sounding study of nothing"
     ref = Reference("probeB'", "citance",
@@ -196,7 +224,8 @@ def probe_b_prime(complete):
     parsed = out.log.llm_verdict in (S.V_FABRICATION, S.V_FORMATTING,
                                     S.V_REFERENCE_ERROR, S.V_UNCERTAIN)
     unparseable = "unparseable LLM output" in (out.log.notes or "")
-    return (out.label != S.F1 and parsed and not unparseable), out
+    return (out.label != S.F1 and out.log.decided_by != ABSENCE_ROUTE
+            and parsed and not unparseable), out
 
 
 def main(argv=None):
@@ -225,7 +254,8 @@ def main(argv=None):
     rows = []
     ok_a, out_a = probe_a(counter)
     calls_after_a = len(counter.calls)
-    rows.append(("A  dead PMID, absent everywhere", "F1", ok_a, out_a))
+    rows.append(("A  dead PMID, absent everywhere",
+                 f"a surviving verdict -> {ABSENCE_ROUTE}", ok_a, out_a))
 
     ok_b, out_b = probe_b(counter)
     b_made_a_call = len(counter.calls) > calls_after_a
@@ -234,8 +264,8 @@ def main(argv=None):
                  ok_b, out_b))
 
     ok_bp, out_bp = probe_b_prime(counter)
-    rows.append(("B' flagged, work findable", "a parseable verdict, "
-                 "never F1", ok_bp, out_bp))
+    rows.append(("B' flagged, work findable", "a parseable verdict, never "
+                 "accused on an absence", ok_bp, out_bp))
 
     print()
     for name, expected, ok, out in rows:
@@ -253,8 +283,9 @@ def main(argv=None):
     if failed:
         print("\nGATE FAILED: " + "; ".join(failed))
         print("Do NOT start a paid batch on this model. A model that clears "
-              "probe A as a formatting discrepancy makes F1 unreachable, and "
-              "the batch will report zero F1 for a reason no count reveals.")
+              "probe A as a formatting discrepancy makes the absence route "
+              "unreachable, and the batch will report zero for a reason no "
+              "count reveals.")
         return 1
     print("\nGATE PASSED for " + args.model + ". Record this line next to the "
           "batch it authorises.")

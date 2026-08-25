@@ -43,7 +43,7 @@ print("PASS state->taxonomy")
 # Reference.to_prediction emits taxonomy label + evidence
 r=Reference("c1","cit",ClaimedRef(title="t",claimed_pmid="1"))
 r.label=F1; r.confidence="HIGH"; r.rationale="not found"
-r.log.db_hits={"pubmed":0,"crossref":0,"openalex":0}; r.log.decided_by="confirm_not_found_f1"
+r.log.db_hits={"pubmed":0,"crossref":0,"openalex":0}; r.log.decided_by="exact_doi_absent_confirm_not_found_f1"
 pred=r.to_prediction()
 assert pred.label==F1
 assert pred.annotations[0].confidence==0.95

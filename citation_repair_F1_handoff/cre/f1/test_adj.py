@@ -8,7 +8,7 @@ preds = os.path.join(d,"preds.jsonl"); logs = os.path.join(d,"logs.jsonl")
 # 3 predictions: one F1 candidate, one F2 candidate, one accurate (should be skipped)
 P = [
  {"citation_id":"c1","label":"F1","rationale":"not found anywhere",
-  "evidence":{"decided_by":"confirm_not_found_f1","db_hits":{"pubmed":0,"crossref":0,"openalex":0}},
+  "evidence":{"decided_by":"exact_doi_absent_confirm_not_found_f1","db_hits":{"pubmed":0,"crossref":0,"openalex":0}},
   "annotations":[{"annotator_id":"llm","label":"F1","confidence":0.95}]},
  {"citation_id":"c2","label":"F2","rationale":"found under different id",
   "evidence":{"decided_by":"confirm_found_f2","db_hits":{"pubmed":97}},

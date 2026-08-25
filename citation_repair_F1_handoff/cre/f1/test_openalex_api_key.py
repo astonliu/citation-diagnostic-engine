@@ -187,13 +187,19 @@ def test_a_409_leaves_the_confirmation_not_fully_answered():
     assert cf.unanswered(hits) == ["openalex"]
 
 
-def _f1_candidate(db_hits: dict) -> Reference:
-    """A reference on the PMID path that is one search-result away from F1.
+def _finding_candidate(db_hits: dict) -> Reference:
+    """A reference on the PMID path that is one search-result away from a
+    finding against it.
 
-    The claimed PMID was fetched, the fetch ANSWERED, and it did not resolve --
-    which is the strongest F1 posture the engine has. Everything except the
-    confirmation searches is therefore already in place, so whether F1 is
-    reached is decided purely by ``db_hits``.
+    The claimed PMID was fetched, the fetch ANSWERED, and it did not resolve.
+    Everything except the confirmation searches is therefore already in place,
+    so whether a finding is reached is decided purely by ``db_hits``.
+
+    Since 2026-08-25 the finding this route reaches is F2, not F1: the sweep is
+    title-based and cannot establish non-existence (see ``decide.py``). What
+    this fixture holds constant is the thing the OpenAlex tests are about --
+    whether an UNPAID provider can license ANY finding -- so it asserts on the
+    finding labels as a set rather than on F1 alone.
     """
     ref = Reference("c1", "", ClaimedRef(title=TITLE, authors=["A"], year=2000,
                                          claimed_pmid="99999999"))
@@ -204,38 +210,59 @@ def _f1_candidate(db_hits: dict) -> Reference:
     return ref
 
 
-def test_f1_is_reachable_when_all_three_providers_answer():
-    """THE POSITIVE CONTROL for the test below. Without it, "409 never yields
-    F1" could pass because this fixture never yields F1 under any conditions,
-    and the acceptance row would be proving nothing."""
+def test_the_absence_route_is_reached_when_all_three_providers_answer():
+    """THE POSITIVE CONTROL for the test below. Without it, "a 409 never
+    licenses the absence route" could pass because this fixture never reaches
+    that route under any conditions, and the acceptance row would be proving
+    nothing.
+
+    The route ends in a hold rather than a finding since 2026-08-25, so the
+    control asserts the REASON CODE: reaching it on complete evidence is what
+    the 409 case must be shown to differ from."""
     answered_nothing = {"pubmed": 0.0, "crossref": 0.0, "openalex": 0.0}
-    ref = _f1_candidate(answered_nothing)
+    ref = _finding_candidate(answered_nothing)
     dc.decide(ref, True, "fabrication", answered_nothing)
-    assert ref.label == S.F1
-    assert ref.log.decided_by == "confirm_not_found_f1"
+    assert ref.log.decided_by == "confirm_not_found_human_review"
 
 
-def test_a_409_can_never_license_f1():
+def test_a_409_can_never_license_a_finding():
     """The acceptance row that matters most: with OpenAlex unpaid, no
-    combination of flag and LLM verdict may reach the F1 label.
+    combination of flag and LLM verdict may reach a finding label.
+
+    Asserted on the ROUTE as well as the label. What the all-three bar protects
+    is any conclusion that rests on an ABSENCE -- "we looked everywhere and it
+    is not there". An assertion written against the F1 label alone would have
+    gone quietly vacuous when that route stopped ending in F1 (2026-08-25),
+    which is precisely how an unpaid provider would get back into licensing
+    conclusions it never paid for.
+
+    F2 by way of ``confirm_found_f2`` is NOT what this guards and must stay
+    reachable: PubMed and Crossref positively FOUND the work, and a positive
+    finding needs no complete sweep (see decide.py -- holding there would cost
+    F2 recall for nothing).
 
     Note the fixture: PubMed and Crossref both ANSWERED and found the title, so
-    the only thing standing between this reference and an accusation is the
-    provider that could not be paid."""
+    the only thing standing between this reference and an absence-based
+    conclusion is the provider that could not be paid."""
+    absence_routes = {"confirm_not_found_human_review",
+                      "exact_doi_absent_confirm_not_found_f1"}
     _ref, hits = _confirm_with_openalex_409()
     for verdict in (None, "fabrication", "wrong_reference", "uncertain",
                     "formatting_discrepancy"):
-        fresh = _f1_candidate(hits)
+        fresh = _finding_candidate(hits)
         dc.decide(fresh, True, verdict, hits)
         assert fresh.label != S.F1, f"F1 licensed on a 409 with {verdict!r}"
+        assert fresh.log.decided_by not in absence_routes, \
+            f"an absence-based route was licensed on a 409 with {verdict!r}"
     # And the same is true when the two paid providers found NOTHING -- which is
     # the case that looks most like fabrication and is exactly where a missing
     # third answer is most dangerous. This is the one that would otherwise slip
-    # through: it is the F1 fixture above with a single score replaced by None.
+    # through: it is the positive-control fixture above with a single score
+    # replaced by None.
     two_of_three = {"pubmed": 0.0, "crossref": 0.0, "openalex": None}
-    fresh = _f1_candidate(two_of_three)
+    fresh = _finding_candidate(two_of_three)
     dc.decide(fresh, True, "fabrication", two_of_three)
-    assert fresh.label != S.F1
+    assert fresh.label not in (S.F1, S.F2)
     assert fresh.log.decided_by == "confirm_incomplete_evidence"
 
 

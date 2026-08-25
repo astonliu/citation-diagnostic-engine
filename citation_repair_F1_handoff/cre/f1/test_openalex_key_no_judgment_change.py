@@ -14,8 +14,9 @@ The batch is small but it is not arbitrary -- it covers every route the change
 touches, crossed with all three LLM verdicts:
 
   * a claimed PMID whose title agrees          (cleared)
-  * a claimed PMID resolving to another paper  (F2)
-  * a claimed PMID that does not resolve, title found nowhere  (F1)
+  * a claimed PMID resolving to another paper  (F2, ``confirm_found_f2``)
+  * a claimed PMID that does not resolve, title found nowhere
+    (the absence route, ``confirm_not_found_human_review``)
   * no PMID, title findable                    (no-ID fuzzy lookup, leg B)
   * no PMID, title findable nowhere            (the confirmation path, leg A)
   * no PMID with a printed DOI, resolvable and not  (leg C)
@@ -23,6 +24,26 @@ touches, crossed with all three LLM verdicts:
 If this fails, either a judgment moved or the transport fixtures did. Both are
 worth stopping for; neither should be "fixed" by regenerating the baseline
 without first explaining which per-reference verdict changed and why.
+
+THE BASELINE HAS BEEN REGENERATED ONCE, and this is that explanation.
+
+  2026-08-25 -- ONE row moved: ``pmid-dead-unfindable|fabrication``, from
+  ``F1 HIGH / confirm_not_found_f1`` to
+  ``human_review MED / confirm_not_found_human_review``. The absence route was
+  disconnected from BOTH findings in ``decide.py``: three empty title searches
+  cannot establish that no such work exists (F1), and the route names no work at
+  all, so it cannot support "the printed metadata identifies the wrong one"
+  (F2) either. The other 17 rows are byte-identical, which is the point of
+  regenerating from this batch rather than editing the file: the OpenAlex key
+  still moves no judgment, and neither did anything else.
+
+  Note what that leaves: this batch no longer produces an F1 row anywhere. It
+  never covered the one route that still can (``exact_doi_absent_confirm_not_
+  found_f1``) -- ``noid-doi-unfindable`` holds on ``exact_doi_incomplete_hold``
+  because ``_route`` answers 404 for the DOI system, so the lookup is INCOMPLETE
+  rather than ANSWERED-ABSENT. That was true before this change too; it is
+  recorded here because the coverage guard below no longer names F1 and the
+  reason must not be mistaken for the guard having been loosened to pass.
 
 Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_openalex_key_no_judgment_change.py -q
 """
@@ -146,12 +167,27 @@ def _baseline() -> list[dict]:
         return json.load(fh)
 
 
-def test_the_baseline_covers_the_labels_it_claims_to():
+def test_the_baseline_covers_the_routes_it_claims_to():
     """Guards the guard. A baseline that had drifted to all-cleared would pass
-    the two tests below while proving nothing about F1 or F2."""
-    labels = {row["label"] for row in _baseline()}
-    assert {"F1", "F2", "cleared", "human_review"} <= labels, labels
-    assert len(_baseline()) == len(BATCH) * len(VERDICTS)
+    the two tests below while proving nothing.
+
+    Asserted on ``decided_by``, not on the label set. The label check this
+    replaces named F1 and F2, and half of it went vacuous the moment the absence
+    route stopped ending in F1 -- a coverage guard that can be satisfied by the
+    route it guards disappearing is not a guard. Reason codes name the ROUTES
+    the docstring above claims this batch crosses, so a route that vanishes
+    fails here instead of silently reducing what the baseline proves."""
+    rows = _baseline()
+    routes = {row["log"]["log"]["decided_by"] for row in rows}
+    assert {"confirm_found_f2",                    # the F2 finding
+            "confirm_not_found_human_review",      # the absence route, PMID leg
+            "noid_confirm_not_found_human_review", # the absence route, leg A
+            "noid_metadata_match",                 # leg B
+            "exact_doi_incomplete_hold",           # leg C
+            "title_search_identity_settled",
+            "llm_formatting"} <= routes, routes
+    assert {"F2", "cleared", "human_review"} <= {row["label"] for row in rows}
+    assert len(rows) == len(BATCH) * len(VERDICTS)
 
 
 def test_a_keyless_run_reproduces_the_pre_change_verdicts_exactly():

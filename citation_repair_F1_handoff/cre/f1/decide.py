@@ -1,14 +1,33 @@
 """Phase 1h -- decision logic.
 
-Pure function over accumulated evidence. The conjunction that defines F1:
-  (claimed-PMID mismatch OR dead PMID) AND survives LLM filter AND
-  claimed content not found in any database.
+Pure function over accumulated evidence.
 
-Precision-first: anything ambiguous goes to human_review or cleared, never F1.
+F1 IS AN ASSERTION THAT NO SUCH WORK EXISTS, and only an authority that can
+report an absence may license it. As of 2026-08-25 the single route to F1 is the
+EXACT DOI one: a registered identifier that the DOI system, Crossref, DataCite,
+and OpenAlex all answer ANSWERED-ABSENT on, backed by a complete title sweep
+that also found nothing.
 
-F1 IS REACHABLE ONLY FROM EVIDENCE THAT WAS ACTUALLY GATHERED. Each clause of
-that conjunction has a matching "and we really checked" precondition, because
-every one of them used to be satisfiable by a failure:
+The route that used to end in F1 on the PMID path -- (dead or mismatched PMID)
+AND survives the LLM filter AND the claimed title found in no database -- now
+HOLDS (``confirm_not_found_human_review``, bottom of this module). Our sweep is
+three title searches over databases that do not span the literature, run with
+the very field a misprinted reference gets wrong, so "we could not match it" is
+a statement about our matching and not about the world. That evidence supports
+neither F1 (no such work exists) nor F2 (the printed metadata names the wrong
+work) -- the latter because this route, alone among the F2 routes, has no
+identified work to name. The full argument is recorded at that branch.
+
+F2 IS OTHERWISE UNTOUCHED: ``confirm_found_f2`` fires whenever a database
+returns the claimed work, and the exact-DOI routes fire on authority metadata.
+Only the absence-only route was disconnected from it.
+
+Precision-first: anything ambiguous goes to human_review or cleared, never a
+finding.
+
+WHAT IS ASSERTED IS ONLY WHAT WAS ACTUALLY GATHERED. Each clause has a matching
+"and we really checked" precondition, because every one of them used to be
+satisfiable by a failure:
 
   * "dead PMID" requires the identifier lookup to have ANSWERED
     (``pmid_transport_status``).
@@ -175,15 +194,17 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
     #
     # Not "the PMID is dead" -- NCBI did not reply (non-200, a 429 that survived
     # every retry, a connection error). We do not know whether that PMID
-    # resolves, so no branch below is entitled to speak about it: not F1 ("did
-    # not resolve"), and not F2 ("resolves to a different paper"). Both would be
-    # asserting an observation that was never made, and F1 in particular is a
-    # public accusation that a real, indexed paper does not exist.
+    # resolves, so no branch below is entitled to speak about it: neither "did
+    # not resolve" nor "resolves to a different paper". Either would be
+    # asserting an observation that was never made, and both feed a finding
+    # against a reference in a published paper.
     #
     # A transport failure must cost us a decision, never buy us one -- note that
-    # the F1 confidence rule below reads an unresolved PMID as the STRONGER
-    # signal, so before this guard existed an outage actively RAISED the stated
-    # confidence of the accusation it caused.
+    # the confidence rule at the bottom of this module used to read an
+    # unresolved PMID as the STRONGER signal, so before this guard existed an
+    # outage actively RAISED the stated confidence of the accusation it caused.
+    # That split is gone now, but the guard is what makes "did not resolve" an
+    # observed absence at all, so it still governs every branch that reads it.
     if log.pmid_present and not fetch_answered(log.pmid_transport_status):
         ref.label, ref.confidence = HUMAN_REVIEW, "LOW"
         ref.rationale = (f"The claimed PMID could not be checked: the PubMed "
@@ -268,8 +289,10 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
             log.decided_by = "no_pmid_no_title"
             return ref
         # No-ID lookup ran; fall through to the normal decision logic below.
-        # was_flagged drives the path identically to the PMID path, EXCEPT the
-        # confirm-not-found outcome is human_review, not F1 (guard further down).
+        # was_flagged drives the path identically to the PMID path -- including
+        # the confirm-not-found outcome, which is human_review on both since
+        # 2026-08-25 (guard further down). The claimed PMID makes such a row
+        # more suspicious; it does not make a finding demonstrable.
 
     # Resolved and metadata matched -> cleared.
     if not was_flagged:
@@ -348,8 +371,9 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
 
     # Every confirmation search errored (all None) -> we never actually looked.
     # Do NOT assert "not found anywhere"; that would be a false accusation on a
-    # network blip. Precision-first: escalate. (Does not alter the F1 conjunction;
-    # it guards the no-data case the conjunction never contemplated.)
+    # network blip. Precision-first: escalate. (Does not alter the finding
+    # conjunction; it guards the no-data case the conjunction never
+    # contemplated.)
     if all_errored(db_hits):
         ref.label, ref.confidence = HUMAN_REVIEW, "LOW"
         ref.rationale = ("All confirmation searches errored (network/parse); "
@@ -395,11 +419,13 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
         return ref
 
     # EVERY search must have answered before an accusation is reachable
-    # (ZD, 2026-08-16). F1 asserts the work exists in NO database; that claim is
-    # only supported by having actually looked in all of them. One
-    # healthy-but-empty search alongside an errored one used to be enough, so a
-    # single-provider outage could carry a real, indexed paper to a public
-    # accusation of fabrication.
+    # (ZD, 2026-08-16). The route below asserts the claimed title was in NO
+    # database we asked; that claim is only supported by having actually asked
+    # all of them. One healthy-but-empty search alongside an errored one used to
+    # be enough, so a single-provider outage could carry a correctly cited paper
+    # to a finding against it. (Written when this route ended in F1; it now
+    # holds for human review either way, and the requirement is unchanged -- a
+    # partial sweep is weaker evidence still.)
     #
     # Deliberately placed AFTER found_anywhere: a POSITIVE finding needs no
     # completeness -- if a database returned the work, an outage at another
@@ -416,16 +442,54 @@ def decide(ref: Reference, was_flagged: bool, llm_verdict: str | None,
                           else "confirm_incomplete_evidence")
         return ref
 
-    # PMID path: fabricated. Every search answered, and none of them found it.
-    ref.label = F1
-    # HIGH on an unresolved PMID is only sound because the guard above has
-    # already established that the fetch ANSWERED -- so "did not resolve" is an
-    # observed absence, not an outage. This line is why the transport-status
-    # field had to exist: it used to raise the confidence of the accusation
-    # precisely when the evidence was missing.
-    ref.confidence = "HIGH" if not log.pmid_resolved else "MED"
-    ref.rationale = ("Claimed title not found in PubMed, Crossref, or OpenAlex; "
-                     + ("claimed PMID did not resolve." if not log.pmid_resolved
-                        else "claimed PMID resolves to an unrelated paper."))
-    log.decided_by = "confirm_not_found_f1"
+    # PMID path, every search answered, and none of them found the claimed
+    # title. THIS IS NOT F1, AND IT IS NOT F2 EITHER (ZD, 2026-08-25).
+    #
+    # The route used to end in F1 on the reasoning that "a dead PMID plus a
+    # title in no database" is the definition of an invented citation. Reviewed
+    # against the rows it actually fired on, that reasoning does not hold. Our
+    # sweep is three TITLE searches over databases that do not span the
+    # literature (books, chapters, non-indexed and non-English venues,
+    # proceedings), run with the CLAIMED title -- which is precisely the field a
+    # misprinted reference gets wrong. "We could not match it" is a statement
+    # about our matching, not about the world, so it does not support F1's
+    # assertion that no such work exists.
+    #
+    # It does not support F2 either, and that is the second half of this fix.
+    # F2 says the printed metadata identifies the WRONG WORK; every other F2
+    # route can name what was actually found -- ``confirm_found_f2`` has the
+    # record the sweep returned, ``exact_doi_metadata_mismatch_f2`` has the
+    # authority metadata behind the claimed DOI. This route has NOTHING: no
+    # resolved PMID, no matched title, no located work. Booking it F2 would put
+    # rows carrying no identified counterpart into the band whose precision is
+    # measured on exactly that identification, and would hand a reviewer a
+    # "wrong reference" finding with no correct reference to point at.
+    #
+    # So it holds. This is the same call the no-PMID branch above already makes
+    # on the same evidence (``noid_confirm_not_found_human_review``): a claimed
+    # title found nowhere cannot distinguish a fabrication from a legitimate
+    # source our three databases do not index, and a human adjudicator with
+    # other catalogues can. The presence of a dead claimed PMID makes the row
+    # more suspicious; it does not make either finding demonstrable.
+    #
+    # THE OTHER F2 ROUTES ARE UNAFFECTED, deliberately. ``confirm_found_f2``
+    # above still fires the moment a database returns the claimed work, and the
+    # exact-DOI F2 routes still fire on authority metadata. Only the
+    # absence-only route is disconnected. F1 likewise stays reachable on
+    # ``exact_doi_absent_confirm_not_found_f1``, where the DOI system itself
+    # reports ANSWERED-ABSENT on a registered identifier -- an authority that
+    # can actually report a non-existence, which three title searches cannot.
+    ref.label, ref.confidence = HUMAN_REVIEW, "MED"
+    ref.rationale = ("Claimed title not found in PubMed, Crossref, or OpenAlex "
+                     "and the "
+                     + ("claimed PMID did not resolve"
+                        if not log.pmid_resolved
+                        else "claimed PMID resolves to an unrelated paper")
+                     + ". No work was identified, so neither non-existence (F1) "
+                       "nor a wrong-reference finding (F2) is demonstrable on "
+                       "this evidence: the sweep is title-based over three "
+                       "databases and cannot separate a fabrication from a "
+                       "legitimate source they do not index. Held for human "
+                       "adjudication.")
+    log.decided_by = "confirm_not_found_human_review"
     return ref
