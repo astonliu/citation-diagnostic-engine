@@ -1,4 +1,4 @@
-"""The locked launcher refuses what caller strings cannot verify (CODEX 5).
+"""The locked launcher refuses what caller strings cannot verify (review item 5).
 
 Every test here names something the launcher checks ITSELF, or a receipt it
 forces the adapter to produce -- never a value it is simply told.

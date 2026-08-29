@@ -448,7 +448,7 @@ def test_cross_type_subsumes_is_granularity_zoom():
 
 def test_cross_type_provably_distinct_never_f7():
     # Even a non-equivalent cross-type pair can only hold (cross enum has no
-    # provably_distinct); Codex-3 #6.
+    # provably_distinct); review round 3, item 6.
     norm = DictNormalizer(
         ids={
             ("gene", "BRCA1"): ("HGNC:1100", "BRCA1", "exact", "HGNC", "s"),
@@ -832,7 +832,7 @@ def test_malformed_authorities_json_raises():
 
 
 # --------------------------------------------------------------------------
-# Shared-span provenance disambiguation (Codex-3 precision).
+# Shared-span provenance disambiguation (review precision).
 # --------------------------------------------------------------------------
 def test_two_sections_share_span_bound_by_sha256():
     # Two results sections contain the same relation phrase; schema C names one

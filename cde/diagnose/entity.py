@@ -1,5 +1,5 @@
 """F7 (wrong-entity) discriminator -- the single-stage entity assessor for the
-typed F3--F7 judgment engine (spec v5.1, post-Codex-3 final).
+typed F3--F7 judgment engine (spec v5.1, post-review final).
 
 F7 is the hardest discriminator: a citing sentence attributes a relation to the
 cited work but names the WRONG biomedical entity -- a different (same-type) gene,
@@ -42,7 +42,7 @@ OFFLINE / INJECTED
     exposes ``normalize`` + ``compare``; ``cross_comparator`` exposes ``compare``
     (or is absent -> cross-type pairs hold). ``relation_comparator`` is an
     LLM-backed callable (free-text relations cannot be compared in code --
-    Codex-3 #7); it builds its own schema-D prompt internally and returns the
+    review round 3, item 7); it builds its own schema-D prompt internally and returns the
     parsed dict, which this module validates.
 
 Strict-JSON model parsing mirrors ``band_prompts._loads_strict`` /
@@ -112,7 +112,7 @@ _REL_COMPONENT = frozenset({"match", "mismatch", "unknown"})
 # Section kinds. The SectionText enum admits only these four labels (NO
 # abstract/intro/discussion); an entity span comes from results|methods, a
 # relation/outcome span from results|table|figure (methods alone cannot
-# establish an outcome -- Codex-3 #9).
+# establish an outcome -- review round 3, item 9).
 _SECTION_LABELS = frozenset({"results", "methods", "table", "figure"})
 _ENTITY_SECTION_LABELS = frozenset({"results", "methods"})
 _RELATION_SECTION_LABELS = frozenset({"results", "table", "figure"})
@@ -226,7 +226,7 @@ class ExcludedSection:
 
 @dataclass(frozen=True)
 class ClaimClauseRef:
-    """Clause-level attribution map (Codex precision): which reference(s) a
+    """Clause-level attribution map (review precision): which reference(s) a
     specific clause of the atomic claim cites."""
     claim_index: int
     clause_span: str          # verbatim substring of the atomic claim text
@@ -1053,7 +1053,7 @@ def _evidence_context_sha256(ctx: EvidenceContext) -> str:
 
 
 def validate_f7_record(record: dict, evidence_context: EvidenceContext) -> None:
-    """Replay/tamper validator (spec Sec 9, Codex-3 #1). Recompute every hash --
+    """Replay/tamper validator (spec Sec 9, review round 3, item 1). Recompute every hash --
     claim_sha256, citing_sentence_sha256, evidence_context_sha256, each
     used_section_sha256, every tuple_record_sha256, and record_sha256 -- against
     the supplied evidence_context and the record's own body, and raise

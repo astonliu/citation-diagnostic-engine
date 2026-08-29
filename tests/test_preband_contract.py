@@ -308,7 +308,7 @@ def test_zero_record_run_is_not_double_reported():
 # =========================================================================
 
 def test_the_structural_exclusion_bypass_is_closed():
-    """CODEX B2, verbatim. A has no citance (structurally excluded before the
+    """review item B2, verbatim. A has no citance (structurally excluded before the
     pre-band gate), B is eligible but absent from the disposition.
 
     Old arithmetic compared missing(1) to TOTAL records(2) -> 1 != 2 -> no
@@ -413,7 +413,7 @@ def test_each_clause_blocks_reportability(tmp_path, over, clause):
 
 
 def test_dict_injection_is_never_reportable(tmp_path):
-    """CODEX B2 / governance: production accepts ONLY the canonical artifact."""
+    """review item B2 / governance: production accepts ONLY the canonical artifact."""
     m = good_manifest()
     m["preband"] = {**m["preband"], "canonical": False,
                     "source": pc.SOURCE_DICT}
@@ -438,7 +438,7 @@ def test_a_parse_failure_blocks_reportability(tmp_path):
 
 
 def test_duplicate_prediction_ids_block_reportability(tmp_path):
-    """CODEX B1 detection. A resumed mid-document interrupt replays the
+    """review item B1 detection. A resumed mid-document interrupt replays the
     document and appends its rows a second time, giving [R1, R1, R2]. Those
     duplicates corrupt any precision denominator silently."""
     path = preds(tmp_path, ["PMC1:R1", "PMC1:R1", "PMC1:R2"])
@@ -449,7 +449,7 @@ def test_duplicate_prediction_ids_block_reportability(tmp_path):
 
 
 def test_counters_that_undercount_the_file_block_reportability(tmp_path):
-    """CODEX B1, second half: a resumed manifest's total_records covers only the
+    """review item B1, second half: a resumed manifest's total_records covers only the
     final invocation while the predictions file holds every segment's rows."""
     path = preds(tmp_path, ["PMC1:R1", "PMC2:R1"])
     r = pc.reportability_report(good_manifest(total_records=1,

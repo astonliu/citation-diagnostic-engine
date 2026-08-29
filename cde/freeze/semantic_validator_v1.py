@@ -5,7 +5,7 @@ funnel/reportability equations, canonical ordering + uniqueness, chain/WAL
 linkage, git reachability + ancestry, RFC 3339 semantics, percent-encode
 round-trip, numeric ranges, cross-field timeout/backoff, candidate==selection
 correspondence, module role/path exhaustiveness, and trusted-constant
-comparison. Claude never assigns semantic labels — every rule here is a
+comparison. No model assigns semantic labels — every rule here is a
 recompute-never-trust predicate over artifact bytes and git facts.
 
 API (build spec change item 3):
@@ -816,7 +816,7 @@ def check_sv022(artifacts, out):
             # what makes post-response retries meaningful). An attempt whose
             # boundary was crossed without a persisted response ('sent'
             # dangling, 'indeterminate') is never silently retried (crash
-            # policy, Codex v6 #6).
+            # policy, review round 6, item 6).
             boundary_crossed = any(e.get("sent_boundary_crossed") is True
                                    for e in evs)
             if has_next and boundary_crossed and \

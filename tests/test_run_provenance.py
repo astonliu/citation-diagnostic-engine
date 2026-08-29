@@ -328,7 +328,7 @@ def test_a_corpus_yielding_zero_references_aborts(tmp_path, monkeypatch):
 
 # ------------------------------------------- the reportability gate, end to end
 
-def test_codex_b2_bypass_is_blocked_end_to_end(tmp_path, monkeypatch):
+def test_b2_bypass_is_blocked_end_to_end(tmp_path, monkeypatch):
     """A has no citance (structurally excluded before the pre-band gate);
     B is eligible but absent from the disposition, which contains only A.
 
@@ -556,7 +556,7 @@ def test_production_refuses_a_chained_segment(tmp_path, monkeypatch):
 
 
 def test_production_refuses_a_nonempty_out_dir_without_run_state(tmp_path, monkeypatch):
-    """CODEX 3: "no checkpoint/predictions" was too weak. A leftover manifest,
+    """review item 3: "no checkpoint/predictions" was too weak. A leftover manifest,
     sidecar, torn tail, queue or F5 discovery file from a prior attempt is state
     this run would append to or silently sit beside."""
     from cde.refs import preband_contract as pc
@@ -574,7 +574,7 @@ def test_production_refuses_a_nonempty_out_dir_without_run_state(tmp_path, monke
 # --------------------------------- frozen corpus CONTENTS, not just its bytes
 
 def test_production_refuses_a_manifest_with_no_inventory(tmp_path, monkeypatch):
-    """CODEX 1: hashing the manifest file proves only that the manifest did not
+    """review item 1: hashing the manifest file proves only that the manifest did not
     change. It says nothing about the XML on disk."""
     from cde.refs import preband_contract as pc
     _seed_xml(tmp_path)
@@ -635,7 +635,7 @@ def test_a_production_run_records_every_document_digest(tmp_path, monkeypatch):
         (tmp_path / "PMC1.xml").read_bytes()).hexdigest()
 
 
-# ------------------------------------- the double-parse loss (CODEX 2)
+# ------------------------------------- the double-parse loss (review item 2)
 
 def test_an_execution_parse_failure_is_fatal_in_production(tmp_path, monkeypatch):
     """The preflight parsed it; the execution pass did not. Skipping would
@@ -692,7 +692,7 @@ def test_a_diverging_executed_domain_blocks_reportability(tmp_path, monkeypatch)
         "executed_domain_matches_preflight"] is False
 
 
-# --------------------- global reportability across category blocks (CODEX 4)
+# --------------------- global reportability across category blocks (review item 4)
 
 def test_an_emitted_f5_label_makes_the_whole_run_unreportable(tmp_path):
     """F5 is unreportable BY CONSTRUCTION -- deploy_path_a is hard-gated off and
@@ -750,7 +750,7 @@ def test_f6_only_run_is_unaffected(tmp_path):
         m, preds(tmp_path, ["PMC1:B1", "PMC1:B2"]))["reportable"] is True
 
 
-# ------------------------------------- the queue audit (CODEX 3, second half)
+# ------------------------------------- the queue audit (review item 3, second half)
 
 def test_a_queue_short_of_the_finding_set_blocks_reportability(tmp_path):
     """The guard that catches an EMPTY annotation queue. The queue must equal the

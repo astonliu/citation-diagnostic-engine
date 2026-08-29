@@ -15,8 +15,8 @@ sentinel elsewhere in this repo is that a real zero and an absent measurement
 must not wear the same value.
 
 RATES ARE PER MILLION TOKENS, USD, first-party list price. The Claude rates were
-read 2026-08-22 from the Anthropic pricing reference bundled with the
-``claude-api`` skill (Current Models table). Amazon Bedrock and Vertex AI are
+read 2026-08-22 from Anthropic's published pricing reference (Current Models
+table). Amazon Bedrock and Vertex AI are
 partner-operated with separate pricing and are NOT covered here; a run against
 those endpoints must not be costed with this table.
 
