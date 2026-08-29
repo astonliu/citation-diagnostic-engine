@@ -142,7 +142,7 @@ than quietly deleted.
   title   = {Citation Diagnosis Engine: fine-grained diagnosis of
              biomedical citation faults},
   year    = {2026},
-  url     = {https://github.com/}
+  note    = {Repository URL to be added on publication}
 }
 ```
 
