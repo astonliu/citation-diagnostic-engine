@@ -1,0 +1,8 @@
+excluded_no_citance	1
+excluded_no_cited_pmid	1
+excluded_preband	2
+excluded_preband_disposition_missing	1
+held_full_coverage_pending_F3_F5_F7	1
+held_insufficient_evidence	1
+held_no_atomic_claims	2
+predicted	3

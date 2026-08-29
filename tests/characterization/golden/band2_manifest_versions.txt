@@ -1,0 +1,4 @@
+claim_extract_parser_version	strict_claims_v1
+claim_extract_prompt_version	claim_extract_v3
+coverage_parser_version	strict_coverage_5key_v1
+coverage_prompt_version	coverage_v2

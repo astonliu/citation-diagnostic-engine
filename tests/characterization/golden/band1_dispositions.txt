@@ -1,0 +1,5 @@
+b1-01	cleared	HIGH			
+b1-02	human_review	MED			
+b1-03	cleared	MED			
+b1-04	human_review	MED			
+b1-05	unscoreable	HIGH		no_claimed_title	
