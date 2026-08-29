@@ -226,3 +226,6 @@ __marimo__/
 
 # F3-F7 mint_v1: local CONFIG output — never committed (mint spec §4.9)
 citation_repair_F1_handoff/cre/f1/freeze/_mint_out/
+
+# ZD's local staging area for files pending removal; never committed.
+_to_delete/

@@ -22,7 +22,7 @@ from .f3_provenance import _assemble_candidates
 from .judgment_engine import ProvenanceState
 from .test_judgment_run import disc_llm, extractor_of, f4_json, judge_established
 
-PACKET = (Path(__file__).resolve().parents[3] / "bench"
+PACKET = (Path(__file__).resolve().parents[3] / "tests" / "fixtures"
           / "packet_f3_example_hedged.json")
 
 REVIEW_PMID = "25691818"
