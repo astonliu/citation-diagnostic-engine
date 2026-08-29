@@ -1,4 +1,4 @@
-"""Deterministic bibliographic matcher (HANDOFF_BIBLIO_MATCH task, Stage 1).
+"""Deterministic bibliographic matcher, Stage 1.
 
 Supersedes the single ``token_sort_ratio`` title threshold that previously
 decided whether a claimed reference matched a retrieved record. Dr. Roberts

@@ -1,4 +1,4 @@
-"""Fixture-based tests for the bibliographic matcher (HANDOFF_BIBLIO_MATCH).
+"""Fixture-based tests for the bibliographic matcher.
 
 Covers Dr. Roberts' concern directly: a truncated-but-correct title whose
 author/year/journal agree must score HIGH (not flagged), while a same-title-but-
@@ -13,7 +13,7 @@ composite in ``log.match_score``.
 No network is touched: recorded JSON in ./fixtures is replayed through the same
 FakeSession the other suites use; the optional Stage-2 cross-encoder is mocked.
 
-Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_biblio_match.py -q
+Run:  PYTHONPATH=<repo> python -m pytest tests/test_biblio_match.py -q
 """
 from __future__ import annotations
 import json

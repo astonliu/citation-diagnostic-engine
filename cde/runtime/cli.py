@@ -28,6 +28,8 @@ import json
 import os
 import sys
 
+from cde.taxonomy import annotate
+
 BAND1_LOG = "band1_lossless_log.jsonl"
 BAND1_PREDICTIONS = "band1_predictions.jsonl"
 DISPOSITION = "preband_disposition_v2.jsonl"
@@ -88,6 +90,10 @@ def _report(args) -> int:
 
     Printed as counts rather than as rates on purpose: a rate needs a governed
     population, and this tool cannot tell you that you have one.
+
+    Keys that carry a taxonomy code get the category name APPENDED, never
+    substituted. The code is what the record file holds, so a substituted key
+    would print something no `grep` over those records could find.
     """
     rows = [json.loads(line) for line in
             open(args.predictions, encoding="utf-8").read().splitlines() if line]
@@ -98,7 +104,7 @@ def _report(args) -> int:
         counts = collections.Counter(str(r.get(field) or "-") for r in rows)
         print(f"\n{field}")
         for key, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
-            print(f"  {key:44s} {n:6d}")
+            print(f"  {annotate(key):44s} {n:6d}")
     print(f"\ntotal pairs {len(rows)}")
     return 0
 
@@ -107,7 +113,9 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="cde.runtime.cli",
         description="Run the citation diagnosis bands over PMC XML. NOT the "
-                    "governed production launcher; see the module docstring.")
+                    "governed production launcher; see the module docstring. "
+                    "Category names are defined in doc/taxonomy.md; the run "
+                    "records carry the short code, not the name.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def common(p):
@@ -120,7 +128,10 @@ def main(argv=None) -> int:
                        default=os.environ.get("ANTHROPIC_API_KEY", ""))
         p.add_argument("--mailto", default=os.environ.get("OPENALEX_MAILTO", ""))
 
-    b1 = sub.add_parser("band1", help="reference identity: F1 / F2 / F8")
+    b1 = sub.add_parser(
+        "band1",
+        help="reference identity: Unresolvable Reference, Wrong Reference, "
+             "Retracted Source")
     common(b1)
     b1.set_defaults(fn=_band1)
 
@@ -130,7 +141,9 @@ def main(argv=None) -> int:
                     help="defaults to the band1 artifact in --out-dir")
     b2.set_defaults(fn=_band2)
 
-    rp = sub.add_parser("report", help="route and disposition counts")
+    rp = sub.add_parser(
+        "report",
+        help="route and disposition counts, with category names")
     rp.add_argument("predictions", help=f"path to {JUDGMENT}")
     rp.set_defaults(fn=_report)
 

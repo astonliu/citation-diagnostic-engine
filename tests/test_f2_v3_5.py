@@ -17,7 +17,7 @@ Explicitly NOT addressed: the title-containment / subtitle-expansion class
 (row 2280326). A containment fixture is included as a control proving that class
 is deliberately untouched.
 
-Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_f2_v3_5.py -q
+Run:  PYTHONPATH=<repo> python -m pytest tests/test_f2_v3_5.py -q
 """
 from __future__ import annotations
 

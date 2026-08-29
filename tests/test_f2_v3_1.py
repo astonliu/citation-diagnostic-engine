@@ -28,7 +28,7 @@ F2_V3_3 (SAME_WORK threshold): SAME_WORK_TITLE_SIM_MIN lowered 0.95 -> 0.92 so t
       crossed the gate) so no row moves silently. The 7 regression guards all sit at
       title_sim < 0.92 and stay review_wrong_paper.
 
-Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_f2_v3_1.py -q
+Run:  PYTHONPATH=<repo> python -m pytest tests/test_f2_v3_1.py -q
 """
 from __future__ import annotations
 

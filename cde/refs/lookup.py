@@ -240,7 +240,7 @@ def _parse_medline(text: str, pmid: str) -> RetrievedRecord:
 
 
 # --------------------------------------------------------------------------
-# Author-mismatch trip-wire (HANDOFF task 2)
+# Author-mismatch trip-wire
 # --------------------------------------------------------------------------
 def _norm_name(s: str) -> str:
     return _normalize(s)
@@ -280,7 +280,8 @@ def _claimed_first_author_present(claimed_authors: list[str],
 # --------------------------------------------------------------------------
 # No-ID branch: structured bibliographic lookup
 # --------------------------------------------------------------------------
-# HANDOFF_BIBLIO_MATCH supersedes the old single-token_sort_ratio judging here:
+# The structured bibliographic matcher supersedes the old
+# single-token_sort_ratio judging here:
 # candidate retrieval + parsing now live in biblio_match.py, and the confident
 # match decision is made by the structured matcher (title similarity + field
 # agreement), not a bare title threshold. The ROUTING is unchanged -- a no-PMID

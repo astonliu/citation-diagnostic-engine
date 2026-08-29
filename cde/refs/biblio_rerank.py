@@ -1,4 +1,5 @@
-"""Optional Stage 2: MedCPT cross-encoder tie-breaker (HANDOFF_BIBLIO_MATCH).
+"""Optional Stage 2 of the bibliographic matcher: MedCPT cross-encoder
+tie-breaker.
 
 Built ONLY for the ambiguous case -- when :func:`biblio_match.best_match` returns
 ``ambiguous=True`` (the top two candidates are within ``margin``). The Stage-1

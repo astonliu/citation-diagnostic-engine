@@ -15,7 +15,7 @@ seeds (11/13/17) now share the same XML dir, so v3.4:
 Banding logic (build_f2_record, biblio_match, the 0.92 gate, unscoreable rules) is
 untouched -- see test_f2_v3_1.py / test_f2_revision.py for that coverage.
 
-Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_f2_v3_4.py -q
+Run:  PYTHONPATH=<repo> python -m pytest tests/test_f2_v3_4.py -q
 """
 from __future__ import annotations
 

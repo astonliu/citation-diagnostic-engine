@@ -1,4 +1,4 @@
-"""Fixture-based tests for the live-network paths (HANDOFF task 4).
+"""Fixture-based tests for the live-network paths.
 
 These cover the functions the offline tests could not: MEDLINE parsing against
 real EFetch output, the three confirmation searches against recorded JSON, the
@@ -8,7 +8,7 @@ author-mismatch trip-wire, the all-errored decide safeguard, and citance linking
 No network is touched: recorded responses in ./fixtures are replayed through a
 fake requests session, and the Anthropic SDK client is monkeypatched.
 
-Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_live_paths.py -q
+Run:  PYTHONPATH=<repo> python -m pytest tests/test_live_paths.py -q
 """
 from __future__ import annotations
 import json
@@ -567,7 +567,7 @@ def test_structured_message_wins_over_stringified_exception():
 
 
 # --------------------------------------------------------------------------
-# author-mismatch trip-wire (HANDOFF task 2)
+# author-mismatch trip-wire
 # --------------------------------------------------------------------------
 def _ref_with_resolved(claimed_title, claimed_authors, resolved_title,
                        resolved_authors):
@@ -667,7 +667,7 @@ def test_decide_partial_error_still_reaches_f2():
 
 
 # --------------------------------------------------------------------------
-# citance linking (HANDOFF task 3)
+# citance linking
 # --------------------------------------------------------------------------
 def test_citance_linking_attaches_sentences_and_markers():
     refs = parse_pmc_xml(os.path.join(FIX, "pmc_with_citances.xml"),

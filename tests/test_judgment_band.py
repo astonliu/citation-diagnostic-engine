@@ -15,7 +15,7 @@ Covers every row of the acceptance matrix in the build spec:
   * tri-state ``established`` decided with ``is False`` (None is unknown)
   * pinned prompt versions on every record and the manifest
 
-Run: PYTHONPATH=<repo> python -m pytest cre/f1/test_judgment_band.py -q
+Run: PYTHONPATH=<repo> python -m pytest tests/test_judgment_band.py -q
 """
 from __future__ import annotations
 

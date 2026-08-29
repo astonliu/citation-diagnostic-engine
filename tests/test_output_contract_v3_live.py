@@ -17,7 +17,7 @@ cited paper is PMID ``33903719`` -> ``PMC8076174``.
 
 Run with:
     CRE_LIVE_NCBI=1 PYTHONPATH=. ../.venv_cre/bin/python -m pytest \\
-        cre/f1/test_output_contract_v3_live.py -q -s
+        tests/test_output_contract_v3_live.py -q -s
 """
 from __future__ import annotations
 

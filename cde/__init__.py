@@ -31,6 +31,7 @@ from .refs.schema import (
     ClaimedRef, PredictionRecord, Reference, RetrievedRecord, StageLog,
     TAXONOMY_LABELS,
 )
+from .taxonomy import CATEGORY_NAMES, category_name
 
 __all__ = [
     # Band 1
@@ -45,4 +46,6 @@ __all__ = [
     # the records the two bands exchange
     "Reference", "ClaimedRef", "RetrievedRecord", "StageLog",
     "PredictionRecord", "TAXONOMY_LABELS",
+    # code -> the name every read surface shows
+    "CATEGORY_NAMES", "category_name",
 ]

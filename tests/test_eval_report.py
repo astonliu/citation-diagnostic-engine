@@ -3,7 +3,7 @@ run-output record. Verifies the full schema, that raw strings are persisted
 alongside the computed verdicts, and the acceptance criteria from the
 'persist raw first_author/journal/year_from_dep' task.
 
-Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_eval_report.py -q
+Run:  PYTHONPATH=<repo> python -m pytest tests/test_eval_report.py -q
 """
 from __future__ import annotations
 import json

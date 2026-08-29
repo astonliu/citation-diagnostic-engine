@@ -6,7 +6,7 @@ with corroborating fields is routed to UNSCOREABLE rather than silently CLEARED
 by the strong-corroboration override; (d) UNSCOREABLE maps to None (dropped from
 the dataset, never ACCURATE); (e) the eval layer counts it as a separate bucket.
 
-Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_unscoreable.py -q
+Run:  PYTHONPATH=<repo> python -m pytest tests/test_unscoreable.py -q
 """
 from __future__ import annotations
 

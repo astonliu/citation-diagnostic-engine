@@ -13,9 +13,10 @@ that cites it. For every reference, `refs/lookup` resolves the claimed PMID and
 `refs/confirm` searches PubMed, Crossref and OpenAlex for the claimed title.
 `refs/decide` combines the two into one label.
 
-What stops an item here: **F1** (no such work exists), **F2** (the identifier
-names a different work), **F8** (the work was retracted more than 31 days before
-the citing paper appeared), `same_work` (a variant of the same work — a
+What stops an item here: **Unresolvable Reference** (no such work exists),
+**Wrong Reference** (the identifier names a different work), **Retracted
+Source** (the work was retracted more than 31 days before the citing paper
+appeared), `same_work` (a variant of the same work — a
 preprint, a translation), `unscoreable` (nothing to compare, e.g. no title), and
 `unverifiable` (no identifier at all).
 
@@ -47,9 +48,9 @@ each claim against it as established / not established / cannot be determined.
 at once: a claim a sibling reference established is the group's coverage, not
 this reference's gap.
 
-`diagnose/engine` then applies the hierarchy — **F7** (wrong entity) > **F6**
-(partial support) > **F4** (overstatement) > **F3** (misattribution) > **F5**
-(superseded) — over typed assessments, with no I/O of its own. Only the
+`diagnose/engine` then applies the hierarchy — **Wrong Entity** > **Insufficient
+Support** > **Overstatement** > **Misattribution** > **Supersession** — over
+typed assessments, with no I/O of its own. Only the
 discriminators whose seams are actually wired can produce a finding; an unwired
 one is silence, never a confident negative.
 

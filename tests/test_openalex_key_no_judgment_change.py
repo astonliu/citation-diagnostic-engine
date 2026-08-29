@@ -45,7 +45,7 @@ THE BASELINE HAS BEEN REGENERATED ONCE, and this is that explanation.
   recorded here because the coverage guard below no longer names F1 and the
   reason must not be mistaken for the guard having been loosened to pass.
 
-Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_openalex_key_no_judgment_change.py -q
+Run:  PYTHONPATH=<repo> python -m pytest tests/test_openalex_key_no_judgment_change.py -q
 """
 from __future__ import annotations
 import json

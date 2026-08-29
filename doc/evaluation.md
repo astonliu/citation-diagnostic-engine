@@ -8,6 +8,14 @@ holds. `accurate` is the absence of a finding after every wired discriminator
 has answered — it is not a positive prediction, and nothing is labelled
 `accurate` that was merely never asked.
 
+The backticked strings above are literal record values: they are what a
+prediction file actually contains, and they are what a `grep` over one must
+match. `doc/taxonomy.md` maps each code to the category name this document and
+the paper use in prose — `F6` is Insufficient Support — and
+`cde.taxonomy.CATEGORY_NAMES` is that same table in code. The names are for
+reading; the codes are the data, and only the codes are ever written to a
+record.
+
 ## What counts in a denominator
 
 The denominator is not "every reference in the corpus". It is the population the
@@ -89,24 +97,28 @@ unablated and must be disclosed rather than left unmentioned.
 
 ## Protocol
 
-**F1, F2 and F8** are database-resolvable and are evaluated against a
+**Unresolvable Reference, Wrong Reference and Retracted Source** are
+database-resolvable and are evaluated against a
 naturally-occurring gold set with a real denominator: precision and recall,
 five-fold stratified cross-validation, bootstrap confidence intervals over 1000
 resamples, and no point estimate reported alone.
 
-**F3–F7 are evaluated differently, and the difference is not a detail.** There
+**The five semantic categories are evaluated differently, and the difference is
+not a detail.** There
 is no population sample and there is no recall number. A finder surfaces
 candidate faults, annotators adjudicate each one, and what is reported is
-**precision per stratum on the flagged set** — the same audit model F2 uses,
+**precision per stratum on the flagged set** — the same audit model Wrong
+Reference uses,
 carried into the semantic strata. It is non-circular for the same reason: humans
 decide true from false positive independently of the system.
 
-Recall for F3–F7 is **declined, not missing**. The candidate pool is enriched by
+Recall for the five semantic categories is **declined, not missing**. The candidate pool is enriched by
 construction, so it has no honest denominator — auditing a finder's flagged
 output yields precision by construction and leaves recall undefined, because no
 labelled population draw was ever made. This is a design consequence, not a
-sacrifice to rarity, and it must be argued that way: do not cite F2's measured
-base rate as if it established rarity for F4 or F5.
+sacrifice to rarity, and it must be argued that way: do not cite Wrong
+Reference's measured base rate as if it established rarity for Overstatement or
+Supersession.
 
 In its place, for each stratum, the pipeline is run over that stratum's
 human-confirmed positive set and the fraction caught is reported, labelled
@@ -125,8 +137,8 @@ Three constraints keep that precision number meaning something:
 - **Precision is conditional on the finder prompt.** A prompt change is a
   different pipeline, so the prompt is frozen and versioned with the dataset, and
   labels are keyed on pair identity rather than on the prompt's output. Whether a
-  pair is an F3 is a fact about the world; a prompt change then moves the
-  denominator, not the individual truth labels.
+  pair is a Misattribution is a fact about the world; a prompt change then
+  moves the denominator, not the individual truth labels.
 
 Report it as **precision of the pipeline as configured**, not as "the engine's
 precision" in the abstract.

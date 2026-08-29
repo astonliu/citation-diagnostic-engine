@@ -6,7 +6,7 @@ each is a row the rule is required to leave flagged.
 
 PATH NOTE: the spec's verification command names ``tests/test_f2_samework_rule.py``
 and ``a replay tool``. Neither exists -- this project has no ``tests/``
-directory and no ``tools`` package; every test lives in ``cre/f1/test_*.py``. Placed
+directory and no ``tools`` package; every test lives in ``tests/test_*.py``. Placed
 per the project's own layout rather than creating a second convention.
 """
 from __future__ import annotations

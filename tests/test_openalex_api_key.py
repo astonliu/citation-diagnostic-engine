@@ -20,7 +20,7 @@ And with NO key configured every request must be byte-identical to the keyless
 engine, because the key is an authentication and billing parameter and is not
 allowed to move a single judgment.
 
-Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_openalex_api_key.py -q
+Run:  PYTHONPATH=<repo> python -m pytest tests/test_openalex_api_key.py -q
 """
 from __future__ import annotations
 import hashlib

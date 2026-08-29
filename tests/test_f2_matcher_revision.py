@@ -4,7 +4,7 @@ Each change lands with its own acceptance-matrix rows, verified independently an
 in dependency order A -> B -> C -> D -> E -> F. Fixtures use ONLY the literal
 strings from the spec's acceptance matrix (naturally-occurring data discipline).
 
-Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_f2_matcher_revision.py -q
+Run:  PYTHONPATH=<repo> python -m pytest tests/test_f2_matcher_revision.py -q
 """
 from __future__ import annotations
 

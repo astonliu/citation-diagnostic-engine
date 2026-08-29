@@ -6,7 +6,7 @@ only the targeted rule fires. Plus strict_loader / canon_v1 / schema_gate
 unit tests and the SV-110 bootstrap subprocess fixtures (runtime gate).
 
 Verification command:
-    PYTHONPATH=. ../.venv_cre/bin/python -m pytest cre/f1/test_semantic_validator_v1.py -q
+    PYTHONPATH=. ../.venv_cre/bin/python -m pytest tests/test_semantic_validator_v1.py -q
 """
 import copy
 import hashlib
@@ -913,8 +913,8 @@ def test_sv110_negative_path_escape(cand):
 # --- bootstrap subprocess fixtures (the runtime-gate evidence) -------------
 
 # The package root IS the repo root now: `cde/` sits directly under it.
-REPO_HANDOFF = pathlib.Path(__file__).resolve().parents[1]
-BOOTSTRAP_SRC = REPO_HANDOFF / "cde" / "freeze" / "bootstrap.py"
+REPO_ROOT_PATH = pathlib.Path(__file__).resolve().parents[1]
+BOOTSTRAP_SRC = REPO_ROOT_PATH / "cde" / "freeze" / "bootstrap.py"
 
 
 def _make_boot_tree(tmp_path):

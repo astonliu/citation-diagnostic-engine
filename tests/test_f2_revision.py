@@ -9,7 +9,7 @@ Plus the load-bearing interaction (31665581 must NOT divert -- it is a genuine
 wrong-paper) and the acceptance-matrix mechanisms on constructed fixtures (the
 live per-PMID numbers come from the Colab seed=7 run; here we prove behavior).
 
-Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_f2_revision.py -q
+Run:  PYTHONPATH=<repo> python -m pytest tests/test_f2_revision.py -q
 """
 from __future__ import annotations
 

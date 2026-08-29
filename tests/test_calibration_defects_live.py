@@ -13,7 +13,7 @@ is a gold label or an input to a reported number.
 
 Run with:
     CRE_LIVE_NCBI=1 PYTHONPATH=. ../.venv_cre/bin/python -m pytest \\
-        cre/f1/test_calibration_defects_live.py -q -s
+        tests/test_calibration_defects_live.py -q -s
 """
 from __future__ import annotations
 

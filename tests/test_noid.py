@@ -1,4 +1,4 @@
-"""Fixture-based tests for the no-ID branch (HANDOFF_NOID task).
+"""Fixture-based tests for the no-ID branch.
 
 References with no claimed PMID used to be excluded outright ("unverifiable",
 the Topaz blind spot). They now run a structured bibliographic lookup (Crossref
@@ -10,7 +10,7 @@ No network is touched: recorded responses in ./fixtures are replayed through the
 same FakeSession used by test_live_paths, and the LLM `complete` callable is a
 plain lambda. Mirrors that module's fakes so the two suites stay consistent.
 
-Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_noid.py -q
+Run:  PYTHONPATH=<repo> python -m pytest tests/test_noid.py -q
 """
 from __future__ import annotations
 import json

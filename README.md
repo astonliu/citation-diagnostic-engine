@@ -70,7 +70,7 @@ terminal outcomes — the counts every reported rate divides by:
 
 ```
 route
-  F6_FLAGGED                                        3
+  F6_FLAGGED  (Insufficient Support)                3
   FULL_COVERAGE                                     1
   HELD_LOW_CONFIDENCE                               1
   NO_CLAIMS                                         2
@@ -87,7 +87,8 @@ citation, with the claims, the evidence spans and the hash chain.
   full-text retrieval, sentence spans, coverage judging, co-citation grouping.
 - `cde/diagnose/` — the typed decision engine and the five discriminators. The
   engine does no I/O: injected assessors produce typed evidence and it applies
-  the F7 > F6 > F4 > F3 > F5 hierarchy deterministically.
+  the Wrong Entity > Insufficient Support > Overstatement > Misattribution >
+  Supersession hierarchy deterministically.
 - `cde/freeze/` — artifact integrity. Canonical serialisation, the frozen prompt
   seals, the trust-boundary bootstrap.
 - `cde/runtime/` — transports, rate limits, cost ledgers, and the governed
@@ -105,7 +106,7 @@ repo reads or writes are in `doc/data.md`.
 ## Documentation
 
 - [`doc/pipeline.md`](doc/pipeline.md) — what each stage does and what stops an item.
-- [`doc/taxonomy.md`](doc/taxonomy.md) — F1–F8 and the decision rules for the three confusable pairs.
+- [`doc/taxonomy.md`](doc/taxonomy.md) — the eight fault categories, their short codes, and the decision rules for the three confusable pairs.
 - [`doc/data.md`](doc/data.md) — the schema of every jsonl, field by field.
 - [`doc/evaluation.md`](doc/evaluation.md) — the label space, and what belongs in a denominator.
 - [`doc/preregistration.md`](doc/preregistration.md) — the analysis plan, fixed before annotation.

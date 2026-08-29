@@ -20,7 +20,7 @@ The two things it exists to hold still:
 No network: ``ncbi_pubtypes`` is monkeypatched on the CONSUMER module's namespace
 (``run``), which is how ncbi_meta's helpers are documented to be faked.
 
-Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_f8_retraction_gate.py -q
+Run:  PYTHONPATH=<repo> python -m pytest tests/test_f8_retraction_gate.py -q
 """
 from __future__ import annotations
 

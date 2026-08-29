@@ -9,7 +9,7 @@ is prefixed TEST). They exist so the machinery is provable; they are not
 proposals, and nothing here writes a CONFIG outside pytest tmp dirs.
 
 Verification command:
-    PYTHONPATH=. ../.venv_cre/bin/python -m pytest cre/f1/test_mint_v1.py -q
+    PYTHONPATH=. ../.venv_cre/bin/python -m pytest tests/test_mint_v1.py -q
 """
 import copy
 import hashlib
@@ -30,9 +30,9 @@ from cde.freeze.strict_loader import load_strict
 
 PYTHON = sys.executable
 # The package root IS the repo root now: `cde/` sits directly under it.
-REPO_HANDOFF = pathlib.Path(__file__).resolve().parents[1]
-REPO_ROOT = REPO_HANDOFF
-FREEZE = REPO_HANDOFF / "cde" / "freeze"
+REPO_ROOT_PATH = pathlib.Path(__file__).resolve().parents[1]
+REPO_ROOT = REPO_ROOT_PATH
+FREEZE = REPO_ROOT_PATH / "cde" / "freeze"
 MINT = FREEZE / "mint_v1.py"
 
 # Frozen acceptance constants, as literals (rows 1-3, 19).
@@ -63,10 +63,10 @@ def _sha256_utf8(text):
 
 
 def _run_mint(*args):
-    env = {**os.environ, "PYTHONPATH": str(REPO_HANDOFF)}
+    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT_PATH)}
     return subprocess.run([PYTHON, str(MINT)] + list(args),
                           capture_output=True, text=True,
-                          cwd=str(REPO_HANDOFF), env=env)
+                          cwd=str(REPO_ROOT_PATH), env=env)
 
 
 def _reseal_package(pkg):

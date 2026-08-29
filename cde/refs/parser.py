@@ -264,7 +264,7 @@ def _ext_link(cit) -> str:
 
 
 # --------------------------------------------------------------------------
-# Citance linking (HANDOFF task 3)
+# Citance linking
 # --------------------------------------------------------------------------
 # Sentence-bearing blocks we serialize. We process only the innermost such block
 # (one with no nested block) so a <td> wrapping a <p> isn't counted twice.

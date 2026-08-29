@@ -19,7 +19,7 @@ the 16639420 shape). They are NOT the real seed=7 records (unreachable here) and
 prove no precision/recall NUMBER -- only that the screen still flags the shapes a
 genuine F2 takes.
 
-Run:  PYTHONPATH=<repo> python -m pytest cre/f1/test_f2_recall_guard.py -q
+Run:  PYTHONPATH=<repo> python -m pytest tests/test_f2_recall_guard.py -q
 """
 from __future__ import annotations
 
