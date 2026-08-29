@@ -23,14 +23,14 @@ import json
 
 import pytest
 
-from cre.f1 import preband_contract as pc
-from cre.f1 import sentence_spans
-from cre.f1.judgment_engine import (
+from cde.refs import preband_contract as pc
+from cde.claims import spans as sentence_spans
+from cde.diagnose.engine import (
     ClaimSupport, DecisionStatus, DiscriminatorContractError,
     EntityAssessment, EntityState, ProvenanceAssessment, ProvenanceState,
     SupportState, TemporalAssessment, TemporalState, decide_judgment,
 )
-from cre.f1.freeze import canon_v1 as canon
+from cde.freeze import canon_v1 as canon
 
 from .test_hierarchy import CLAIMS, decide, entity, prov, support, temporal
 

@@ -22,8 +22,11 @@ import json
 
 import pytest
 
-from cre.f1 import confirm, lookup, ratelimit, run
-from cre.f1.schema import ClaimedRef, Reference
+from cde.refs import confirm
+from cde.refs import lookup
+from cde.runtime import ratelimit
+from cde.refs import run
+from cde.refs.schema import ClaimedRef, Reference
 
 from .conftest import assert_golden
 

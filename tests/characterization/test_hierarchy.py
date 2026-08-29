@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from cre.f1.judgment_engine import (
+from cde.diagnose.engine import (
     ClaimSupport, DecisionStatus, DiscriminatorContractError, EntityAssessment,
     EntityState, ProvenanceAssessment, ProvenanceState, SupportState,
     TemporalAssessment, TemporalState, decide_judgment,

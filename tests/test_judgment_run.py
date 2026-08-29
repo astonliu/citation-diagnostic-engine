@@ -1,0 +1,1125 @@
+"""Offline tests for the F3-F7 natural-paper orchestrator (judgment_run).
+
+All model/network work is injected as stubs. No paid call, no network. Covers
+the three live coverage routes, fail-closed pre-band behavior, the wired F3/F4
+path in development AND formal modes, the up-front configuration abort, the
+whole-record hash chain + sidecar, and the manifest lifecycle
+(in_progress -> complete, immutable complete, chain-validated resume, torn-tail
+preservation).
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from cde.diagnose import pipeline as jr
+from cde.refs import preband_contract as pc
+from cde.diagnose.strength import F4Policy
+from cde.refs.schema import Reference, ClaimedRef
+
+
+_REAL_FAILURES = json.loads((
+    Path(__file__).with_name("testdata") / "natural_run_failures_20260821.json"
+).read_text(encoding="utf-8"))["cases"]
+
+
+# --------------------------------------------------------------------------
+# fixtures / helpers
+# --------------------------------------------------------------------------
+def make_ref(cid, *, citance="Drug X reduces outcome Y [1].", pmid="111",
+             src="PMC1"):
+    return Reference(
+        citation_id=cid, citance=citance,
+        claimed=ClaimedRef(claimed_pmid=pmid, title="Cited title"),
+        cited_reference_marker="1", source_pmcid=src, source_pmid="900",
+        source_title="Citing title",
+    )
+
+
+ABSTRACT = (
+    "Drug X reduced outcome Y in a controlled study, as reported previously; "
+    "the primary trial reduced outcome Y."
+)
+
+
+def abstract_ok(_pmid):
+    return ABSTRACT
+
+
+def abstract_missing(_pmid):
+    return None
+
+
+def judge_established(*values):
+    """Return a coverage_judge stub yielding one verdict per claim in order."""
+    def judge(claims, evidence):
+        out = []
+        for i, c in enumerate(claims):
+            v = values[i] if i < len(values) else None
+            out.append({"established": v, "rationale": f"r{i}",
+                        "evidence_span": ABSTRACT if v else ""})
+        return out
+    return judge
+
+
+def extractor_of(*claims):
+    def extractor(_sentence):
+        return list(claims)
+    return extractor
+
+
+def run(tmp_path, refs, *, extractor, coverage_judge, fetch_abstract=abstract_ok,
+        disposition, monkeypatch, pubtypes_lookup=None, **extra):
+    """``**extra`` is passed straight through to ``run_natural_judgment``.
+
+    Added for the opt-in full-text seams so their tests drive the REAL entry point
+    through this same helper rather than reconstructing the call -- a reconstruction
+    is the one thing a wiring test must not do, since wiring is what it checks."""
+    (tmp_path / "PMC1.xml").write_text("<x/>", encoding="utf-8")
+    monkeypatch.setattr(jr, "parse_pmc_xml", lambda path, source_pmcid=None: refs)
+    out_dir = tmp_path / "out"
+    manifest = jr.run_natural_judgment(
+        str(tmp_path), str(out_dir), extractor=extractor,
+        coverage_judge=coverage_judge, fetch_abstract=fetch_abstract,
+        preband_disposition=disposition, pubtypes_lookup=pubtypes_lookup,
+        model="test-model", **extra,
+    )
+    rows = [json.loads(l) for l in
+            (out_dir / "judgment_predictions.jsonl").read_text().splitlines()]
+    return manifest, rows
+
+
+CLEARED = {"c": "cleared"}
+
+
+# --------------------------------------------------------------------------
+# the three live coverage routes
+# --------------------------------------------------------------------------
+def test_coverage_gap_is_terminal_f6(tmp_path, monkeypatch):
+    manifest, rows = run(
+        tmp_path, [make_ref("c")],
+        extractor=extractor_of("Drug X reduces Y", "Drug X cures Z"),
+        coverage_judge=judge_established(False, True),
+        disposition=CLEARED, monkeypatch=monkeypatch)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["disposition"] == jr.DISP_PREDICTED
+    assert r["label"] == ["F6"]
+    assert "F6" in r["findings"]
+    assert r["route"] == "F6_FLAGGED"
+
+
+def test_full_coverage_is_held_never_accurate(tmp_path, monkeypatch):
+    _, rows = run(
+        tmp_path, [make_ref("c")],
+        extractor=extractor_of("Drug X reduces Y"),
+        coverage_judge=judge_established(True),
+        disposition=CLEARED, monkeypatch=monkeypatch)
+    r = rows[0]
+    assert r["disposition"] == jr.DISP_HELD_FULL_COVERAGE
+    assert r["label"] == []
+    assert r["label"] != "accurate"
+
+
+def test_some_unknown_is_held_insufficient(tmp_path, monkeypatch):
+    _, rows = run(
+        tmp_path, [make_ref("c")],
+        extractor=extractor_of("Drug X reduces Y", "Drug X cures Z"),
+        coverage_judge=judge_established(True, None),
+        disposition=CLEARED, monkeypatch=monkeypatch)
+    assert rows[0]["disposition"] == jr.DISP_HELD_INSUFFICIENT
+
+
+def test_no_atomic_claims_is_held(tmp_path, monkeypatch):
+    _, rows = run(
+        tmp_path, [make_ref("c")],
+        extractor=extractor_of(),                 # sentence yields no atomic claim
+        coverage_judge=judge_established(),
+        disposition=CLEARED, monkeypatch=monkeypatch)
+    assert rows[0]["disposition"] == jr.DISP_HELD_NO_CLAIMS
+
+
+# --------------------------------------------------------------------------
+# fail-closed behaviors
+# --------------------------------------------------------------------------
+def test_malformed_claim_output_holds_and_keeps_pair_reviewable(tmp_path,
+                                                                 monkeypatch):
+    case = _REAL_FAILURES["empty_claim_extraction"]
+
+    def bad_extractor(_s):
+        raise ValueError(case["observed_error"])
+
+    manifest, rows = run(
+        tmp_path, [make_ref(
+            case["citation_id"], citance=case["citing_sentence"],
+            pmid=case["cited_pmid"], src=case["pmcid"])],
+        extractor=bad_extractor, coverage_judge=judge_established(),
+        disposition={case["citation_id"]: "cleared"}, monkeypatch=monkeypatch)
+    assert all(r["disposition"] == jr.DISP_HELD_CLAIM_EXTRACTION_FAILURE
+               for r in rows)
+    assert all(r["stage_failures"] == [{
+        "stage": "claim_extraction",
+        "error_type": "ValueError",
+        "message": case["observed_error"],
+    }] for r in rows)
+    queue = tmp_path / "out" / "judgment_band_annotation_queue.jsonl"
+    assert len(queue.read_text(encoding="utf-8").splitlines()) == 1
+    assert manifest["stage_failures"] == {
+        "affected_reference_records": 1,
+        "by_stage": {"claim_extraction": 1},
+        "note": (
+            "Per-stage model/evidence failures are held and human-queued; "
+            "they do not erase the rest of the citation-pair record."),
+    }
+
+
+def _covered_pair_for_stage_failure(case):
+    item = jr.jb.build_item(make_ref(
+        case["citation_id"], citance=case["citing_sentence"],
+        pmid=case["cited_pmid"], src=case["pmcid"]))
+    rec, claims, verdicts = jr.judge_pair_coverage(
+        item, extractor=extractor_of(case["citing_sentence"]),
+        coverage_judge=judge_established(True), fetch_abstract=abstract_ok)
+    return rec, item, claims, verdicts
+
+
+@pytest.mark.parametrize("stage,case_name", [
+    ("F5", "f5_table_hash"),
+    ("F7", "f7_span_binding"),
+])
+def test_real_late_stage_failure_preserves_the_judged_pair(stage, case_name):
+    case = _REAL_FAILURES[case_name]
+    rec, item, claims, verdicts = _covered_pair_for_stage_failure(case)
+
+    def broken_builder(_item):
+        raise ValueError(case["observed_error"])
+
+    extra = ({"f5_seams": {}, "f5_evidence_builder": broken_builder}
+             if stage == "F5" else
+             {"f7_seams": {}, "f7_evidence_builder": broken_builder})
+    row = jr.judge_pair_finish(
+        rec, item, claims, verdicts, fetch_abstract=abstract_ok, **extra)
+
+    assert row["atomic_claims"] == [case["citing_sentence"]]
+    assert row["coverage_verdicts"][0]["established"] is True
+    assert row["stage_failures"][0]["stage"] == stage
+    assert f"{stage} stage failed" in row["hold_reasons"]
+    assert row["disposition"] == jr.DISP_HELD_FULL_COVERAGE
+    assert "parse_error" not in row
+
+
+def test_preband_f2_is_excluded_without_coverage_call(tmp_path, monkeypatch):
+    calls = {"n": 0}
+
+    def counting_judge(claims, evidence):
+        calls["n"] += 1
+        return judge_established(True)(claims, evidence)
+
+    _, rows = run(
+        tmp_path, [make_ref("c")],
+        extractor=extractor_of("Drug X reduces Y"),
+        coverage_judge=counting_judge,
+        disposition={"c": "F2"}, monkeypatch=monkeypatch)
+    r = rows[0]
+    assert r["disposition"] == jr.DISP_EXCLUDED_PREBAND
+    assert r["preband_label"] == "F2"
+    assert calls["n"] == 0                          # coverage never ran
+
+
+def test_empty_disposition_aborts_the_run(tmp_path, monkeypatch):
+    """CONTRACT CHANGE (Round 1 remediation, ledger items 2-3).
+
+    This used to complete: every pair got DISP_EXCLUDED_PREBAND_MISSING,
+    accounting_ok stayed true, the queue was empty, and the manifest said
+    'complete' -- indistinguishable from a successful run. A zero-overlap join
+    is now a run-level abort, raised BEFORE any output file exists."""
+    with pytest.raises(pc.PrebandContractError, match="ZERO overlap"):
+        run(tmp_path, [make_ref("c")],
+            extractor=extractor_of("Drug X reduces Y"),
+            coverage_judge=judge_established(True),
+            disposition={}, monkeypatch=monkeypatch)
+
+
+def test_none_disposition_aborts_the_run(tmp_path, monkeypatch):
+    """Same contract change for 'no disposition supplied at all'."""
+    with pytest.raises(pc.PrebandContractError,
+                       match="no preband_disposition supplied"):
+        run(tmp_path, [make_ref("c")],
+            extractor=extractor_of("Drug X reduces Y"),
+            coverage_judge=judge_established(True),
+            disposition=None, monkeypatch=monkeypatch)
+
+
+def test_per_pair_fail_closed_survives_the_run_level_gate(tmp_path, monkeypatch):
+    """The per-pair fail-closed rule is UNCHANGED for a partially covered join.
+
+    One id present, one absent: the run proceeds (the join is real), the covered
+    pair is judged, and the uncovered pair is still excluded fail-closed rather
+    than judged."""
+    manifest, rows = run(
+        tmp_path, [make_ref("c"), make_ref("absent")],
+        extractor=extractor_of("Drug X reduces Y"),
+        coverage_judge=judge_established(True),
+        disposition={"c": "cleared"}, monkeypatch=monkeypatch)
+    by_id = {r["citation_id"]: r for r in rows}
+    assert by_id["absent"]["disposition"] == jr.DISP_EXCLUDED_PREBAND_MISSING
+    assert by_id["c"]["preband_cleared"] is True
+    join = manifest["preband"]["join"]
+    assert join["matched"] == 1
+    assert join["missing_from_disposition"] == 1
+    assert join["missing_sample"] == ["absent"]
+
+
+def test_structural_exclusions(tmp_path, monkeypatch):
+    refs = [
+        make_ref("no_citance", citance=""),
+        make_ref("no_pmid", pmid=""),
+    ]
+    _, rows = run(
+        tmp_path, refs, extractor=extractor_of("x"),
+        coverage_judge=judge_established(True),
+        disposition={"no_citance": "cleared", "no_pmid": "cleared"},
+        monkeypatch=monkeypatch)
+    by = {r["citation_id"]: r["disposition"] for r in rows}
+    assert by["no_citance"] == jr.DISP_EXCLUDED_NO_CITANCE
+    assert by["no_pmid"] == jr.DISP_EXCLUDED_NO_CITED_PMID
+
+
+# --------------------------------------------------------------------------
+# accounting + provenance discipline
+# --------------------------------------------------------------------------
+def test_accounting_identity(tmp_path, monkeypatch):
+    refs = [make_ref("a"), make_ref("b"), make_ref("c"),
+            make_ref("d", citance=""), make_ref("e")]
+    disposition = {"a": "cleared", "b": "cleared", "c": "F2", "e": "cleared"}
+    manifest, rows = run(
+        tmp_path, refs,
+        extractor=extractor_of("Drug X reduces Y"),
+        coverage_judge=judge_established(True),
+        disposition=disposition, monkeypatch=monkeypatch)
+    assert manifest["refs_seen"] == 5
+    assert manifest["total_records"] == 5
+    assert manifest["accounting_ok"] is True
+    assert len(rows) == 5
+    assert sum(v for k, v in manifest["counts"].items()
+               if not k.startswith(jr.DISP_EXCLUDED_PREBAND + ":")) == 5
+
+
+def test_evidence_and_rationale_preserved(tmp_path, monkeypatch):
+    _, rows = run(
+        tmp_path, [make_ref("c")],
+        extractor=extractor_of("Drug X reduces Y"),
+        coverage_judge=judge_established(True),
+        disposition=CLEARED, monkeypatch=monkeypatch)
+    r = rows[0]
+    assert r["evidence"]["cited_abstract"] == ABSTRACT
+    assert r["evidence_usable"] is True
+    assert r["coverage_verdicts"][0]["rationale"] == "r0"
+    assert r["coverage_verdicts"][0]["evidence_span"] == ABSTRACT
+
+
+def test_unusable_abstract_holds(tmp_path, monkeypatch):
+    _, rows = run(
+        tmp_path, [make_ref("c")],
+        extractor=extractor_of("Drug X reduces Y"),
+        coverage_judge=judge_established(None),      # judge yields unknown
+        fetch_abstract=abstract_missing,
+        disposition=CLEARED, monkeypatch=monkeypatch)
+    r = rows[0]
+    assert r["evidence_usable"] is False
+    assert r["disposition"] == jr.DISP_HELD_INSUFFICIENT
+
+
+def test_manifest_pins_versions_hashes_and_prompts(tmp_path, monkeypatch):
+    manifest, _ = run(
+        tmp_path, [make_ref("c")],
+        extractor=extractor_of("Drug X reduces Y"),
+        coverage_judge=judge_established(True),
+        disposition=CLEARED, monkeypatch=monkeypatch)
+    assert manifest["claim_extract_prompt_version"] == "claim_extract_v3"
+    assert manifest["coverage_prompt_version"] == "coverage_v2"
+    # Coverage substrate AND the discriminator implementation are pinned.
+    for name in ("diagnose/engine.py", "claims/band_prompts.py",
+                 "diagnose/strength.py", "diagnose/provenance.py",
+                 "diagnose/pipeline.py"):
+        assert name in manifest["module_sha256"], name
+    assert set(manifest["prompt_sha256"]) >= {
+        "F4_STRENGTH_PROMPT", "F4_VERIFIER_PROMPT",
+        "F3_V2_ORIGIN_PROMPT", "F3_V3_SELECT_PROMPT", "F3_V4_LOOPCLOSE_PROMPT",
+    }
+    assert all(len(v) == 64 for v in manifest["prompt_sha256"].values())
+    assert manifest["model"] == "test-model"
+
+
+def test_source_never_asserts_confident_negatives_for_unbuilt_gates():
+    """The orchestrator stays a THIN wiring layer: it must never inline-construct a
+    temporal/entity verdict. F5 is delegated to ``decide_f5`` and F7 to
+    ``make_entity_assessor`` (both built leaves) -- in neither case does this module
+    itself name a confident verdict enum. Its only inline temporal seam is the
+    not-evaluated UNJUDGEABLE default; F3/F4 states are read from their leaves."""
+    import inspect
+    src = inspect.getsource(jr)
+    for forbidden in ("NO_QUALIFYING_CONTRADICTION", "QUALIFYING_CONTRADICTION",
+                      "SAME_ENTITY", "DIFFERENT_ENTITY_SUPPORTED"):
+        assert forbidden not in src, f"module must not inline-assert {forbidden}"
+    # The only inline temporal seam is the not-evaluated UNJUDGEABLE default. F5 and
+    # F7 verdicts arrive via their leaves, not inline.
+    assert "TemporalState.UNJUDGEABLE" in src
+    assert "decide_f5" in src              # F5 is wired (delegated), not hardcoded
+    assert "make_entity_assessor" in src   # F7 is wired (delegated), not hardcoded
+
+
+def test_f5_wired_through_runner_emits_temporal_finding(tmp_path, monkeypatch):
+    """F5 is WIRED: with offline seams + an evidence builder, decide_f5 runs inside
+    the runner and a qualifying contradiction surfaces as an F5 finding + per-claim
+    F5 records on the emitted record (fail-closed to UNJUDGEABLE when unwired)."""
+    from cde.diagnose.supersession import (
+        CandidateWork, ComparabilitySource, EvidenceTier, NoticeStatus,
+        RetrievalResult, F5Policy,
+    )
+    from cde.diagnose.evidence_store import build_source_packet
+
+    def packet(work_id, date, abstract):
+        return build_source_packet(
+            {"id": work_id, "title": f"Work {work_id}", "pub_date": date,
+             "pub_date_latest": date, "pub_date_precision": "day",
+             "authors": ["Author"], "publication_types": [
+                 "Randomized Controlled Trial"]},
+            as_of_date="2024-01-01", retrieved_at="2024-01-01T00:00:00+00:00",
+            evidence_tier="rct", evidence_tier_basis="test",
+            abstract=abstract, historical_content_verified=True)
+
+    cited_packet = packet(
+        "111", "2010-01-01", "Drug X reduced outcome Y in adults.")
+    candidate_packet = packet(
+        "222", "2020-01-01",
+        "A larger trial found Drug X did NOT reduce outcome Y in adults.")
+    cited_src = ComparabilitySource(
+        abstract=cited_packet.abstract, work_id="111",
+        packet_sha256=cited_packet.packet_sha256)
+    cand_src = ComparabilitySource(
+        abstract=candidate_packet.abstract, work_id="222",
+        packet_sha256=candidate_packet.packet_sha256)
+
+    def f5_retrieve(cited_meta, claim, *, after_date, as_of_date):
+        return RetrievalResult(
+            candidates=(CandidateWork(id="222", pub_date="2020-01-01",
+                                      authors=("Jones",), tier_hint="rct",
+                                      registry_ids=("NCT00000002",),
+                                      demonstrably_distinct_from=("111",)),),
+            adequacy="adequate", status="ok", query_hash="qh")
+
+    def f5_fetch(work_id, *, as_of_date):
+        return cand_src if work_id == "222" else cited_src
+
+    f5_fetch.source_packet_log = [
+        cited_packet.to_dict(), candidate_packet.to_dict()]
+
+    def f5_notice(work_id, *, as_of_date):
+        return NoticeStatus(lookup_status="ok", source_role="no_notice_type")
+
+    def f5_tier(meta):
+        hint = meta.get("tier_hint") if isinstance(meta, dict) else None
+        return EvidenceTier(hint) if hint else EvidenceTier("rct")
+
+    def f5_attest(cited_meta, claim, rid, *, as_of_date):
+        return None
+
+    def f5_judge(cited_source, cand_source, claim):
+        return json.dumps({
+            "directional_contradiction": True,
+            "relation_to_cited_finding": "opposes", "claim_match": "match",
+            "outcome_relation": "same", "population_relation": "equivalent",
+            "cited_direction": "decrease", "candidate_direction": "no_effect",
+            "magnitude": "reversal",
+            "cited_finding_span": "Drug X reduced outcome Y in adults",
+            "candidate_contradiction_span": "Drug X did NOT reduce outcome Y in adults",
+            "confidence": 0.9, "scope_mismatch_axis": "none"})
+
+    def f5_verify(_prompt):
+        return json.dumps({
+            "same_claim_or_outcome": True,
+            "comparable_population": True,
+            "opposite_directions": True,
+            "cited_span_supports_claim": True,
+            "candidate_span_contradicts_claim": True,
+            "rationale": "confirmed",
+        })
+
+    f5_seams = dict(
+        retrieve_superseding_candidates=f5_retrieve,
+        fetch_comparability_source=f5_fetch,
+        check_formal_notice=f5_notice,
+        classify_evidence_tier=f5_tier,
+        find_supersession_attestation=f5_attest,
+        judge_contradiction=f5_judge,
+        verify_contradiction=f5_verify,
+    )
+
+    (tmp_path / "PMC1.xml").write_text("<x/>", encoding="utf-8")
+    monkeypatch.setattr(jr, "parse_pmc_xml", lambda path, source_pmcid=None: [make_ref("c")])
+    out_dir = tmp_path / "out"
+    manifest = jr.run_natural_judgment(
+        str(tmp_path), str(out_dir),
+        extractor=extractor_of("Drug X reduces outcome Y"),
+        coverage_judge=judge_established(True),
+        fetch_abstract=abstract_ok,
+        preband_disposition=CLEARED, model="test-model",
+        f5_seams=f5_seams,
+        f5_policy=F5Policy(
+            mode="deployment", generator_model_id="test-model",
+            verifier_model_id="test-model"),
+        f5_evidence_builder=lambda item: {
+            "cited_work_id": "111",
+            "cited_meta": {"authors": ["Smith"], "cited_tier": "rct",
+                           "registry_ids": ["NCT00000001"]},
+            "cited_date": "2010-01-01", "as_of_date": "2024-01-01"},
+    )
+    rows = [json.loads(l) for l in
+            (out_dir / "judgment_predictions.jsonl").read_text().splitlines()]
+    row = rows[0]
+    assert "F5" in row["findings"]
+    assert row["f5_records"][0]["temporal_state"] == "QUALIFYING_CONTRADICTION"
+    assert row["f5_records"][0]["f5_path"] == "B"
+    assert row["f5_records"][0]["verifier_result"] == "confirmed"
+    assert row["f5_records"][0]["reportable"] is True
+    assert row["f5_records"][0]["response_parser_version"] == \
+        manifest["f5"]["response_parser_version"]
+    assert manifest["f5"]["attestation_lookup_performed"] is True
+    assert manifest["f5"]["attestation_calls"] == 1
+    assert manifest["f5"]["contradiction_judge_calls"] == 1
+    assert manifest["f5"]["verifier_calls"] == 1
+    assert manifest["f5"]["reportable"] is True
+    packet_path = out_dir / "f5_evidence_packets.jsonl"
+    bundle_path = out_dir / "f5_controversy_bundles.jsonl"
+    assert manifest["f5"]["source_packet_artifact_rows"] == 2
+    assert manifest["f5"]["controversy_bundle_artifact_rows"] == 1
+    assert manifest["f5"]["source_packet_count"] == 2
+    assert manifest["f5"]["controversy_bundle_count"] == 1
+    assert manifest["f5"]["source_packet_artifact_sha256"] == \
+        jr._sha256_file(str(packet_path))
+    assert manifest["f5"]["controversy_bundle_artifact_sha256"] == \
+        jr._sha256_file(str(bundle_path))
+    assert len(packet_path.read_text().splitlines()) == 2
+    assert len(bundle_path.read_text().splitlines()) == 1
+    assert manifest["f5"]["source_packet_artifact_packet_hashes"] == sorted(
+        [cited_packet.packet_sha256, candidate_packet.packet_sha256])
+    assert manifest["f5"]["controversy_bundle_artifact_bundle_hashes"] == [
+        row["f5_records"][0]["controversy_bundle_sha256"]]
+    assert manifest["f5"]["discovery_queue_artifact_sha256"] == jr._sha256_file(
+        manifest["f5_discovery_queue_path"])
+    assert "F5_CONTRADICTION_PROMPT" in manifest["prompt_sha256"]
+    assert "retrieval_protocol" not in manifest["f5"]
+    assert "exposed no executed-protocol" in manifest["f5"]["retrieval_protocol_note"]
+    assert manifest["reportability"]["reportable"] is False
+    assert not any("F5_reportable" in failure
+                   for failure in manifest["reportability"]["failures"])
+
+
+def test_f5_seams_and_evidence_builder_are_an_xor_guard(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="supplied together"):
+        run(tmp_path, [make_ref("c")],
+            extractor=extractor_of("Drug X reduces outcome Y"),
+            coverage_judge=judge_established(True), disposition=CLEARED,
+            monkeypatch=monkeypatch, f5_seams={})
+
+
+def test_f5_manifest_distinguishes_absence_from_retrieval_outage():
+    runtime = {"retrieval_calls": 1, "attestation_calls": 0,
+               "judge_calls": 0, "retrieval_protocols": []}
+    absence = jr._f5_manifest_block(None, [{
+        "retrieval_status": "ok", "retrieval_adequacy": "empty",
+        "candidate_assessments": []}], runtime)
+    outage = jr._f5_manifest_block(None, [{
+        "retrieval_status": "failure", "retrieval_adequacy": "empty",
+        "candidate_assessments": []}], runtime)
+    assert absence["retrieval_status_counts"] == {"ok": 1}
+    assert outage["retrieval_status_counts"] == {"failure": 1}
+    assert absence["negative_reason_counts"] != outage["negative_reason_counts"]
+
+
+def test_f5_manifest_reports_observed_cache_savings_without_inventing_cost():
+    def judge(*_args):
+        raise AssertionError("not called")
+
+    judge.model_calls = 3
+    judge.cache_hits = 7
+    runtime = {
+        "retrieval_calls": 4, "attestation_calls": 0, "judge_calls": 10,
+        "retrieval_protocols": [], "_judge_counter_source": judge,
+        "evidence_store_counters": {
+            "metadata_calls": 8, "abstract_calls": 6,
+            "fulltext_attempts": 2, "fulltext_successes": 1,
+            "fulltext_failures": 1, "cache_hits": 5,
+        },
+    }
+    block = jr._f5_manifest_block(None, [], runtime)
+    assert block["stage_counters"] == {
+        "retrieval_calls": 4,
+        "evidence_metadata_calls": 8,
+        "evidence_abstract_calls": 6,
+        "fulltext_attempts": 2,
+        "fulltext_successes": 1,
+        "fulltext_failures": 1,
+        "evidence_cache_hits": 5,
+        "pairwise_judge_requests": 10,
+        "pairwise_model_calls": 3,
+        "pairwise_cache_hits": 7,
+        "abstract_screen_calls": 0,
+        "candidates_retrieved": 0,
+        "candidates_structurally_admissible": 0,
+        "screen_plausible": 0,
+        "screen_clear_mismatch": 0,
+        "screen_uncertain": 0,
+        "candidates_entering_deep_comparison": 0,
+        "deep_comparison_calls": 0,
+        "candidates_budget_skipped": 0,
+        "candidates_aggregated": 0,
+    }
+    assert block["cost_counters"] == {
+        "model_calls": 3,
+        "model_calls_avoided_by_cache": 7,
+        "input_tokens": "not_collected",
+        "output_tokens": "not_collected",
+        "cost_usd": "not_collected",
+    }
+
+
+def test_f5_manifest_uses_actual_cap_and_does_not_invent_judge_cost_counts():
+    retrieve = lambda *_args, **_kwargs: None
+    retrieve.candidate_cap = 2
+    judge = lambda *_args, **_kwargs: None
+    _, runtime = jr._instrument_f5_seams({
+        "retrieve_superseding_candidates": retrieve,
+        "fetch_comparability_source": lambda *_a, **_k: None,
+        "check_formal_notice": lambda *_a, **_k: None,
+        "classify_evidence_tier": lambda *_a, **_k: None,
+        "find_supersession_attestation": lambda *_a, **_k: None,
+        "judge_contradiction": judge,
+    })
+    runtime["judge_calls"] = 1
+    block = jr._f5_manifest_block(None, [], runtime)
+    assert block["candidate_cap"] == 2
+    assert block["stage_counters"]["pairwise_model_calls"] == "not_collected"
+    assert block["stage_counters"]["pairwise_cache_hits"] == "not_collected"
+    assert block["cost_counters"]["model_calls"] == "not_collected"
+    assert block["cost_counters"]["model_calls_avoided_by_cache"] == \
+        "not_collected"
+
+
+def test_f5_artifact_coverage_rejects_missing_referenced_evidence():
+    block = {
+        "source_packet_hashes": ["cited", "candidate"],
+        "controversy_bundle_hashes": ["bundle"],
+    }
+    with pytest.raises(ValueError, match="missing prediction-referenced packets"):
+        jr._require_f5_artifact_coverage(
+            block, packet_hashes={"cited"}, bundle_hashes={"bundle"})
+    with pytest.raises(ValueError, match="missing prediction-referenced bundles"):
+        jr._require_f5_artifact_coverage(
+            block, packet_hashes={"cited", "candidate"}, bundle_hashes=set())
+    # Extra packets from a quarantined attempt are retained, not rejected.
+    jr._require_f5_artifact_coverage(
+        block, packet_hashes={"cited", "candidate", "extra"},
+        bundle_hashes={"bundle", "extra-bundle"})
+
+
+def test_f5_artifact_coverage_binds_packet_hashes_to_work_ids():
+    block = {
+        "source_packet_hashes": ["cited", "candidate"],
+        "controversy_bundle_hashes": ["bundle"],
+    }
+    records = [{
+        "cited_work_id": "111", "cited_source_packet_sha256": "cited",
+        "candidate_assessments": [{
+            "candidate_work_id": "222",
+            "candidate_source_packet_sha256": "cited",
+        }],
+    }]
+    packets = {
+        "cited": {"work_id": "111"},
+        "candidate": {"work_id": "222"},
+    }
+    with pytest.raises(ValueError, match="candidate packet identity mismatch"):
+        jr._require_f5_artifact_coverage(
+            block, packet_hashes=packets, bundle_hashes={"bundle"},
+            packet_by_hash=packets, f5_records=records)
+
+
+def test_f5_unwired_holds_temporal_unjudgeable(tmp_path, monkeypatch):
+    """Without F5 seams the temporal seam stays UNJUDGEABLE and no F5 finding or
+    f5_records appear -- byte-identical to the pre-wiring behavior."""
+    _manifest, rows = run(
+        tmp_path, [make_ref("c")],
+        extractor=extractor_of("Drug X reduces outcome Y"),
+        coverage_judge=judge_established(True),
+        disposition=CLEARED, monkeypatch=monkeypatch)
+    assert "F5" not in rows[0]["findings"]
+    assert "f5_records" not in rows[0]
+    out_dir = tmp_path / "out"
+    assert not (out_dir / "f5_evidence_packets.jsonl").exists()
+    assert not (out_dir / "f5_controversy_bundles.jsonl").exists()
+
+
+# --------------------------------------------------------------------------
+# checkpoint resume + hash chain + manifest lifecycle
+# --------------------------------------------------------------------------
+def _two_docs(tmp_path, monkeypatch):
+    """Two one-ref docs; returns (out_dir, common kwargs)."""
+    (tmp_path / "PMC1.xml").write_text("<x/>")
+    (tmp_path / "PMC2.xml").write_text("<x/>")
+    monkeypatch.setattr(
+        jr, "parse_pmc_xml",
+        lambda path, source_pmcid=None: [make_ref(f"{source_pmcid}:B1", src=source_pmcid)])
+    disp = {"PMC1:B1": "cleared", "PMC2:B1": "cleared"}
+    common = dict(extractor=extractor_of("Drug X reduces Y"),
+                  coverage_judge=judge_established(True),
+                  fetch_abstract=abstract_ok, preband_disposition=disp, model="m")
+    return tmp_path / "out", common
+
+
+def _replay_chain(out_dir, genesis=""):
+    """Recompute the whole-record chain exactly as the module pins it."""
+    preds = (out_dir / "judgment_predictions.jsonl").read_text().splitlines()
+    side = (out_dir / "judgment_run_record_hashes.jsonl").read_text().splitlines()
+    assert len(preds) == len(side)
+    prev = genesis
+    for pline, sline in zip(preds, side):
+        psha = jr._canonical_sha256(json.loads(pline))
+        prev = jr._chain_link(prev, psha)
+        srec = json.loads(sline)
+        assert srec["prediction_sha256"] == psha
+        assert srec["link"] == prev
+    return prev, len(preds)
+
+
+def test_checkpoint_resume_skips_done_docs(tmp_path, monkeypatch):
+    out_dir, common = _two_docs(tmp_path, monkeypatch)
+    m1 = jr.run_natural_judgment(str(tmp_path), str(out_dir), max_docs=1, **common)
+    assert m1["docs_processed"] == 1
+    assert m1["status"] == "in_progress"          # input not exhausted: a pause
+    m2 = jr.run_natural_judgment(str(tmp_path), str(out_dir), **common)  # resume
+    assert m2["docs_processed"] == 1                       # only the remaining doc
+    assert m2["status"] == "complete"
+
+    rows = [json.loads(l) for l in
+            (out_dir / "judgment_predictions.jsonl").read_text().splitlines()]
+    assert {r["citation_id"] for r in rows} == {"PMC1:B1", "PMC2:B1"}   # no dup, no loss
+    ckpt = [json.loads(l) for l in
+            (out_dir / "judgment_run_checkpoint.jsonl").read_text().splitlines()]
+    assert {c["pmcid"] for c in ckpt} == {"PMC1", "PMC2"}
+
+
+def test_resume_continues_one_consistent_chain(tmp_path, monkeypatch):
+    out_dir, common = _two_docs(tmp_path, monkeypatch)
+    jr.run_natural_judgment(str(tmp_path), str(out_dir), max_docs=1, **common)
+    m2 = jr.run_natural_judgment(str(tmp_path), str(out_dir), **common)
+    tip, count = _replay_chain(out_dir)
+    assert count == 2
+    assert m2["chain_tip"] == tip
+    assert m2["chain_record_count"] == 2
+
+
+def test_manifest_in_progress_during_run_complete_after(tmp_path, monkeypatch):
+    seen = {}
+
+    def observing_judge(claims, evidence):
+        m = json.loads((tmp_path / "out" / "judgment_run_manifest.json").read_text())
+        seen["status"] = m["status"]
+        return judge_established(True)(claims, evidence)
+
+    manifest, _rows = run(
+        tmp_path, [make_ref("c")],
+        extractor=extractor_of("Drug X reduces Y"),
+        coverage_judge=observing_judge,
+        disposition=CLEARED, monkeypatch=monkeypatch)
+    assert seen["status"] == "in_progress"       # atomically present mid-run
+    assert manifest["status"] == "complete"      # flipped at clean (exhausted) end
+
+
+def test_resume_with_tampered_prediction_aborts_no_fork(tmp_path, monkeypatch):
+    out_dir, common = _two_docs(tmp_path, monkeypatch)
+    jr.run_natural_judgment(str(tmp_path), str(out_dir), max_docs=1, **common)
+    pred = out_dir / "judgment_predictions.jsonl"
+    lines = pred.read_text().splitlines()
+    rec = json.loads(lines[0])
+    rec["citing_sentence"] = "TAMPERED SENTENCE"   # a field OUTSIDE strength_records
+    lines[0] = json.dumps(rec, ensure_ascii=False)
+    pred.write_text("\n".join(lines) + "\n")
+    before = pred.read_text()
+    with pytest.raises(ValueError):
+        jr.run_natural_judgment(str(tmp_path), str(out_dir), **common)
+    assert pred.read_text() == before              # refused to append: no fork
+
+
+def test_chain_covers_whole_record_any_field(tmp_path, monkeypatch):
+    out_dir, common = _two_docs(tmp_path, monkeypatch)
+    jr.run_natural_judgment(str(tmp_path), str(out_dir), max_docs=1, **common)
+    pred = out_dir / "judgment_predictions.jsonl"
+    lines = pred.read_text().splitlines()
+    rec = json.loads(lines[0])
+    rec["disposition"] = "predicted"               # any field breaks the chain
+    pred.write_text(json.dumps(rec, ensure_ascii=False) + "\n")
+    with pytest.raises(ValueError):
+        jr.run_natural_judgment(str(tmp_path), str(out_dir), **common)
+
+
+def test_rewritten_predictions_and_sidecar_abort_on_manifest_anchor(tmp_path, monkeypatch):
+    # Predictions + sidecar rewritten self-consistently, manifest tip unchanged
+    # -> the manifest is the frozen anchor -> abort.
+    out_dir, common = _two_docs(tmp_path, monkeypatch)
+    jr.run_natural_judgment(str(tmp_path), str(out_dir), max_docs=1, **common)
+    pred = out_dir / "judgment_predictions.jsonl"
+    side = out_dir / "judgment_run_record_hashes.jsonl"
+    recs = [json.loads(l) for l in pred.read_text().splitlines()]
+    recs[0]["citing_sentence"] = "FORGED"
+    prev = ""
+    side_rows = []
+    for r in recs:
+        psha = jr._canonical_sha256(r)
+        prev = jr._chain_link(prev, psha)
+        side_rows.append({"citation_id": r["citation_id"],
+                          "prediction_sha256": psha, "link": prev})
+    pred.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in recs))
+    side.write_text("".join(json.dumps(r) + "\n" for r in side_rows))
+    with pytest.raises(ValueError):
+        jr.run_natural_judgment(str(tmp_path), str(out_dir), **common)
+
+
+def test_torn_prediction_tail_preserved_never_silently_truncated(tmp_path, monkeypatch):
+    out_dir, common = _two_docs(tmp_path, monkeypatch)
+    jr.run_natural_judgment(str(tmp_path), str(out_dir), max_docs=1, **common)
+    pred = out_dir / "judgment_predictions.jsonl"
+    torn_line = json.dumps({"citation_id": "PMCX:B9", "disposition": "predicted"})
+    pred.write_text(pred.read_text() + torn_line + "\n")
+    with pytest.raises(ValueError):
+        jr.run_natural_judgment(str(tmp_path), str(out_dir), **common)
+    tail = (out_dir / "judgment_run_torn_tail.jsonl").read_text()
+    assert torn_line in tail                       # preserved as evidence
+    assert torn_line in pred.read_text()           # never silently truncated
+
+
+def test_manifest_lag_advances_only_over_validated_records(tmp_path, monkeypatch):
+    out_dir, common = _two_docs(tmp_path, monkeypatch)
+    jr.run_natural_judgment(str(tmp_path), str(out_dir), max_docs=1, **common)
+    mpath = out_dir / "judgment_run_manifest.json"
+    m = json.loads(mpath.read_text())
+    assert m["chain_record_count"] == 1
+    # Simulate the manifest lagging the sidecar (torn manifest update).
+    m["chain_record_count"] = 0
+    m["chain_tip"] = ""
+    mpath.write_text(json.dumps(m))
+    m2 = jr.run_natural_judgment(str(tmp_path), str(out_dir), **common)
+    assert m2["status"] == "complete"
+    tip, count = _replay_chain(out_dir)
+    assert count == 2 and m2["chain_tip"] == tip   # advanced only over validated
+
+
+def test_complete_manifest_is_immutable_new_segment_chains_from_tip(tmp_path, monkeypatch):
+    out_dir, common = _two_docs(tmp_path, monkeypatch)
+    m1 = jr.run_natural_judgment(str(tmp_path), str(out_dir), **common)
+    assert m1["status"] == "complete"
+    with pytest.raises(ValueError):                # complete is never reopened
+        jr.run_natural_judgment(str(tmp_path), str(out_dir), **common)
+    # Extension = a NEW segment (fresh out_dir) chained from the frozen tip.
+    seg2 = tmp_path / "out_segment2"
+    m2 = jr.run_natural_judgment(str(tmp_path), str(seg2),
+                                 chain_genesis=m1["chain_tip"], **common)
+    assert m2["chain_genesis"] == m1["chain_tip"]
+    first = json.loads((seg2 / "judgment_run_record_hashes.jsonl")
+                       .read_text().splitlines()[0])
+    assert first["link"] == jr._chain_link(m1["chain_tip"],
+                                           first["prediction_sha256"])
+    _replay_chain(seg2, genesis=m1["chain_tip"])
+
+
+def test_predictions_without_manifest_refuse_to_append(tmp_path, monkeypatch):
+    out_dir, common = _two_docs(tmp_path, monkeypatch)
+    out_dir.mkdir()
+    (out_dir / "judgment_predictions.jsonl").write_text('{"citation_id": "x"}\n')
+    with pytest.raises(ValueError):                # unaccounted prior state
+        jr.run_natural_judgment(str(tmp_path), str(out_dir), **common)
+
+
+# --------------------------------------------------------------------------
+# wired F3 + F4 discriminator path
+# --------------------------------------------------------------------------
+_F4_DIMS = ["causal_force", "epistemic_certainty", "recommendation_force", "qualitative_scope"]
+
+F4_VERIFIER_TRUE = json.dumps({
+    "cited_span_expresses_weaker_on_dimension": True, "same_relation": True,
+    "papers_own_finding": True, "citing_span_asserts_stronger": True,
+    "rationale": "v"})
+
+
+def f4_json(load="none", pop="equivalent", f6=False, citing_span="",
+            cited_span="", dims=None):
+    base = {d: {"citing": "none", "cited": "none"} for d in _F4_DIMS}
+    if dims:
+        base.update(dims)
+    return json.dumps({"subject_addressed": "yes", "dimensions": base,
+                       "population_relation": pop, "load_bearing_dimension": load,
+                       "f6_owned_escalation": f6,
+                       "citing_strength_span": citing_span,
+                       "cited_strength_span": cited_span,
+                       "rationale": "x"})
+
+
+def f4_fires():
+    """Generator response proposing a verifiable causal overstatement against
+    the extracted claim 'Drug X reduces outcome Y' and the test ABSTRACT."""
+    return f4_json(load="causal_force", citing_span="reduces outcome Y",
+                   cited_span="controlled study",
+                   dims={"causal_force": {"citing": "causation", "cited": "association"}})
+
+
+def disc_llm(f4=None, fv=F4_VERIFIER_TRUE, v2=None, v3=None, v4=None):
+    def call(p):
+        if "verify ONE proposed overstatement" in p:   # F4 verifier (dev-mode reuse)
+            return fv
+        if "STRENGTH of ONE atomic claim" in p:
+            return f4
+        if "PROVENANCE of ONE atomic claim" in p:
+            return v2
+        if "reference list" in p:
+            return v3
+        if "candidate PRIMARY" in p:
+            return v4
+        return "{}"
+    return call
+
+
+def run_wired(tmp_path, monkeypatch, *, coverage, call, extractor=None,
+              f3_fetch_reflist=None, f3_resolve_pmcid=None,
+              f4_verifier_call_llm=None, f4_verifier_model_id="", f4_policy=None):
+    (tmp_path / "PMC1.xml").write_text("<x/>")
+    refs = [make_ref("c")]
+    monkeypatch.setattr(jr, "parse_pmc_xml", lambda path, source_pmcid=None: refs)
+    out_dir = tmp_path / "out"
+    manifest = jr.run_natural_judgment(
+        str(tmp_path), str(out_dir),
+        extractor=extractor or extractor_of("Drug X reduces outcome Y"),
+        coverage_judge=coverage, fetch_abstract=abstract_ok,
+        preband_disposition={"c": "cleared"}, discriminator_call_llm=call,
+        f4_verifier_call_llm=f4_verifier_call_llm,
+        f4_verifier_model_id=f4_verifier_model_id, f4_policy=f4_policy,
+        f3_fetch_reflist=f3_fetch_reflist, f3_resolve_pmcid=f3_resolve_pmcid, model="m")
+    rows = [json.loads(l) for l in
+            (out_dir / "judgment_predictions.jsonl").read_text().splitlines()]
+    return rows, manifest
+
+
+def test_wired_f4_fires_weaker_strength(tmp_path, monkeypatch):
+    # coverage SUPPORTED; F4 finds a causal overstatement with verbatim spans;
+    # the (development-mode) verifier confirms.
+    rows, _m = run_wired(tmp_path, monkeypatch,
+                         coverage=judge_established(True), call=disc_llm(f4=f4_fires()))
+    assert rows[0]["disposition"] == jr.DISP_PREDICTED
+    assert rows[0]["label"] == ["F4"]
+    assert "F4" in rows[0]["findings"]
+
+
+def test_wired_proper_origin_holds_pending_f5_f7(tmp_path, monkeypatch):
+    # SUPPORTED + NOT_F4 (consistent none) + F3 originates -> proper origin.
+    rows, _m = run_wired(tmp_path, monkeypatch, coverage=judge_established(True),
+                         call=disc_llm(f4=f4_json(), v2=json.dumps(
+                             {"verdict": "originates", "evidence_span": "", "rationale": "x"})))
+    assert rows[0]["disposition"] == jr.DISP_HELD_PENDING_F5_F7
+    assert rows[0]["label"] == []
+    assert rows[0]["provenance"]["state"] == "PROPER_ORIGIN"
+
+
+def test_wired_f3_confirmed_misattribution(tmp_path, monkeypatch):
+    rows, _m = run_wired(
+        tmp_path, monkeypatch, coverage=judge_established(True),
+        call=disc_llm(
+            f4=f4_json(),
+            v2=json.dumps({"verdict": "restatement",
+                           "evidence_span": "as reported previously", "rationale": "x"}),
+            v3=json.dumps({"selected_index": 0, "rationale": "x"}),
+            v4=json.dumps({"contains_finding": True,
+                           "evidence_span": "reduced outcome Y", "rationale": "x"})),
+        f3_fetch_reflist=lambda pmcid: ([{"title": "Primary", "claimed_pmid": "222", "year": 2010}], True),
+        f3_resolve_pmcid=lambda pmid: "PMC999")
+    assert rows[0]["disposition"] == jr.DISP_PREDICTED
+    assert rows[0]["label"] == ["F3"]
+    assert rows[0]["provenance"]["state"] == "MISATTRIBUTED_CONFIRMED"
+    assert len(rows[0]["provenance"]["origin_chain"]) == 2
+
+
+def test_wired_f4_unjudgeable_holds_strength(tmp_path, monkeypatch):
+    rows, _m = run_wired(tmp_path, monkeypatch, coverage=judge_established(True),
+                         call=disc_llm(f4=f4_json(load="unknown")))
+    assert rows[0]["disposition"] == jr.DISP_HELD_STRENGTH_UNJUDGEABLE
+
+
+def test_malformed_f4_schema_holds_only_f4_and_keeps_pair(tmp_path, monkeypatch):
+    case = _REAL_FAILURES["f4_invalid_dimensions"]
+
+    def replay_real_failure(*_args, **_kwargs):
+        raise ValueError(case["observed_error"])
+
+    monkeypatch.setattr(jr, "refine_support_strength", replay_real_failure)
+    rows, _m = run_wired(
+        tmp_path, monkeypatch, coverage=judge_established(True),
+        extractor=extractor_of(case["citing_sentence"]),
+        call=disc_llm(f4=None))
+    row = rows[0]
+    assert row["atomic_claims"] == [case["citing_sentence"]]
+    assert row["coverage_verdicts"][0]["established"] is True
+    assert row["stage_failures"][0]["stage"] == "F4"
+    assert row["stage_failures"][0]["message"] == case["observed_error"]
+    assert row["strength_records"][0]["reason"] == "stage_failure"
+    assert row["disposition"] == jr.DISP_HELD_STRENGTH_UNJUDGEABLE
+
+
+def test_wired_f4_verifier_disagreement_holds_strength(tmp_path, monkeypatch):
+    disagree = json.dumps({
+        "cited_span_expresses_weaker_on_dimension": True, "same_relation": False,
+        "papers_own_finding": True, "citing_span_asserts_stronger": True,
+        "rationale": "different relation"})
+    rows, _m = run_wired(tmp_path, monkeypatch, coverage=judge_established(True),
+                         call=disc_llm(f4=f4_fires(), fv=disagree))
+    assert rows[0]["disposition"] == jr.DISP_HELD_STRENGTH_UNJUDGEABLE
+    assert rows[0]["strength_records"][0]["reason"] == "verifier_disagreement"
+
+
+def test_wired_f6_still_dominant(tmp_path, monkeypatch):
+    # a coverage gap is F6 regardless of the wired discriminators (F4 not run on it).
+    rows, _m = run_wired(tmp_path, monkeypatch,
+                         extractor=extractor_of("c1", "c2"),
+                         coverage=judge_established(False, True), call=disc_llm(f4=f4_json()))
+    assert rows[0]["disposition"] == jr.DISP_PREDICTED
+    assert rows[0]["label"] == ["F6"]
+
+
+# --------------------------------------------------------------------------
+# F4 modes through the orchestrator: development default, formal reportable,
+# config defects abort BEFORE any output (never per-pair quarantine).
+# --------------------------------------------------------------------------
+def test_wired_default_is_formal_mode_per_dec072(tmp_path, monkeypatch):
+    rows, m = run_wired(tmp_path, monkeypatch, coverage=judge_established(True),
+                        call=disc_llm(f4=f4_fires()))
+    assert m["f4"]["mode"] == "formal"
+    assert m["f4"]["reportable"] is True
+    sr = rows[0]["strength_records"][0]
+    assert sr["mode"] == "formal"
+    assert sr["reportable"] is True
+
+
+def test_wired_formal_mode_is_reportable_with_model_ids(tmp_path, monkeypatch):
+    verifier_calls = {"n": 0}
+
+    def distinct_verifier(_prompt):
+        verifier_calls["n"] += 1
+        return F4_VERIFIER_TRUE
+
+    rows, m = run_wired(tmp_path, monkeypatch, coverage=judge_established(True),
+                        call=disc_llm(f4=f4_fires()),
+                        f4_verifier_call_llm=distinct_verifier,
+                        f4_verifier_model_id="ver-model")
+    assert rows[0]["label"] == ["F4"]
+    assert verifier_calls["n"] == 1                # the distinct verifier ran
+    assert m["f4"]["mode"] == "formal"
+    assert m["f4"]["reportable"] is True
+    assert m["f4"]["generator_model_id"] == "m"
+    assert m["f4"]["verifier_model_id"] == "ver-model"
+    sr = rows[0]["strength_records"][0]
+    assert sr["mode"] == "formal" and sr["reportable"] is True
+    assert sr["generator_model_id"] == "m"
+    assert sr["verifier_model_id"] == "ver-model"
+
+
+def test_f4_counters_define_actually_evaluated(tmp_path, monkeypatch):
+    rows, m = run_wired(tmp_path, monkeypatch, coverage=judge_established(True),
+                        call=disc_llm(f4=f4_fires()))
+    assert m["f4"]["eligible_claims"] == 1
+    assert m["f4"]["generator_calls"] == 1
+    assert m["f4"]["verifier_calls"] == 1
+    # NOT_F4 candidate: generator runs, verifier never called.
+    second = tmp_path / "b"
+    second.mkdir()
+    rows2, m2 = run_wired(second, monkeypatch, coverage=judge_established(True),
+                          call=disc_llm(f4=f4_json(), v2=json.dumps(
+                              {"verdict": "originates", "evidence_span": "", "rationale": "x"})))
+    assert m2["f4"]["generator_calls"] == 1
+    assert m2["f4"]["verifier_calls"] == 0
+
+
+def test_formal_mode_with_zero_generator_calls_not_reportable(tmp_path, monkeypatch):
+    # Fully-configured formal mode, but no coverage-SUPPORTED claim ever reaches
+    # the generator: "configured" is not "actually evaluated" -> not reportable.
+    rows, m = run_wired(tmp_path, monkeypatch,
+                        coverage=judge_established(False),   # UNESTABLISHED claim
+                        call=disc_llm(f4=f4_fires()),
+                        f4_verifier_call_llm=lambda _p: F4_VERIFIER_TRUE,
+                        f4_verifier_model_id="ver-model")
+    assert m["f4"]["mode"] == "formal"
+    assert m["f4"]["eligible_claims"] == 0
+    assert m["f4"]["generator_calls"] == 0
+    assert m["f4"]["reportable"] is False
+
+
+def test_unwired_generator_never_reportable(tmp_path, monkeypatch):
+    manifest, _rows = run(
+        tmp_path, [make_ref("c")],
+        extractor=extractor_of("Drug X reduces Y"),
+        coverage_judge=judge_established(True),
+        disposition=CLEARED, monkeypatch=monkeypatch)
+    assert manifest["discriminators_wired"] is False
+    assert manifest["f4"]["reportable"] is False
+    assert manifest["f4"]["generator_calls"] == 0
+
+
+def test_formal_without_verifier_now_runs(tmp_path, monkeypatch):
+    """CONTRACT CHANGE (DEC-072). Formal mode no longer requires a distinct
+    verifier callable, because DEC-063 fixes the project on ONE model and the
+    old clause made F4 permanently unreportable."""
+    (tmp_path / "PMC1.xml").write_text("<x/>")
+    monkeypatch.setattr(jr, "parse_pmc_xml",
+                        lambda path, source_pmcid=None: [make_ref("c")])
+    out_dir = tmp_path / "out"
+    manifest = jr.run_natural_judgment(
+        str(tmp_path), str(out_dir),
+        extractor=extractor_of("Drug X reduces outcome Y"),
+        coverage_judge=judge_established(True), fetch_abstract=abstract_ok,
+        preband_disposition={"c": "cleared"},
+        discriminator_call_llm=disc_llm(f4=f4_json()),
+        f4_policy=F4Policy(mode="formal", generator_model_id="claude-opus-5",
+                           verifier_model_id="claude-opus-5"),
+        model="claude-opus-5")
+    assert out_dir.exists()
+    assert manifest["f4"]["mode"] == "formal"
+    assert manifest["f4"]["self_verification"]["self_verified"] is True
+
+
+def test_formal_with_identical_verifier_callable_now_runs(tmp_path, monkeypatch):
+    """DEC-072: one callable serves both roles. The circularity is recorded in
+    f4.self_verification, not prevented."""
+    (tmp_path / "PMC1.xml").write_text("<x/>")
+    monkeypatch.setattr(jr, "parse_pmc_xml",
+                        lambda path, source_pmcid=None: [make_ref("c")])
+    out_dir = tmp_path / "out"
+    call = disc_llm(f4=f4_json())
+    manifest = jr.run_natural_judgment(
+        str(tmp_path), str(out_dir),
+        extractor=extractor_of("Drug X reduces outcome Y"),
+        coverage_judge=judge_established(True), fetch_abstract=abstract_ok,
+        preband_disposition={"c": "cleared"},
+        discriminator_call_llm=call,
+        f4_verifier_call_llm=call,             # DEC-072: one model, both roles
+        f4_verifier_model_id="claude-opus-5",
+        model="claude-opus-5")
+    assert out_dir.exists()
+    assert manifest["f4"]["self_verification"]["self_verified"] is True
+
+
+def test_module_imports_no_network_client():
+    """judgment_run must not import a network/model client at module scope."""
+    import inspect
+    src = inspect.getsource(jr)
+    assert "import requests" not in src
+    assert "import anthropic" not in src
+    assert "from anthropic" not in src

@@ -1,0 +1,466 @@
+"""Phase 1b + 1i orchestration -- run the F1 pipeline over a PMC slice.
+
+Cheap path first (parse -> PMID lookup -> compare), then expensive path only on
+flagged survivors (LLM filter -> multi-DB confirm -> decide). Writes two JSONL
+outputs: the dataset records and the full per-reference logs.
+
+Wire the Anthropic SDK into `make_completer` and pass your keys via env/config.
+This sandbox can't reach NCBI/Crossref, so run it in Colab.
+"""
+from __future__ import annotations
+import os
+import time
+import requests
+from typing import Callable, Iterable
+
+from .schema import (Reference, write_jsonl, UNVERIFIABLE, UNSCOREABLE,
+                     HUMAN_REVIEW, F1, V_FORMATTING, V_UNCERTAIN,
+                     FETCH_ANSWERED_ABSENT, FETCH_ANSWERED_RECORD,
+                     FETCH_RESOLVER_ERROR, fetch_answered)
+from .parser import iter_pmc_dir
+from .lookup import fetch_pubmed, compare_and_flag
+from .llm_filter import llm_filter
+from .confirm import confirm
+from ..runtime import openalex_telemetry
+from .decide import decide
+from .ncbi_meta import ncbi_pubtypes, is_retracted
+from ..runtime.ratelimit import configure_ncbi
+from .unscoreable import (NON_ARTICLE_REFERENCE, classify_unscoreable,
+                          is_non_article_reference)
+from .doi_lookup import DOI_FOUND
+from .retraction import (F8_CLEAR, F8_NOT_APPLICABLE, F8_QUALIFIED,
+                            F8_TIMING_VERSION, assess_f8_timing,
+                            assess_f8_timing_with_retry)
+from . import eval_report
+
+# Anthropic API errors worth retrying (transient); everything else fails fast.
+_RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+
+
+class NonRetryableProviderError(RuntimeError):
+    """A permanent provider/configuration failure that must abort the run."""
+
+
+class ProviderCreditExhausted(NonRetryableProviderError):
+    """The account can no longer pay for calls (spent balance / spend cap).
+
+    A distinct type because the right response differs from every other
+    permanent failure: a per-paper loop that merely records one failure and
+    moves on will burn the whole sampled pool against an empty balance. It
+    SUBCLASSES ``NonRetryableProviderError`` so every existing handler keeps
+    working; a caller that wants to abort the run catches this one.
+    """
+
+
+# Provider error `type` values meaning "the account cannot pay for this call".
+# Preferred discriminator: read it off the error body's structured fields.
+_CREDIT_ERROR_TYPES = frozenset({
+    "billing_error", "credit_balance_too_low", "insufficient_credit",
+    "insufficient_credits", "insufficient_quota", "payment_required",
+})
+
+# LAST RESORT, deliberately. Anthropic currently reports an exhausted balance as
+# a generic 400 `invalid_request_error` whose human-readable message is the only
+# thing separating it from any other bad request, so the message is matched too
+# -- against the STRUCTURED `message` field where the provider sent one, and
+# against ``str(exc)`` only when the error carries no structured body at all.
+_CREDIT_MESSAGE_MARKERS = (
+    "credit balance is too low",
+    "credit balance too low",
+    "insufficient credit",
+    "insufficient funds",
+    "spend cap",
+    "spending cap",
+    "spend limit",
+    "spending limit",
+)
+
+
+def _error_payload(exc) -> dict:
+    """The provider's structured error object, or {} if it did not send one."""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        return err if isinstance(err, dict) else body
+    return {}
+
+
+def _is_credit_exhausted(exc) -> bool:
+    """True when a non-retryable provider error means an unpayable account."""
+    payload = _error_payload(exc)
+    if str(payload.get("type") or "").strip().lower() in _CREDIT_ERROR_TYPES:
+        return True
+    if getattr(exc, "status_code", None) == 402:      # HTTP Payment Required
+        return True
+    message = payload.get("message")
+    if not isinstance(message, str) or not message:
+        message = str(exc)                            # documented last resort
+    lowered = message.lower()
+    return any(marker in lowered for marker in _CREDIT_MESSAGE_MARKERS)
+
+
+def _extract_text(msg) -> str:
+    """Concatenate the text blocks of a Messages response. Empty string for a
+    refusal or an otherwise text-free response (no crash)."""
+    parts = []
+    for b in getattr(msg, "content", None) or []:
+        if getattr(b, "type", None) == "text":
+            parts.append(getattr(b, "text", "") or "")
+    return "".join(parts)
+
+
+def _is_retryable(exc) -> bool:
+    try:
+        import anthropic
+    except ImportError:                       # pragma: no cover
+        return False
+    conn = tuple(t for t in (getattr(anthropic, "APIConnectionError", None),
+                             getattr(anthropic, "APITimeoutError", None)) if t)
+    if conn and isinstance(exc, conn):
+        return True
+    return getattr(exc, "status_code", None) in _RETRYABLE_STATUS
+
+
+def make_completer(model: str, api_key: str = "", *, max_tokens: int = 400,
+                   max_retries: int = 4, base_backoff: float = 1.0,
+                   max_backoff: float = 30.0,
+                   timeout: float = 120.0) -> Callable[[str], str]:
+    """Return a complete(prompt)->str backed by the Anthropic SDK.
+
+    - Retries transient API errors (429/5xx/overloaded/connection) with backoff;
+      after exhausting retries it returns "" so the reference falls to
+      'uncertain' -> human_review and the run survives.
+    - Re-raises non-retryable errors (auth / bad request) immediately so a
+      misconfigured run fails fast instead of silently labelling everything
+      uncertain. An exhausted balance raises ``ProviderCreditExhausted`` (a
+      subclass) so a batch caller can abort the run instead of feeding the
+      empty account one paper at a time.
+    - Empty / refusal responses yield "" (parse_verdict -> uncertain), no crash.
+
+    ``timeout`` is the per-request socket/read ceiling handed to the SDK. It is
+    explicit and finite on purpose: with no timeout, a connection dropped
+    without a FIN leaves the SSL read blocked forever and the retry loop below
+    never runs, because nothing is ever raised. A timeout surfaces as
+    ``APITimeoutError``, which ``_is_retryable`` already routes into the backoff
+    path -- and, if every attempt times out, into "" -> uncertain -> review.
+    """
+    from anthropic import Anthropic
+    # `max_retries` is deliberately NOT passed: the SDK keeps whatever its own
+    # default is and this module keeps its single hand-rolled retry loop below.
+    client = Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"),
+                       timeout=timeout)
+
+    def complete(prompt: str) -> str:
+        for attempt in range(max_retries + 1):
+            try:
+                msg = client.messages.create(
+                    model=model, max_tokens=max_tokens,
+                    messages=[{"role": "user", "content": prompt}])
+            except Exception as exc:          # noqa: BLE001 - classify below
+                if _is_retryable(exc) and attempt < max_retries:
+                    time.sleep(min(base_backoff * (2 ** attempt), max_backoff))
+                    continue
+                if _is_retryable(exc):        # retries exhausted -> skip this ref
+                    return ""
+                cls = (ProviderCreditExhausted if _is_credit_exhausted(exc)
+                       else NonRetryableProviderError)
+                raise cls(str(exc)) from exc
+            return _extract_text(msg)
+        return ""
+    complete.model_id = model
+    complete.model_settings = {"max_tokens": max_tokens}
+    return complete
+
+
+def retraction_state(ref: Reference, *, ncbi_key: str = "", session=None,
+                     cache: dict | None = None) -> "bool | None":
+    """The F8 retraction TRI-STATE for a reference's resolved record.
+
+    True = the resolved PMID's PubMed publication types include
+    ``Retracted Publication``; False = the types were fetched and it is absent;
+    ``None`` = UNKNOWN (no resolved PMID to look up, or the EFetch failed).
+
+    The lookup lives here, in the existence layer, and NOT in ``decide`` -- that
+    module is a pure function over accumulated evidence and must stay one.
+
+    A network failure must never read as "not retracted", so ``ncbi_pubtypes``
+    returning None yields None. An EMPTY type list is also unknown: every live
+    MEDLINE record carries at least one ``PT`` line, so an empty parse is a
+    failure to read the field, not a record that has none.
+
+    ``cache`` (PMID -> state), when given, is read and written for KNOWN states
+    only. The unknown state is deliberately NOT cached: caching it would freeze a
+    transient outage into every later reference to the same PMID in the run.
+    """
+    if not ref.retrieved.resolved:
+        return None
+    pmid = (ref.retrieved.pmid or ref.claimed.claimed_pmid or "").strip()
+    if not pmid:
+        return None
+    if cache is not None and pmid in cache:
+        return cache[pmid]
+    pubtypes = ncbi_pubtypes(pmid, ncbi_key, session=session)
+    if not pubtypes:                     # None (failure) or [] (nothing parsed)
+        return None
+    state = is_retracted(pubtypes)
+    if cache is not None:
+        cache[pmid] = state
+    return state
+
+
+def process_reference(ref: Reference, complete, *, ncbi_key="",
+                      crossref_mailto="", openalex_mailto="",
+                      openalex_api_key="",
+                      sim_threshold=85.0, match_threshold=85.0,
+                      author_tripwire=True, session=None,
+                      retraction_cache: dict | None = None,
+                      f8_fetch_meta=None, f8_resolve_doi=None) -> Reference:
+    # SCOPE EXCLUSION, BEFORE ANY LOOKUP. A reference that is not a research
+    # article and carries no PMID, DOI or title has nothing to look up and no
+    # claim inside the taxonomy. Deciding it here costs no network call and,
+    # more importantly, stops it being labelled `unverifiable` -- which asserts
+    # that a paper-identity check was attempted and failed, when none was ever
+    # in question. 20 of the natural run's 562 references are exactly this:
+    # a cancer-statistics database, a CDC tool, an industry blog, a think-tank
+    # report, and 10 books.
+    if is_non_article_reference(ref.claimed):
+        _bucket, reason = classify_unscoreable(ref.claimed)
+        ref.label, ref.confidence = UNSCOREABLE, "HIGH"
+        ref.rationale = reason
+        ref.log.decided_by = "non_article_scope_exclusion"
+        ref.log.unscoreable_reason = NON_ARTICLE_REFERENCE
+        # The URL a web citation points at, kept as provenance so a reader can
+        # see WHAT was cited without reopening the XML.
+        if ref.claimed.ext_link:
+            ref.log.notes = f"ext-link: {ref.claimed.ext_link}"
+        return ref
+
+    # cheap path. With a claimed PMID: EFetch + metadata compare. Without one:
+    # compare_and_flag runs the structured no-ID bibliographic lookup itself.
+    if ref.claimed.claimed_pmid:
+        ref.retrieved = fetch_pubmed(ref.claimed.claimed_pmid, ncbi_key,
+                                     session=session)
+    # F8 existence gate (§4.3): record the retraction tri-state BEFORE the
+    # comparison runs, so it is on the log for every resolved reference no matter
+    # which branch decide() ends up taking. The no-ID path never reaches here with
+    # a PMID (fuzzy_biblio_lookup's record always has ``.pmid == ""``), so it
+    # honestly records "unknown" rather than a lookup it could not perform.
+    if f8_fetch_meta is not None:
+        cited_pmid = (ref.retrieved.pmid or ref.claimed.claimed_pmid or "").strip()
+        # RETRY THE BOUNDARY BEFORE HOLDING. Every F8_UNRESOLVED reason names
+        # something that did not ARRIVE, not something that was decided.
+        assessment, attempts = assess_f8_timing_with_retry(
+            cited_pmid, ref.source_pmid, fetch_meta=f8_fetch_meta,
+            resolve_doi_to_pmid=f8_resolve_doi)
+        ref.log.f8_timing_reason = assessment.reason
+        ref.log.f8_timing_attempts = [
+            {"attempt": a.attempt, "status": a.status, "reason": a.reason}
+            for a in attempts]
+        ref.log.f8_timing_status = assessment.status
+        ref.log.f8_notice_date = assessment.notice_date
+        ref.log.f8_citing_date_earliest = assessment.citing_date_earliest
+        ref.log.f8_timing_gap_days = assessment.timing_gap_days
+        ref.log.f8_timing_version = F8_TIMING_VERSION
+        ref.log.retracted = (True if assessment.status == F8_QUALIFIED else
+                             False if assessment.status in {
+                                 F8_CLEAR, F8_NOT_APPLICABLE} else None)
+    else:
+        ref.log.retracted = retraction_state(
+            ref, ncbi_key=ncbi_key, session=session, cache=retraction_cache)
+    flagged = compare_and_flag(
+        ref, sim_threshold, author_tripwire=author_tripwire, session=session,
+        **openalex_telemetry.openalex_key_kwarg(openalex_api_key))
+
+    # Not flagged -> cleared / unverifiable (both the PMID and no-ID paths).
+    if not flagged:
+        return decide(ref, flagged, None, None, match_threshold)
+
+    # A retracted source is decided deterministically in the existence layer
+    # (§4.3), so do not pay for an LLM call and three confirmation searches on a
+    # row whose label they cannot change: decide()'s F8 branch precedes every use
+    # of llm_verdict and db_hits, and decide() enforces the UNSCOREABLE-first
+    # precedence itself. Mirrors the same-work short-circuit below.
+    if ref.log.retracted is True:
+        return decide(ref, flagged, None, None, match_threshold)
+
+    # Identity-proven variants are audited, not accused.  Avoid paying for an
+    # LLM and three confirmation searches when the deterministic layer has
+    # already selected the dedicated human-review quarantine.
+    if ref.log.same_work_reason:
+        return decide(ref, flagged, None, None, match_threshold)
+
+    # The claimed-PMID fetch never answered -> decide() will hold this row no
+    # matter what the LLM and the searches say. Short-circuit for the same
+    # reason as the branch above: do not buy evidence for a decision that has
+    # already been made, and during an NCBI outage this is the hot path.
+    if ref.log.pmid_present and not fetch_answered(ref.log.pmid_transport_status):
+        return decide(ref, flagged, None, None, match_threshold)
+
+    # No-PMID references carrying a printed DOI are deterministic identity
+    # cases.  An exact positive feeds the existing metadata matcher and can
+    # produce F2; an exact negative must be paired with the independent title
+    # sweep before F1 is reachable.  Neither case needs an LLM opinion about
+    # whether the identifier exists.
+    if not ref.log.pmid_present and ref.claimed.claimed_doi:
+        hits = None
+        if ref.log.doi_lookup_status != DOI_FOUND:
+            hits = confirm(ref, ncbi_key, crossref_mailto, openalex_mailto,
+                           match_threshold, s=session or requests,
+                           **openalex_telemetry.openalex_key_kwarg(
+                               openalex_api_key))
+        return decide(ref, flagged, None, hits, match_threshold)
+
+    # expensive path (flagged survivors only -- PMID candidates and no-ID
+    # references whose cheap lookup found a poor match or nothing)
+    verdict = llm_filter(ref, complete)
+    if verdict == V_FORMATTING:
+        return decide(ref, flagged, verdict, None, match_threshold)
+    if verdict == V_UNCERTAIN:
+        # AN UNCERTAIN LLM IS NOT A REASON TO STOP LOOKING. This returned with
+        # `hits=None`, so the deterministic title search never ran and every one
+        # of these rows reached a human with `db_hits: {}` -- escalated on a
+        # model's shrug while the cheap, deterministic evidence was still sitting
+        # unqueried. The search runs first now; a human is asked only if it also
+        # cannot settle the identity.
+        hits = confirm(ref, ncbi_key, crossref_mailto, openalex_mailto,
+                       match_threshold, s=session or requests,
+                       **openalex_telemetry.openalex_key_kwarg(
+                           openalex_api_key))
+        return decide(ref, flagged, verdict, hits, match_threshold)
+
+    hits = confirm(ref, ncbi_key, crossref_mailto, openalex_mailto,
+                   match_threshold, s=session or requests,
+                   **openalex_telemetry.openalex_key_kwarg(openalex_api_key))
+    return decide(ref, flagged, verdict, hits, match_threshold)
+
+
+def run(pmc_dir: str, out_dataset: str, out_logs: str, *,
+        model: str, anthropic_key="", ncbi_key="",
+        crossref_mailto="", openalex_mailto="", openalex_api_key="",
+        sim_threshold=85.0, match_threshold=85.0, author_tripwire=True,
+        refs: Iterable[Reference] | None = None,
+        complete: Callable[[str], str] | None = None,
+        f8_timing: bool = False, f8_fetch_meta=None, f8_resolve_doi=None) -> dict:
+    """Run Band 1 over the exact corpus.
+
+    ``complete`` is an injectable production seam so the full-system launcher
+    can bind Band-1 model calls to the same adapter receipt as Band 2.  Direct
+    callers retain the historical behaviour: when it is omitted, this function
+    constructs the Anthropic transport itself.
+
+    ``openalex_api_key`` authenticates every OpenAlex leg this run touches
+    (confirmation title search, no-PMID candidate retrieval, exact-DOI lookup).
+    Leaving it empty is supported and sends byte-identical requests to the
+    keyless engine -- but OpenAlex meters an anonymous caller at $0.10/day and
+    then returns 409, so a corpus-scale keyless run stops getting OpenAlex
+    answers partway through, ``fully_answered`` goes False for every reference
+    after that, and F1 becomes structurally unreachable. The per-leg call and
+    status tallies printed at the end of the run are how that is observed rather
+    than inferred from a dead run.
+    """
+    complete = complete or make_completer(model, anthropic_key)
+    configure_ncbi(bool(ncbi_key))            # bump NCBI rate when a key is present
+    session = requests.Session()
+    if f8_timing and f8_fetch_meta is None:
+        from ..diagnose.candidate_finder import PubMedCandidateFinder
+        from .ncbi_meta import DEFAULT_EMAIL
+        finder = PubMedCandidateFinder(
+            api_key=ncbi_key, email=openalex_mailto or DEFAULT_EMAIL,
+            session=session)
+        f8_memory: dict[str, dict | None] = {}
+
+        def f8_fetch_meta(work_id):
+            key = str(work_id or "").strip()
+            if key not in f8_memory:
+                f8_memory[key] = finder.fetch_metadata(key)
+            value = f8_memory[key]
+            return dict(value) if isinstance(value, dict) else None
+
+        if f8_resolve_doi is None:
+            # The DOI route of the no-linked-notice path. Reached ONLY by a
+            # RetractionIn whose RefSource is a DOI that is not the record's
+            # own, so it costs nothing on the ordinary linked-PMID path.
+            # Memoized on the DOI for the same reason f8_memory exists.
+            from .ncbi_meta import DEFAULT_EMAIL as _EMAIL, ncbi_doi_to_pmid
+            f8_doi_memory: dict[str, str] = {}
+
+            def f8_resolve_doi(doi):
+                key = str(doi or "").strip().casefold()
+                if key not in f8_doi_memory:
+                    f8_doi_memory[key] = ncbi_doi_to_pmid(
+                        key, api_key=ncbi_key,
+                        email=openalex_mailto or _EMAIL, session=session)
+                return f8_doi_memory[key]
+    stream = refs if refs is not None else iter_pmc_dir(pmc_dir)
+
+    # The OpenAlex accounting window for this run. Cumulative counters, read as
+    # a delta, so a caller that already made OpenAlex calls in this process is
+    # not charged to this run and vice versa.
+    openalex_before = openalex_telemetry.snapshot()
+
+    prediction_records, log_records = [], []
+    # Seeded so a run that produced no F1 reports a ZERO rather than a missing
+    # key -- see f1_status below. Other labels keep the observed-only behavior.
+    counts: dict[str, int] = {F1: 0}
+    quarantined = 0
+    # PMID -> retraction state, shared across the run so a PMID cited by many
+    # references costs one EFetch. Known states only (see ``retraction_state``).
+    retraction_cache: dict = {}
+    for ref in stream:
+        try:
+            process_reference(ref, complete, ncbi_key=ncbi_key,
+                              crossref_mailto=crossref_mailto,
+                              openalex_mailto=openalex_mailto,
+                              openalex_api_key=openalex_api_key,
+                              sim_threshold=sim_threshold,
+                              match_threshold=match_threshold,
+                              author_tripwire=author_tripwire, session=session,
+                              retraction_cache=retraction_cache,
+                              f8_fetch_meta=f8_fetch_meta if f8_timing else None,
+                              f8_resolve_doi=f8_resolve_doi if f8_timing else None)
+        except NonRetryableProviderError:
+            raise
+        except Exception as e:                # noqa: BLE001 - quarantine, never abort
+            # ONE BAD ROW MUST NOT KILL THE RUN. A Crossref 200 whose `message`
+            # is a string raised AttributeError out of confirm() and took the
+            # whole batch with it. Same pattern as the strict-parser quarantine
+            # in judgment_run.py: name the row, hold it, keep going.
+            #
+            # HUMAN_REVIEW, deliberately: a reference we failed to process is
+            # unjudged, and unjudged must never be reported as a finding.
+            quarantined += 1
+            ref.label, ref.confidence = HUMAN_REVIEW, "LOW"
+            ref.rationale = ("Processing raised an unexpected error; the "
+                             "reference was quarantined unjudged.")
+            ref.log.decided_by = "quarantine_exception"
+            ref.log.notes = f"{type(e).__name__}: {e}"
+            print(f"[f1-run-quarantine] {ref.citation_id}: "
+                  f"{type(e).__name__}: {e}")
+        counts[ref.label] = counts.get(ref.label, 0) + 1
+        log_records.append(ref.to_log_record())
+        # unverifiable AND unscoreable refs are dropped from the prediction set
+        # (no taxonomy label); unscoreable is still counted + reported below.
+        if ref.label not in (UNVERIFIABLE, UNSCOREABLE):
+            prediction_records.append(ref.to_prediction().to_dict())
+
+    write_jsonl(prediction_records, out_dataset)
+    write_jsonl(log_records, out_logs)
+    # F2 measurement layer: UNSCOREABLE buckets, evidence bands, base rate.
+    # Read-only; precision-vs-human is computed separately once adjudications
+    # exist (eval_report.summarize(log_records, gold=...)).
+    print(eval_report.format_report(eval_report.summarize(log_records)))
+    # OPENALEX ACCOUNTING, PRINTED WHETHER OR NOT ANYTHING WENT WRONG. A run
+    # that quietly stopped being able to pay OpenAlex looks, in every other
+    # artifact, exactly like a run over a corpus that OpenAlex does not index.
+    openalex_calls = openalex_telemetry.delta(openalex_before)
+    print(f"[openalex-calls] keyed={bool(openalex_api_key)} "
+          f"total={openalex_calls['total']} "
+          f"quota_exhausted={openalex_calls['quota_exhausted']} "
+          f"per_leg={openalex_calls['leg_totals']}")
+    if openalex_calls["quota_exhausted"]:
+        print("[openalex-quota] OpenAlex returned 409 (spent allowance) on "
+              f"{openalex_calls['quota_exhausted']} call(s). Every affected "
+              "confirmation search is UNANSWERED, so F1 was unreachable for "
+              "those references -- this is an API-access artifact, not a base "
+              "rate.")
+    return counts

@@ -14,10 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from cre.f1 import f2_thresholds, reason_registry, terminal_outcome
-from cre.f1.f8_retraction import F8_MIN_GAP_DAYS
-from cre.f1.freeze import bootstrap, canon_v1 as canon, schema_gate, strict_loader
-from cre.f1.freeze import semantic_validator_v1 as sv
+from cde.refs import thresholds as f2_thresholds
+from cde.diagnose import reasons as reason_registry
+from cde.diagnose import outcome as terminal_outcome
+from cde.refs.retraction import F8_MIN_GAP_DAYS
+from cde.freeze import bootstrap, canon_v1 as canon, schema_gate, strict_loader
+from cde.freeze import semantic_validator_v1 as sv
 
 REPO = Path(__file__).resolve().parent.parent.parent
 

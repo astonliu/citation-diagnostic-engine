@@ -18,8 +18,8 @@ import json
 
 import pytest
 
-from cre.f1 import judgment_run as jr
-from cre.f1.schema import ClaimedRef, Reference
+from cde.diagnose import pipeline as jr
+from cde.refs.schema import ClaimedRef, Reference
 
 from .conftest import FIXTURES, Recorded, assert_golden
 
