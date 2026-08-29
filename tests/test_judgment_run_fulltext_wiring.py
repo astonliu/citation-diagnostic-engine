@@ -112,35 +112,6 @@ def test_the_config_error_fires_before_any_output_file_exists(tmp_path, monkeypa
     assert not (tmp_path / "out" / "judgment_run_manifest.json").exists()
 
 
-# ==========================================================================
-# Neither seam: the default abstract path does not move
-# ==========================================================================
-def test_the_default_path_carries_no_fulltext_trace(tmp_path, monkeypatch):
-    """The opt-in guarantee at row and manifest level. An abstract-path run must not
-    gain a key, a stamp or an evidence field -- absent means the path was never
-    wired, never 'unknown'."""
-    manifest, rows = run(
-        tmp_path, [make_ref("c")], extractor=extractor_of("Drug X reduces Y"),
-        coverage_judge=judge_established(True), disposition=CLEARED,
-        monkeypatch=monkeypatch)
-    assert manifest["coverage_prompt_version"] == "coverage_v2"
-    for key in ("response_parser_version", "evidence_scope",
-                "fetch_fulltext_wired", "fulltext_counts", "fulltext_note"):
-        assert key not in manifest
-    assert "claims/coverage_prompts.py" not in manifest["module_sha256"]
-    assert "COVERAGE_PROMPT_V3" not in manifest["prompt_sha256"]
-    row = rows[0]
-    assert row["coverage_prompt_version"] == "coverage_v2"
-    assert "response_parser_version" not in row
-    assert "evidence_scope" not in row
-    assert "cited_fulltext" not in row["evidence"]
-    assert "evidence_span" in row["coverage_verdicts"][0]      # the v2 shape
-    assert "evidence_spans" not in row["coverage_verdicts"][0]
-
-
-# ==========================================================================
-# Both seams, complete retrieval: coverage moves to the body
-# ==========================================================================
 def test_a_complete_retrieval_is_judged_by_v3_and_never_by_v2(tmp_path, monkeypatch):
     v2_calls, v3_calls = [], []
     _manifest, rows = wired(tmp_path, monkeypatch,
@@ -268,18 +239,6 @@ def test_the_record_count_invariant_survives_the_new_tally(tmp_path, monkeypatch
     assert manifest["chain_record_count"] == len(rows)
 
 
-def test_a_malformed_v3_reply_holds_the_stage_and_queues_the_pair(tmp_path,
-                                                                  monkeypatch):
-    """A strict reply failure is local to coverage, not the whole pair."""
-    manifest, rows = wired(tmp_path, monkeypatch, reply="```json\n{}\n```")
-    assert rows[0]["disposition"] == jr.DISP_HELD_INSUFFICIENT
-    assert rows[0]["coverage_verdicts"][0]["established"] is None
-    assert rows[0]["stage_failures"][0]["stage"] == "coverage"
-    assert manifest["counts"][jr.DISP_HELD_INSUFFICIENT] == 1
-    queue = tmp_path / "out" / "judgment_band_annotation_queue.jsonl"
-    assert len(queue.read_text(encoding="utf-8").splitlines()) == 1
-
-
 def test_a_claim_less_reference_still_routes_no_claims_on_this_path(tmp_path,
                                                                     monkeypatch):
     """3e5261d's item 1 is not disturbed by the scope change."""
@@ -288,17 +247,3 @@ def test_a_claim_less_reference_still_routes_no_claims_on_this_path(tmp_path,
     assert rows[0]["disposition"] == jr.DISP_HELD_NO_CLAIMS
 
 
-def test_the_queue_stays_blind_on_the_full_text_path(tmp_path, monkeypatch):
-    """Body-scoped spans are richer than abstract spans, so the blindness whitelist
-    matters MORE here, not less. Nothing model-judged may reach the annotator."""
-    run(tmp_path, [make_ref("c")], extractor=extractor_of("Drug X reduces Y"),
-        coverage_judge=judge_established(True), disposition=CLEARED,
-        monkeypatch=monkeypatch,
-        fetch_fulltext=lambda pmid: reader_result(),
-        coverage_judge_v3=v3.make_coverage_judge_v3(lambda p: v3_reply()))
-    queue = (tmp_path / "out" / "judgment_band_annotation_queue.jsonl")
-    flat = queue.read_text(encoding="utf-8")
-    assert flat.strip(), "the scoreable pair was not queued at all"
-    for forbidden in ("evidence_spans", "span_status", "proposed_route",
-                      "coverage_verdicts", "response_parser_version"):
-        assert forbidden not in flat

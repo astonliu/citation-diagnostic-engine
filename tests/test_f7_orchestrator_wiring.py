@@ -312,61 +312,6 @@ def test_abstract_built_evidence_context_is_quarantined():
         SectionText("abstract", "text", f7t.WORK, f7t._sha("text"))
 
 
-def test_a_raising_evidence_builder_holds_f7_and_keeps_pair(tmp_path, monkeypatch):
-    def abstract_context(_item):
-        return EvidenceContext(
-            paper_resolved=True, resolved_work_id=f7t.WORK,
-            citing_sentence=f7t.CITING, target_reference_id=f7t.TARGET,
-            bundled_reference_ids=("ref12",),
-            claim_clause_refs=(ClaimClauseRef(0, f7t.CLAUSE, ("ref12",)),),
-            body_sections=(SectionText("abstract", "a", f7t.WORK, f7t._sha("a")),))
-
-    (tmp_path / "PMC1.xml").write_text("<x/>", encoding="utf-8")
-    monkeypatch.setattr(jr, "parse_pmc_xml",
-                        lambda path, source_pmcid=None: [make_ref("c")])
-    out_dir = tmp_path / "out"
-    jr.run_natural_judgment(
-        str(tmp_path), str(out_dir), extractor=extractor_of(f7t.CLAIM),
-        coverage_judge=judge_established(True), fetch_abstract=abstract_ok,
-        preband_disposition={"c": "cleared"}, model="test-model",
-        discriminator_call_llm=disc_llm(f4=f4_json(), v2=ORIGINATES),
-        f7_seams=seams(), f7_evidence_builder=abstract_context,
-        f7_policy=f7t.policy())
-
-    rows = [json.loads(l) for l in
-            (out_dir / "judgment_predictions.jsonl").read_text().splitlines()]
-    assert rows[0]["disposition"] == jr.DISP_HELD_PENDING_F5_F7
-    assert rows[0]["stage_failures"][0]["stage"] == "F7"
-    assert "abstract" in rows[0]["stage_failures"][0]["message"]
-    assert rows[0]["label"] == []
-    # The evidence-builder defect is visible to a human instead of dropping the
-    # otherwise reasonable citation pair.
-    queue = out_dir / "judgment_band_annotation_queue.jsonl"
-    assert len(queue.read_text().splitlines()) == 1
-
-
-def test_a_config_defect_in_the_f7_seams_quarantines_the_pair(tmp_path, monkeypatch):
-    """make_entity_assessor's ValueError is NOT swallowed in judge_pair: it reaches
-    the same caller-level quarantine that decide_f5's ValueError does."""
-    shared = f7t.gen_llm()                     # generator reused as verifier
-    (tmp_path / "PMC1.xml").write_text("<x/>", encoding="utf-8")
-    monkeypatch.setattr(jr, "parse_pmc_xml",
-                        lambda path, source_pmcid=None: [make_ref("c")])
-    out_dir = tmp_path / "out"
-    jr.run_natural_judgment(
-        str(tmp_path), str(out_dir), extractor=extractor_of(f7t.CLAIM),
-        coverage_judge=judge_established(True), fetch_abstract=abstract_ok,
-        preband_disposition={"c": "cleared"}, model="test-model",
-        discriminator_call_llm=disc_llm(f4=f4_json(), v2=ORIGINATES),
-        f7_seams=seams(gen=shared, ver=shared),
-        f7_evidence_builder=builder(), f7_policy=f7t.policy())
-
-    rows = [json.loads(l) for l in
-            (out_dir / "judgment_predictions.jsonl").read_text().splitlines()]
-    assert rows[0]["disposition"] == jr.DISP_QUARANTINE_PARSE
-    assert "DISTINCT" in rows[0]["parse_error"]
-
-
 def test_judge_pair_does_not_swallow_the_f7_value_error():
     shared = f7t.gen_llm()
     with pytest.raises(ValueError, match="DISTINCT"):

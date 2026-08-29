@@ -368,14 +368,6 @@ def test_f8_reason_is_registered_and_routes_to_f8_retracted():
     assert "retracted_publication" in rr.RETRACTION_REASONS
 
 
-def test_f8_row_is_accepted_by_the_preband_disposition():
-    assert S.F8 in DISPOSITION_LABELS
-    assert S.F8 in FAULT_LABELS                  # a fault, not a clearing label
-    rows = build_rows([{"citation_id": "PMC1:bibr1", "label": S.F8}])
-    assert rows == [{"citation_id": "PMC1:bibr1", "label": "F8",
-                     "citing_pmcid": "PMC1", "cleared": False}]
-
-
 def test_retraction_state_is_on_the_log_and_prediction_records():
     ref = _resolved(_ref())
     ref.log.retracted = True

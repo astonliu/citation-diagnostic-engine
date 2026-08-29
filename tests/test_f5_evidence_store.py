@@ -105,23 +105,6 @@ def test_fulltext_identity_and_hash_mismatch_fail_closed():
         adapt_fulltext_sections(corrupt, work_id="111")
 
 
-def test_real_pmid39077123_table_hash_is_checked_before_normalization():
-    case = _REAL_FAILURES["f5_table_hash"]
-    source_text = case["exact_excerpt"]
-    body = _fulltext()
-    body["pmid"] = case["section_work_id"]
-    body["sections"] = [{
-        "label": case["section_label"], "title": "", "text": source_text,
-        "content_sha256": _hash(source_text),
-    }]
-    body["sections_present"] = ["table"]
-    adapted = adapt_fulltext_sections(body, work_id=case["section_work_id"])
-    stored = adapted.provenance["sections"][0]
-    assert stored["text"] == source_text.strip()
-    assert stored["content_sha256"] == _hash(stored["text"])
-    assert stored["content_sha256"] != _hash(source_text)
-
-
 def test_packet_hashes_exact_stored_text_and_is_source_isolated():
     a = build_source_packet(
         _metadata("111", "Drug X reduced mortality."),

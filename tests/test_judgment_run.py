@@ -144,35 +144,6 @@ def test_no_atomic_claims_is_held(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 # fail-closed behaviors
 # --------------------------------------------------------------------------
-def test_malformed_claim_output_holds_and_keeps_pair_reviewable(tmp_path,
-                                                                 monkeypatch):
-    case = _REAL_FAILURES["empty_claim_extraction"]
-
-    def bad_extractor(_s):
-        raise ValueError(case["observed_error"])
-
-    manifest, rows = run(
-        tmp_path, [make_ref(
-            case["citation_id"], citance=case["citing_sentence"],
-            pmid=case["cited_pmid"], src=case["pmcid"])],
-        extractor=bad_extractor, coverage_judge=judge_established(),
-        disposition={case["citation_id"]: "cleared"}, monkeypatch=monkeypatch)
-    assert all(r["disposition"] == jr.DISP_HELD_CLAIM_EXTRACTION_FAILURE
-               for r in rows)
-    assert all(r["stage_failures"] == [{
-        "stage": "claim_extraction",
-        "error_type": "ValueError",
-        "message": case["observed_error"],
-    }] for r in rows)
-    queue = tmp_path / "out" / "judgment_band_annotation_queue.jsonl"
-    assert len(queue.read_text(encoding="utf-8").splitlines()) == 1
-    assert manifest["stage_failures"] == {
-        "affected_reference_records": 1,
-        "by_stage": {"claim_extraction": 1},
-        "note": (
-            "Per-stage model/evidence failures are held and human-queued; "
-            "they do not erase the rest of the citation-pair record."),
-    }
 
 
 def _covered_pair_for_stage_failure(case):

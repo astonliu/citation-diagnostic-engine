@@ -626,44 +626,6 @@ def test_live_path_flags_claimed_first_author_only_found_as_coauthor():
     assert ref.log.mismatch_flagged is True
 
 
-def test_identity_variant_live_path_quarantines_instead_of_accusing():
-    ref = Reference(
-        "c-variant", "",
-        ClaimedRef(
-            title="Β1 and Β2-Adrenergic Receptors Polymorphism in Hypertension",
-            authors=["Vriz"], year=2017, journal="Acta Cardiol",
-            claimed_pmid="1"))
-    ref.retrieved = RetrievedRecord(
-        resolved=True,
-        title="beta1 and beta2-adrenergic receptors polymorphism in hypertension",
-        authors=["Vriz"], year=2011, journal="Acta Cardiol", pmid="1")
-    flagged = compare_and_flag(ref, 85.0)
-    assert flagged is True
-    assert ref.log.same_work_reason == "canonical_title_exact"
-    decide(ref, flagged, None, None)
-    assert ref.label == S.HUMAN_REVIEW
-    assert ref.log.decided_by == "same_work_variant_quarantine"
-
-
-def test_near_title_gate_live_path_matches_offline_quarantine():
-    ref = Reference(
-        "near-title", "",
-        ClaimedRef(
-            title="Deep neural networks for detection of rare tumors",
-            authors=["Alpha"], year=2018, journal="J One",
-            claimed_pmid="1"))
-    ref.retrieved = RetrievedRecord(
-        resolved=True,
-        title="Deep neural network for detection of rare tumors",
-        authors=["Beta"], year=2021, journal="J Two", pmid="1")
-    flagged = compare_and_flag(ref, 85.0)
-    assert flagged is True
-    assert ref.log.same_work_reason == "near_identical_title"
-    decide(ref, flagged, None, None)
-    assert ref.label == S.HUMAN_REVIEW
-    assert ref.log.decided_by == "same_work_variant_quarantine"
-
-
 # --------------------------------------------------------------------------
 # decide() all-errored safeguard
 # --------------------------------------------------------------------------

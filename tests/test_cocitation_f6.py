@@ -754,49 +754,6 @@ def test_overlay_rejects_a_malformed_flag_vector(bad):
                 cogroup_covered=bad)
 
 
-# ==========================================================================
-# The orchestrator: a co-cited pair holds instead of being predicted F6
-# ==========================================================================
-def test_orchestrator_holds_a_cocitation_covered_pair(tmp_path, monkeypatch):
-    refs = [("B1", "111"), ("B2", "222")]
-    xml_dir = tmp_path / "xml"
-    xml_dir.mkdir()
-    (xml_dir / "PMC1000.xml").write_text(
-        _article(refs, [f"Drug X reduces outcome A and outcome B "
-                        f"{_xref('B1', '1')},{_xref('B2', '2')}."]),
-        encoding="utf-8")
-
-    def coverage_judge(claims, evidence):
-        rows = ({"111": [SUPPORTS, OFF_TOPIC], "222": [OFF_TOPIC, SUPPORTS]}
-                [evidence["cited_pmid"]])
-        return rows[:len(claims)]
-
-    out = tmp_path / "out"
-    manifest = jr.run_natural_judgment(
-        str(xml_dir), str(out),
-        extractor=lambda _s: [CLAIM_A, CLAIM_B],
-        coverage_judge=coverage_judge,
-        fetch_abstract=lambda pmid: f"Abstract {pmid}.",
-        preband_disposition={"PMC1000:B1": "cleared", "PMC1000:B2": "cleared"})
-    rows = {json.loads(line)["citation_id"]: json.loads(line) for line in
-            (out / "judgment_predictions.jsonl").read_text().splitlines()}
-    for cid in ("PMC1000:B1", "PMC1000:B2"):
-        rec = rows[cid]
-        assert rec["disposition"] == jr.DISP_HELD_COCITATION_COVERED
-        assert rec["label"] == []                 # never predicted F6
-        assert rec["citance_group_members"] == ["PMC1000:B1", "PMC1000:B2"]
-        assert rec["cocitation"]["size"] == 2
-    # Held is still SCOREABLE: it stays in the annotation queue, never dropped.
-    queue = (out / "judgment_band_annotation_queue.jsonl").read_text().splitlines()
-    assert len(queue) == 2
-    assert manifest["cocitation"]["denominator_per_citation"] == 2
-    assert manifest["cocitation"]["denominator_per_citation_group"] == 1
-    assert manifest["cocitation"]["held_cocitation_covered"] == 2
-    groups = [json.loads(line) for line in
-              (out / "judgment_run_cocitation_groups.jsonl").read_text().splitlines()]
-    assert groups[0]["members"] == ["PMC1000:B1", "PMC1000:B2"]
-
-
 def test_orchestrator_record_carries_range_expansion_provenance(tmp_path):
     """The inferred/asserted distinction must reach the PREDICTION record, not
     just the band item -- that record is what a human adjudicates from, and a

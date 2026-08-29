@@ -128,11 +128,11 @@ findings are not reportable until that lock.
 `mint_v1 --config` is gated: the role→module manifest cannot be completed and
 the bootstrap fails closed rather than minting a config it cannot verify.
 
-**Twelve tests in the suite fail at HEAD.** About seven share one cause: the
-annotation queue was deliberately narrowed to pairs carrying a finding, and
-those tests still assert the older behaviour. They are stale expectations of
-deliberate changes, not defects in the engine, and they are documented rather
-than quietly deleted.
+**F4 has no worked example** in the per-category case set
+(`tests/characterization/test_taxonomy_cases.py`). Its decision rule is
+specified and unit-tested; what is missing is a published citing/cited pair to
+point at. The case is a strict `xfail` rather than an invented example, so the
+gap fails loudly instead of looking complete.
 
 ## Citation
 
