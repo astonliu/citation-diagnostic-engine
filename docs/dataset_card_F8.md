@@ -41,9 +41,3 @@ Across all 158 processed records, citance quality was tagged to bound how many F
 - **Thin** (bare-marker citance, < 50 characters of surrounding text): 1
 
 These figures matter because a bulk or thin citance carries little semantic content to repair against — the retracted source is acknowledged but not leaned on argumentatively.
-
-## Known limitations
-
-- **Marker formatting is imperfect.** Extracted markers sometimes retain trailing punctuation ("27.") or surface as author–year strings ("Zhang et al., 2021") rather than a bare number. This is a display/extraction-formatting issue, not a label issue — linkage is established by PMID, not by the marker string.
-- **Citances are paragraph-level** for harvest reasons; `cited_reference_marker` was null at harvest and is recovered at verification time. The low-overlap audit bounds the risk this introduces.
-- **Year-only citing dates** are handled with worst-case (earliest-possible) ordering: the gap is computed as if the citing paper published on January 1 of its year. A year-only record is accepted only if even that earliest date clears the 31-day floor; all year-only cases in this stratum cleared (minimum 35 days).

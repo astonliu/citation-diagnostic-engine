@@ -252,7 +252,7 @@ so — do not reopen. `journal_equivalent` must keep matching `Antioxidants`/`An
   `708f378238331bce4da18442c36a24c106ee582d806e62066863cfac6c330e5f`). Every moved row named, with
   its before/after verdict and reason. **No row may move silently.**
 - Two consecutive rebands byte-identical at the new commit.
-- The four defects and their fixtures written into the §24 limitations/register section of
+- The four defects and their fixtures written into the §24 open-items register section of
   `docs/F2_MATCHER_REVISION_SPEC.md`.
 
 ## Out of scope
@@ -398,7 +398,7 @@ appears in the current 67:
 - **Abbreviated genus and single-letter initials.** `V. cholerae` yields `{v}`; `i.m.`, `i.p.`,
   `i.c.v.`, `b.i.d.` all yield roman tokens once the dots create boundaries.
 
-Record both as limitations. Do not widen the mask on speculation — no row in seed 41 demonstrates them.
+Record both as open items. Do not widen the mask on speculation — no row in seed 41 demonstrates them.
 
 ---
 

@@ -23,7 +23,7 @@
 
 **Decision:** A third verifier, Med-V1 (Jin et al., arXiv 2603.05308; 3B-parameter biomedical model from the NLM/NCBI group), is added alongside the two co-equal frontier verifiers (Claude Opus, pinned; GPT-5, pinned).
 
-**Reasoning:** Claude Opus and GPT-5 are both frontier-scale RLHF-trained models and may share systematic biases, so their agreement does not fully address the LLM-as-judge circularity concern (original limitation). Med-V1 is a different architecture and training paradigm (small, biomedically specialized), giving genuine cross-family diversity. Three verifiers spanning two frontier models plus one domain specialist handle the bias-family critique better than two frontier models alone, and add biomedical grounding.
+**Reasoning:** Claude Opus and GPT-5 are both frontier-scale RLHF-trained models and may share systematic biases, so their agreement does not fully address the LLM-as-judge circularity concern. Med-V1 is a different architecture and training paradigm (small, biomedically specialized), giving genuine cross-family diversity. Three verifiers spanning two frontier models plus one domain specialist handle the bias-family critique better than two frontier models alone, and add biomedical grounding.
 
 **Reporting fixed now:**
 - Three-way agreement rate reported as a standalone robustness metric.
@@ -57,7 +57,7 @@
 **Fallback ladder (fixed in advance, to avoid post-hoc choice):**
 - If full 100-example adjudication is feasible before results are finalized → it is the primary anchor.
 - If not → adjudicate only the cases where the three verifiers disagree (smaller subset), reported as a disagreement-focused human check.
-- If neither is feasible → validity rests on three-way cross-family agreement plus held-out natural-stratum generalization, with human adjudication named as a limitation/future extension.
+- If neither is feasible → validity rests on three-way cross-family agreement plus held-out natural-stratum generalization, with human adjudication carried as a future extension.
 
 **Reasoning:** Cross-model agreement alone cannot establish correctness (shared-bias critique). A human anchor drawn and adjudicated *before* results are finalized prevents the appearance of post-hoc damage control. The fallback ladder is registered now so the choice among options is not made after seeing results.
 

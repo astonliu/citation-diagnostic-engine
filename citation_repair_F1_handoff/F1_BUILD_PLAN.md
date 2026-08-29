@@ -6,7 +6,7 @@
 - **F1 *system*** → finishable today. This is the part that must be correct and reportable.
 - **F1 *dataset portion*** → scaffolded + candidate run started today; populated from your own detector on a normal recent-papers PMC slice. Fabrication is ~4 per 100,000 references, so F1 will be a *small* category — a handful to a couple dozen gold positives is a realistic and acceptable outcome.
 
-**F1 is not the contribution.** F1 detection is the reimplemented Topaz method — "we apply the established approach." It must exist, work, and be honestly characterized. It does **not** need to be large. The objective is "enough to demonstrate the stage functions and populate the category," not "maximize positives." A small F1 count is a documented dataset limitation (per source-constrained maximization), not a hole. No external data request is part of this plan.
+**F1 is not the contribution.** F1 detection is the reimplemented Topaz method — "we apply the established approach." It must exist, work, and be honestly characterized. It does **not** need to be large. The objective is "enough to demonstrate the stage functions and populate the category," not "maximize positives." A small F1 count is the documented source-constrained result, not a hole. No external data request is part of this plan.
 
 **Core design rule (locked):** F1 is *not* raw "couldn't find it." F1 = (claimed-PMID metadata mismatch OR dead PMID) **AND** (survives the LLM formatting-discrepancy filter) **AND** (claimed content not found in any of PubMed / Crossref / OpenAlex). It is a conjunction. The base-rate math requires the corroborating signal — a single chain-failure test would be precision-poor.
 
@@ -77,7 +77,7 @@
 - [ ] **3f Controls:** sample `cleared` references as F1-negatives for the dataset (the detector gives these for free; they matter for evaluation).
 
 ## Phase 4 — (removed)
-No external data request. F1 positives come entirely from your own detector. If the category ends up small, that is the honest source-constrained result and gets documented as a limitation.
+No external data request. F1 positives come entirely from your own detector. If the category ends up small, that is the honest source-constrained result and gets documented as such.
 
 ## Phase 5 — Validation & metrics framing (~30 min)
 - [ ] Compute precision on the adjudicated F1 flags (X / N confirmed). This is your Topaz-comparable number (their 91%).
@@ -98,7 +98,7 @@ No external data request. F1 positives come entirely from your own detector. If 
 - **Evening:** Phase 3e–3f adjudication + Phase 5 metrics + Phase 6 commit.
 
 ## Honest constraints (read before banking on outcomes)
-1. **F1 will be a small category** and that's acceptable — self-detection on a normal slice yields few positives per thousand papers. Report what you find; document it as a source-constrained limitation.
+1. **F1 will be a small category** and that's acceptable — self-detection on a normal slice yields few positives per thousand papers. Report what you find; document it as a source-constrained result.
 2. **False positives are the dangerous error.** Threshold and prompt are tuned precision-first on purpose.
 3. **Recall is unmeasurable today** (no ground-truth positive set). Don't report a recall number; report the stage-resolution distribution and defer recall to the P(fail|real) experiment.
 4. **The detector is the deliverable that must be correct.** Its precision and logging are reportable regardless of how many positives it surfaces.

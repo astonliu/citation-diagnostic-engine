@@ -10,7 +10,7 @@ change):** (Item 1) §20 corrected — the reband FRAME is defined by a hash-pin
 prior stem-derived sentence was the endorsement that let out-of-seed papers
 contaminate the frame). (Item 5) the `overwhelming_bibliographic_anchor`
 "null result — do not re-litigate" listing (in `F2_PREFREEZE_SPEC.md`) is
-withdrawn; its sibling-work exposure is recorded in the NEW §24 limitations
+withdrawn; its sibling-work exposure is recorded in the NEW §24 open-items
 register alongside the two Item-4 record corrections. Items 1–3 also landed as
 code (CLI manifest scoping; deterministic surname dedup; corporate identity vs
 containment). No `route_reason`/rule logic changed; the seed-37 band is unchanged.
@@ -768,7 +768,7 @@ false matches. `journal_equivalent` returns `True` on `('Blood', 'Blood Adv')` �
 this spec's own named false match — and on other single-token / containment pairs
 such as `('Life', 'Life (Basel)')`, because the `token_match` fallback iterates the
 SMALLER token list, so every token of a one-token masthead can be satisfied by a
-longer, different masthead. This is a **documented limitation carried into the
+longer, different masthead. This is a **documented exposure carried into the
 freeze, not a silent gap**: `journal_equivalent` is deliberately unchanged in this
 revision, since the same containment path is what makes the required aliases match
 (`Antioxidants`/`Antioxidants (Basel)`, `Agric. Food Chem.`/`J Agric Food Chem`,
@@ -1163,7 +1163,7 @@ relation, and amending the committed test
 `test_item1_preprint_shape_with_disagreeing_dois_is_not_same_work`. That is a policy
 reversal, not a fix; it was placed out of scope for this commit and remains ZD's
 decision (open, recorded 2026-08-11). B29 stays `review_wrong_paper` /
-`preprint_shape_unconfirmed` and is carried in the limitations register as **LR-4**.
+`preprint_shape_unconfirmed` and is carried in the open-items register as **LR-4**.
 
 §14.3 and §15.2 give opposite answers on that row — §14.3 reads the changed DOI as
 refutation, §15.2 reads it as the expected property of a lineage. The refutation is
@@ -1624,9 +1624,9 @@ manifests.
 
 ---
 
-## 24. Limitations register (added 2026-08-07)
+## 24. Open-items register (added 2026-08-07)
 
-Numbered, measured limitations. Each records a mechanism and its known size; a
+Numbered, measured open items. Each records a mechanism and its known size; a
 code change to any is a separately-measured revision, not this pass.
 
 **LR-1 — `overwhelming_bibliographic_anchor` trusts the identifier to decide
