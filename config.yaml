@@ -1,24 +1,30 @@
 # Citation Repair Engine — configuration
-# Model strings are pinned snapshots. Do not change a pin without updating doc/preregistration.md
-# and the Amendment log (Opus + GPT-5 co-equal verifiers; Med-V1 added per Amendment 2).
 #
-# NOTE: fill the *_pin fields with the exact version strings + snapshot dates you actually
-# pin in the methods section. Placeholders below are family identifiers, not final pins.
+# NOTE: nothing in `cde/` reads this file. Model identity, pins and judge
+# governance are enforced in code: the generator model is passed to
+# `cde.runtime.production_launcher.launch` and checked against its
+# `authorized_models` allowlist, and the judge is pinned in
+# `cde/runtime/openai_transport.py`. This file is a human-readable summary of
+# that arrangement; changing a value here changes nothing at runtime.
 
-# Three co-reported verifiers. Cross-family agreement is a standalone reported metric.
-# Disagreements are adjudicated by the human gold subset, never by any model.
-verifiers:
-  - name: claude-opus      # frontier, family 1
-    pin: ""                # e.g. claude-opus-4-8-YYYYMMDD
-  - name: gpt-5            # frontier, family 2
-    pin: ""                # e.g. gpt-5-YYYY-MM-DD
-  - name: med-v1           # 3B biomedical specialist (arXiv 2603.05308)
-    pin: ""
+# Two models, two families. The generator extracts claims on the Anthropic
+# path; the judge scores coverage on the OpenAI path. A run whose judge is the
+# same family as its generator is refused by the launcher unless a dated
+# preregistration amendment or a recorded scope ruling permits it.
+# Semantic labels and ground truth are assigned by human adjudication, never by
+# a model.
+models:
+  generator:
+    family: anthropic
+    pin: "claude-haiku-4-5"   # the model actually passed to the launcher
+  judge:
+    family: openai
+    pin: "gpt-5.6-sol"        # openai_transport.JUDGE_MODEL_ID
 
 # Stage 4 diagnosis mapper is rule-based (not an LLM) — see doc/taxonomy.md.
-# If repair-candidate *drafting* uses an LLM, name and pin it here; otherwise leave unset.
+# Repair drafting is not enabled in this build; F5 ships escalation-only.
 repair_drafting_model: ""
 
 ncbi_api_key: ""        # populate from .env, never commit the key directly
-anthropic_api_key: ""   # populate from .env, never commit the key directly
-openai_api_key: ""      # populate from .env, never commit the key directly (GPT-5 verifier)
+anthropic_api_key: ""   # populate from .env, never commit the key directly (generator)
+openai_api_key: ""      # populate from .env, never commit the key directly (judge)

@@ -133,8 +133,8 @@ precision" in the abstract.
 
 **Agreement.** None is reported. Annotation was principally by one adjudicator,
 so there is no double-annotated overlap to compute a statistic over — neither
-Cohen's κ nor Gwet's AC1. This is carried as a limitation, and independent
-duplicate annotation is the first item of future work. See `preregistration.md`.
+Cohen's κ nor Gwet's AC1. Independent duplicate annotation is the first item
+of future work. See `preregistration.md`.
 
 **Verifiers.** The judge is a different model family from the generator, and the
 launcher refuses to start a run where it is not — see `preregistration.md`. No

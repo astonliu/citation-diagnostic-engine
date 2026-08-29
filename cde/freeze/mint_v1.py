@@ -16,8 +16,8 @@ report, never something to fix by editing the prompt), the blob OID from git,
 and every hash is recomputed here and asserted against the frozen acceptance
 constants carried by semantic_validator_v1 — no literal digest appears in
 this file. The CONFIG additionally needs the canonical ZD inputs plus the
-unnumbered per-stage decisions summarised in the README's Limitations
-section; until MINT_INPUTS.json supplies them, ``--config`` exits non-zero,
+unnumbered per-stage decisions summarised in the README; until
+MINT_INPUTS.json supplies them, ``--config`` exits non-zero,
 writes nothing, and prints every missing field grouped by canonical input
 number. MINT_INPUTS.json does not exist in this tree, so ``--config`` cannot
 run today -- which is the deferred state DEC-044 recorded, not a defect.
@@ -89,7 +89,7 @@ DEFAULT_CONFIG_OUT_DIR = FREEZE_DIR / "_mint_out"  # gitignored, never committed
 #: catalogue that used to live beside this file was prose rather than code
 #: and was removed with the rest of the freeze documentation; the standing
 #: state of the gate is summarised in the README instead.
-DECISIONS_DOC = "README.md (Limitations)"
+DECISIONS_DOC = "README.md"
 
 E_MINT_EXIT = 2
 

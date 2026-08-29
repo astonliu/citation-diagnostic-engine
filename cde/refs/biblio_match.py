@@ -524,7 +524,7 @@ def field_agreement(claimed: Claimed, cand: RetrievedRecord, *,
 
     \\* Full ISO-4 normalization needs a journal-abbreviation authority list; for
     v1 this is lowercase + punctuation-strip + bidirectional containment, a
-    documented approximation (see methods/limitations).
+    documented approximation (see methods).
     """
     fa = FieldAgreement()
 

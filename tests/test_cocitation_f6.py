@@ -299,7 +299,7 @@ def test_row7_overlapping_ranges_dedupe_into_one_group(tmp_path):
 # ROW 8 -- the same reference cited in two sentences. First citance wins.
 # ==========================================================================
 def test_row8_same_ref_two_sentences_is_judged_per_citance(tmp_path):
-    """``link_citances`` is first-citance-wins (a pre-existing limitation), and
+    """``link_citances`` is first-citance-wins (pre-existing behaviour), and
     grouping now interacts with it: ref 5 takes sentence X, which comes first in
     document order, and belongs to X's group ONLY. Sentence Y's group is
     {4, 6, 7} WITHOUT ref 5 -- including it would aggregate coverage verdicts

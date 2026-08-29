@@ -1245,7 +1245,7 @@ def launch(*, repo_dir: str, pkg_dir: str, xml_dir: str, out_dir: str,
         "temperature_governance": temperature_governance,
         "prefill_governance": prefill_governance,
         "adapter_receipt": receipt,
-        "limitation": (
+        "receipt_scope": (
             "The receipt is produced by the adapter under test. It proves what "
             "the adapter RECORDED, not what it transmitted; a lying adapter "
             "defeats it. Owning the transport is the only stronger check and is "

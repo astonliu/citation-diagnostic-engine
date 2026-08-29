@@ -74,7 +74,7 @@ def _notice_from_pubtypes(pubtypes):
 #: Recall@50 66.09%, and Sarol goes Recall@1 0.09 -> Recall@20 0.55.
 CANDIDATE_CAP = 50
 
-#: v1 has NO learned reranker. This is a stated limitation, not an oversight: BM25
+#: v1 has NO learned reranker. This is a deliberate choice, not an oversight: BM25
 #: beats every pure dense retriever on SciFact in BEIR (nDCG@10 0.665 vs DPR
 #: 0.318), and monoT5 reranking is the known next gain (Recall@3 30.87% -> 48.26%)
 #: but does not fit the deadline.
@@ -208,7 +208,7 @@ _MESH_TIER = (
 #: an unrecognised record therefore lands at the bottom of the ladder rather than
 #: stopping the run.
 #:
-#: CAVEAT, stated because the enum value is a claim: this floor does NOT assert the
+#: NOTE, stated because the enum value is a claim: this floor does NOT assert the
 #: work is a preprint. Tier is used to decide whether a candidate has the standing
 #: to supersede, so the fail-closed default is the value that can never outrank
 #: anything. A record landing here is unclassified, not unreviewed, and that

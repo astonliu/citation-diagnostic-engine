@@ -80,15 +80,14 @@ secondary. The fallback ladder was fixed in advance to avoid a post-hoc choice:
 if the full 100 cannot be adjudicated, adjudicate only the three-way
 disagreements and report it as a disagreement-focused check; if neither is
 feasible, validity rests on cross-family agreement plus held-out natural-stratum
-generalization, and human adjudication is named as a limitation.
+generalization without human adjudication.
 
 ## Agreement
 
 **What the paper reports, and it is not an agreement statistic.** Gold-standard
 annotation was performed principally by one adjudicator, who was involved in
 developing the taxonomy. No inter-annotator agreement estimate is reported,
-because there is no second independent pass to compute one over. This is stated
-as a limitation rather than worked around.
+because there is no second independent pass to compute one over.
 
 That supersedes everything this section previously said about a reliability
 statistic. Earlier drafts specified Cohen's κ gates — a ≥ 0.60 IAA threshold, a

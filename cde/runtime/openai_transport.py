@@ -11,7 +11,7 @@ edited by this work at all, which is what keeps the Anthropic path byte-identica
 in behaviour and every prior run's cost figure reproducible.
 
 WHY THE JUDGE MOVES OFF THE ANTHROPIC PATH AT ALL. ``production_launcher``
-already names the limitation in its own words: ``claude-opus-5`` judging coverage
+already names the problem in its own words: ``claude-opus-5`` judging coverage
 of claims ``claude-opus-5`` extracted. A model scoring its own family's output
 scores against its own preferences, and no amount of prompt discipline removes
 that. Changing the CHECKPOINT would not have helped; changing the FAMILY is the

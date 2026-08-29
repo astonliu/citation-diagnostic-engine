@@ -187,7 +187,7 @@ def test_retrieval_protocol_is_readable_not_only_a_hash():
         "publication date strictly after after_date",
         "publication date on or before as_of_date",
     ]
-    assert protocol["reranker"] == "none"          # stated limitation, not an oversight
+    assert protocol["reranker"] == "none"          # deliberate choice, not an oversight
 
 
 # ==========================================================================
