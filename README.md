@@ -124,9 +124,13 @@ The "successful repair" metric therefore does not apply to F5.
 **F7 is pending an advisor lock** on the entity authorities. It runs, and its
 findings are not reportable until that lock.
 
-**Several `freeze/` trust-boundary roles are specified but not instantiated**, so
-`mint_v1 --config` is gated: the role→module manifest cannot be completed and
-the bootstrap fails closed rather than minting a config it cannot verify.
+**The freeze subsystem is deferred, not live.** Several trust-boundary roles are
+specified but not instantiated, and `MINT_INPUTS.json` does not exist in this
+tree, so `mint_v1 --config` cannot run: the role→module manifest cannot be
+completed and the bootstrap fails closed rather than minting a config it cannot
+verify. What the subsystem still does carry is the evidence that matters for a
+Methods claim — the two sealed prompt packages, which show the prompts were
+frozen before the graded run.
 
 **F4 has no worked example** in the per-category case set
 (`tests/characterization/test_taxonomy_cases.py`). Its decision rule is

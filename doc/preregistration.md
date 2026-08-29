@@ -124,9 +124,8 @@ compute κ *on the adjudications*. A queued amendment holds that this is the wro
 basis — that κ belongs on independent pre-adjudication labels — and that
 "sensitivity on known positives" should be framed as a diagnostic on the
 confirmed set rather than as a lower bound on population recall. ZD supplies that
-wording; it is explicitly not to be drafted by an implementer, and amending it
-re-pins a normative reference inside the freeze spec. Recorded here so the open
-state is visible outside a build document.
+wording; it is explicitly not to be drafted by an implementer. It is recorded
+here because this is now the only place it is written down.
 
 **An invariant, not a preference.** No model assigns a semantic label or curates
 ground truth at any point in this project.

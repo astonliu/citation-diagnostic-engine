@@ -268,7 +268,9 @@ def test_rows10_11_12_cli_config_without_inputs_fails_closed():
                      "response_parser_version")])
     for field in expected_fields:
         assert field in out, f"missing field {field} in the report"
-    assert "MINT_DECISIONS_PENDING_ZD.md" in out
+    # The refusal points a reader somewhere that still exists.
+    assert mint_v1.DECISIONS_DOC in out
+    assert "README" in mint_v1.DECISIONS_DOC
 
 
 def test_empty_inputs_counts_six_and_twentythree():

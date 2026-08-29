@@ -20,7 +20,6 @@ anchoring rules (SV-041/042/043/044 ancestry clauses, residuals #9/#10).
 Timestamps are fixed constants; the same builder output is committed as JSON
 under cre/f1/fixtures/freeze/ (write_fixture_files) as byte-stable evidence.
 
-Also used by gen_conformance.py for the per-rule conformance section.
 """
 import copy
 import hashlib

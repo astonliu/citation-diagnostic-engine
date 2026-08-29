@@ -1520,43 +1520,6 @@ def test_reference_binding_rules_fire_per_target():
         f"corrupted targets whose binding rule did NOT fire: {failures}")
 
 
-GEN = REPO_HANDOFF / "cde" / "freeze" / "gen_conformance.py"
-_IN_GENERATOR = os.environ.get("CRE_GEN_CONFORMANCE_RUNNING") == "1"
-
-
-def _run_generator(out_path):
-    env = {**os.environ, "PYTHONPATH": str(REPO_HANDOFF)}
-    r = subprocess.run([PYTHON, str(GEN), "--out", str(out_path)],
-                       capture_output=True, text=True,
-                       cwd=str(REPO_HANDOFF), env=env)
-    assert r.returncode == 0, r.stderr[-2000:]
-    text = out_path.read_text()
-    head, sep, body = text.partition("\n--- canonical body ---\n")
-    m = re.search(r"canonical_body_sha256: ([0-9a-f]{64})", head)
-    assert sep and m, "report lacks the canonical-body marker/digest"
-    assert hashlib.sha256(body.encode("utf-8")).hexdigest() == m.group(1)
-    return m.group(1), body
-
-
-@pytest.mark.skipif(_IN_GENERATOR, reason="generator must not recurse")
-def test_report_canonical_digest_reproducible_across_runs(tmp_path):
-    # Two consecutive generator runs on identical repo bytes must record the
-    # identical canonical digest (wall clock excluded from the hashed region).
-    d1, b1 = _run_generator(tmp_path / "run1.txt")
-    d2, b2 = _run_generator(tmp_path / "run2.txt")
-    assert d1 == d2
-    assert b1 == b2
-
-
-@pytest.mark.skipif(_IN_GENERATOR, reason="generator must not recurse")
-def test_report_verify_mode_passes_on_committed_report():
-    env = {**os.environ, "PYTHONPATH": str(REPO_HANDOFF)}
-    r = subprocess.run([PYTHON, str(GEN), "--verify"], capture_output=True,
-                       text=True, cwd=str(REPO_HANDOFF), env=env)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "VERIFY OK" in r.stdout
-
-
 def test_bootstrap_stale_basename_other_tree_fails_closed(tmp_path):
     # SV-110: a same-named trust-boundary module loaded from a DIFFERENT
     # tree (another checkout, site-packages) is the stale-copy bug itself.

@@ -16,9 +16,11 @@ report, never something to fix by editing the prompt), the blob OID from git,
 and every hash is recomputed here and asserted against the frozen acceptance
 constants carried by semantic_validator_v1 — no literal digest appears in
 this file. The CONFIG additionally needs the canonical ZD inputs plus the
-unnumbered per-stage decisions catalogued in MINT_DECISIONS_PENDING_ZD.md;
-until MINT_INPUTS.json supplies them, ``--config`` exits non-zero, writes
-nothing, and prints every missing field grouped by canonical input number.
+unnumbered per-stage decisions summarised in the README's Limitations
+section; until MINT_INPUTS.json supplies them, ``--config`` exits non-zero,
+writes nothing, and prints every missing field grouped by canonical input
+number. MINT_INPUTS.json does not exist in this tree, so ``--config`` cannot
+run today -- which is the deferred state DEC-044 recorded, not a defect.
 
 MINT_INPUTS.json shape (judgment fields; strict JSON — duplicate keys and
 float tokens are rejected pre-parse; real quantities travel as decimal
@@ -83,7 +85,11 @@ TEMPLATE_ATTRS = {"claim_extract": "CLAIM_EXTRACT_PROMPT",
 FREEZE_DIR = pathlib.Path(__file__).resolve().parent
 DEFAULT_INPUTS_PATH = FREEZE_DIR / "MINT_INPUTS.json"
 DEFAULT_CONFIG_OUT_DIR = FREEZE_DIR / "_mint_out"  # gitignored, never committed
-DECISIONS_DOC = "cde/freeze/MINT_DECISIONS_PENDING_ZD.md"
+#: Where a reader is sent when --config refuses. The per-stage decision
+#: catalogue that used to live beside this file was prose rather than code
+#: and was removed with the rest of the freeze documentation; the standing
+#: state of the gate is summarised in the README instead.
+DECISIONS_DOC = "README.md (Limitations)"
 
 E_MINT_EXIT = 2
 
@@ -242,7 +248,7 @@ def collect_missing(inputs):
     numbered   -> list of (number, title, [field lines]) for the canonical
                   six, only for inputs with at least one missing field.
     unnumbered -> list of field lines with no canonical number (the
-                  MINT_DECISIONS_PENDING_ZD.md catalogue).
+                  unnumbered catalogue; see the README).
     Presence only — shape is enforced by the pinned schema at mint time.
     """
     stages = _get(inputs, "stages")
