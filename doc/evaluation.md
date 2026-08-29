@@ -59,12 +59,49 @@ for F5, which characterises F5 difficulty in the corpus.
 
 ## Protocol
 
-5-fold stratified cross-validation; bootstrap confidence intervals over 1000
-resamples, with no point estimate reported alone; exact model strings pinned in
-the run manifest. The fine-vs-coarse comparison is a paired test on per-example
-correctness, powered to detect a discordant-pair rate ≥ 0.10 at n = 1000. See
-`preregistration.md`.
+**F1, F2 and F8** are database-resolvable and are evaluated against a
+naturally-occurring gold set with a real denominator: precision and recall,
+five-fold stratified cross-validation, bootstrap confidence intervals over 1000
+resamples, and no point estimate reported alone.
 
-The judge is a different model family from the generator, and the launcher
-refuses to start a run where it is not — see §6 of the preregistration. The
-number that check produces is recorded beside the result, not asserted in prose.
+**F3–F7 are evaluated differently, and the difference is not a detail.** There
+is no population sample and there is no recall number. A finder surfaces
+candidate faults, annotators adjudicate each one, and what is reported is
+**precision per stratum on the flagged set** — the same audit model F2 uses,
+carried into the semantic strata. It is non-circular for the same reason: humans
+decide true from false positive independently of the system.
+
+Recall for F3–F7 is **declined, not missing**. The candidate pool is enriched by
+construction, so it has no honest denominator — auditing a finder's flagged
+output yields precision by construction and leaves recall undefined, because no
+labelled population draw was ever made. This is a design consequence, not a
+sacrifice to rarity, and it must be argued that way: do not cite F2's measured
+base rate as if it established rarity for F4 or F5.
+
+In its place, for each stratum, the pipeline is run over that stratum's
+human-confirmed positive set and the fraction caught is reported, labelled
+explicitly as **sensitivity on known positives** and never as population recall.
+
+Three constraints keep that precision number meaning something:
+
+- **The finder proposes; it never labels.** Annotators apply the taxonomy fresh
+  and blind to any proposed category. Showing the proposed label collapses the
+  metric into the finder agreeing with itself.
+- **Annotator and system judge the same object.** The same
+  `(citing_sentence, cited_pmid)` unit, the same evidence scope, the same label
+  space. If the system reads an abstract and the annotator reads the full paper,
+  a disagreement is ambiguous between a real fault and an evidence mismatch —
+  silent bias baked into the metric, not noise that averages out.
+- **Precision is conditional on the finder prompt.** A prompt change is a
+  different pipeline, so the prompt is frozen and versioned with the dataset, and
+  labels are keyed on pair identity rather than on the prompt's output. Whether a
+  pair is an F3 is a fact about the world; a prompt change then moves the
+  denominator, not the individual truth labels.
+
+Report it as **precision of the pipeline as configured**, not as "the engine's
+precision" in the abstract.
+
+**Verifiers.** The judge is a different model family from the generator, and the
+launcher refuses to start a run where it is not — see `preregistration.md`. No
+model assigns a semantic label or curates ground truth; that is an invariant, not
+a preference.

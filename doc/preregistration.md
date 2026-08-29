@@ -102,16 +102,34 @@ test partition, and the primary claim is reported separately on natural-only
 test examples. F1, F2 and F8 are resolved by database lookup before any
 classifier. Stratified across all eight categories before the split.
 
-**Unresolved, and deliberately not decided here.** The registered §8 says
-naturally-occurring errors only, with an amendment note recording that an
-original reference to synthetic injection was superseded by a natural-only
-mandate before annotation began. The 9 June research-plan delta then reinstates
-a synthetic stratum ("equal synthetic ~125/category, unequal natural
-as-available"), citing Amendment 5. The two cannot both govern. Nothing in this
-repository depends on the answer today — no synthetic example is generated
-anywhere in the code — but the dataset card and any natural-vs-synthetic gap
-figure do, so the conflict is recorded here rather than silently resolved in one
-direction.
+**On synthetic data, which is settled.** The registered §8 says
+naturally-occurring errors only; the 9 June research-plan delta appeared to
+reinstate a synthetic stratum. The closed F3–F7 evaluation decisions (3 July
+2026) resolve it: the synthetic-injection, stratification and denominator
+machinery **is amended out for F3–F7**, which are audited for precision on a
+flagged set rather than sampled against a denominator, and
+naturally-occurring-only continues to govern any denominatored gold set that
+does exist. No synthetic example is generated anywhere in the code, and none
+should be.
+
+**A documented deviation from registered F3-DI2.** That registration defined the
+F3–F7 gold set as a naturally-occurring sample with a denominator. It is amended
+to the precision-on-flagged-set audit described in `evaluation.md`. Everything
+else converts unchanged: the taxonomy, the decision rules, the annotator and
+adjudication protocol, and every confirmed positive already sourced. The
+solo-annotation assumption and the F3–F7 pre-pilot κ gate are superseded with it.
+
+**One item is genuinely open and is not settled here.** The 3 July decisions
+compute κ *on the adjudications*. A queued amendment holds that this is the wrong
+basis — that κ belongs on independent pre-adjudication labels — and that
+"sensitivity on known positives" should be framed as a diagnostic on the
+confirmed set rather than as a lower bound on population recall. ZD supplies that
+wording; it is explicitly not to be drafted by an implementer, and amending it
+re-pins a normative reference inside the freeze spec. Recorded here so the open
+state is visible outside a build document.
+
+**An invariant, not a preference.** No model assigns a semantic label or curates
+ground truth at any point in this project.
 
 ## What would change the plan
 
