@@ -21,7 +21,7 @@
     "git_commit_oid": { "type": "string", "pattern": "^(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$", "$comment": "Semantic validator proves this names a COMMIT object (not tree/blob)." },
     "candidate_protocol": {
       "type": "object", "additionalProperties": false,
-      "$comment": "Codex v9 #2: committed BEFORE candidate-config creation. Binds the predeclared freeze criterion, prohibited-case set, and the exact schema+validator contract, so 'predeclared' is provable (not written into a later artifact). CONFIG references candidate_protocol_sha256.",
+      "$comment": "review round 9, item 2: committed BEFORE candidate-config creation. Binds the predeclared freeze criterion, prohibited-case set, and the exact schema+validator contract, so 'predeclared' is provable (not written into a later artifact). CONFIG references candidate_protocol_sha256.",
       "required": ["artifact_type", "schema_version", "freeze_criterion", "prohibited_cases", "schema_sha256", "semantic_validator_version", "evaluation_policy_version", "recorded_by", "recorded_at"],
       "properties": {
         "artifact_type": { "const": "candidate_protocol" }, "schema_version": { "const": "v14" },
@@ -30,7 +30,7 @@
           "$comment": "minItems 2: the two known confirmed F3 cases (Seeman, idelalisib) must always be present. Keyed on citing_pmcid (the durable contamination key); citation_id and occurrence_identity are optional provenance — requiring them would demand inputs ZD does not have yet (cases known by PMID). Semantic validator (SV-043) enforces uniqueness by citing_pmcid.",
           "items": { "type": "object", "additionalProperties": false, "required": ["citing_pmcid"],
             "properties": { "citing_pmcid": { "$ref": "#/$defs/pmcid" }, "citation_id": { "$ref": "#/$defs/citation_id" }, "occurrence_identity": { "$ref": "#/$defs/sha256" } } } },
-        "schema_sha256": { "$ref": "#/$defs/sha256", "$comment": "content hash of THIS schema file, so CONFIG binds the exact validation contract (Codex v9 P1)." },
+        "schema_sha256": { "$ref": "#/$defs/sha256", "$comment": "content hash of THIS schema file, so CONFIG binds the exact validation contract (review round 9, P1)." },
         "semantic_validator_version": { "const": "semantic_validator_v1" },
         "evaluation_policy_version": { "$ref": "#/$defs/nonempty_string" },
         "recorded_by": { "const": "ZD" }, "recorded_at": { "$ref": "#/$defs/iso8601_tz" }
@@ -136,7 +136,7 @@
     },
     "no_decimal_param": {
       "type": "object", "additionalProperties": false, "required": ["state"],
-      "$comment": "Codex v8 #7: supplied decimal params would send a JSON float, breaking exact-request hashing under float-prohibition. Decimal params (temperature, top_p) MUST be omitted/provider_default/unsupported — never supplied. Matches the Opus adapter, which omits temperature.",
+      "$comment": "review round 8, item 7: supplied decimal params would send a JSON float, breaking exact-request hashing under float-prohibition. Decimal params (temperature, top_p) MUST be omitted/provider_default/unsupported — never supplied. Matches the Opus adapter, which omits temperature.",
       "properties": { "state": { "enum": ["omitted", "provider_default", "unsupported"] } }
     },
     "safe_int_param": {
@@ -203,7 +203,7 @@
     },
     "prompt_package": {
       "type": "object", "additionalProperties": false,
-      "$comment": "self_hash_exclusion: package_sha256. Slot sets are LOCKED (Codex-verified target placeholders); no 'provisional'.",
+      "$comment": "self_hash_exclusion: package_sha256. Slot sets are LOCKED (review-verified target placeholders); no 'provisional'.",
       "required": ["artifact_type", "schema_version", "name", "template_text_version", "package_version", "template_utf8", "template_utf8_sha256", "source_blob_oid", "render_contract", "render_contract_sha256", "package_sha256"],
       "properties": {
         "artifact_type": { "const": "prompt_package" }, "schema_version": { "const": "v14" },
@@ -217,11 +217,11 @@
         "render_contract_sha256": { "$ref": "#/$defs/sha256" }, "package_sha256": { "$ref": "#/$defs/sha256" }
       },
       "allOf": [
-        { "if": { "properties": { "name": { "const": "claim_extract" } } }, "then": { "properties": { "template_text_version": { "const": 3, "$comment": "Frozen historical text version (Codex final-pass Q1.3)." }, "render_contract": { "properties": { "slots": {
+        { "if": { "properties": { "name": { "const": "claim_extract" } } }, "then": { "properties": { "template_text_version": { "const": 3, "$comment": "Frozen historical text version (final review pass, Q1.3)." }, "render_contract": { "properties": { "slots": {
             "minItems": 1, "maxItems": 1,
             "prefixItems": [ { "type": "object", "additionalProperties": false, "required": ["name", "role", "encoding", "order"], "properties": { "name": { "const": "CITING_SENTENCE" }, "role": { "const": "user" }, "encoding": { "const": "utf-8" }, "order": { "const": 0 } } } ],
             "items": false } } } } } },
-        { "if": { "properties": { "name": { "const": "coverage" } } }, "then": { "properties": { "template_text_version": { "const": 2, "$comment": "Frozen historical text version (Codex final-pass Q1.3)." }, "render_contract": { "properties": { "slots": {
+        { "if": { "properties": { "name": { "const": "coverage" } } }, "then": { "properties": { "template_text_version": { "const": 2, "$comment": "Frozen historical text version (final review pass, Q1.3)." }, "render_contract": { "properties": { "slots": {
             "minItems": 2, "maxItems": 2,
             "prefixItems": [
               { "type": "object", "additionalProperties": false, "required": ["name", "role", "encoding", "order"], "properties": { "name": { "const": "ATOMIC_CLAIM" }, "role": { "const": "user" }, "encoding": { "const": "utf-8" }, "order": { "const": 0 } } },
@@ -279,7 +279,7 @@
         "genesis": { "$ref": "#/$defs/sha256" }, "chain_tip": { "$ref": "#/$defs/sha256" }, "chain_record_count": { "type": "integer", "minimum": 0 },
         "chain_hash_version": { "const": "canon_v1" }, "legacy_tip_anchor": { "$ref": "#/$defs/sha256" },
         "wal_tip_sha256": { "$ref": "#/$defs/sha256_or_null" },
-        "review_dump_sha256": { "$ref": "#/$defs/sha256", "$comment": "Codex v8 #10: sidecar removed; the review-record chain (seq/prev/record_sha256) is the recovery structure; chain_tip recomputable from the dump." },
+        "review_dump_sha256": { "$ref": "#/$defs/sha256", "$comment": "review round 8, item 10: sidecar removed; the review-record chain (seq/prev/record_sha256) is the recovery structure; chain_tip recomputable from the dump." },
         "status": { "const": "complete" },
         "observed_runtime": { "$ref": "#/$defs/runtime_observation" },
         "funnel": { "type": "object", "additionalProperties": false, "required": ["input_total", "excluded", "runner_accepted", "flagged", "clear", "held", "quarantined"],
@@ -290,7 +290,7 @@
         "started": { "$ref": "#/$defs/iso8601_tz" }, "completed": { "$ref": "#/$defs/iso8601_tz" }
       },
       "allOf": [
-        { "$comment": "Codex v10 #8: mode matrix. candidate→calibration + no promotion-at-start; release→formal + promotion-at-start present; development→never here (only run_state).",
+        { "$comment": "review round 10, item 8: mode matrix. candidate→calibration + no promotion-at-start; release→formal + promotion-at-start present; development→never here (only run_state).",
           "if": { "properties": { "execution_mode": { "const": "candidate" } } },
           "then": { "properties": { "sample_purpose": { "const": "calibration" }, "promotion_payload_sha256_at_start": { "type": "null" } } } },
         { "if": { "properties": { "execution_mode": { "const": "release" } } },
@@ -317,11 +317,11 @@
         "chain_tip": { "$ref": "#/$defs/sha256" }, "chain_record_count": { "type": "integer", "minimum": 0 },
         "wal_tip_sha256": { "$ref": "#/$defs/sha256_or_null" }, "review_dump_partial_sha256": { "$ref": "#/$defs/sha256" },
         "output_dir": { "$ref": "#/$defs/nonempty_string" },
-        "observed_runtime": { "$ref": "#/$defs/runtime_observation", "$comment": "Codex v8 #8/#12: the actual object is embedded here AND its content hash recorded, so the stored hash references a defined artifact." },
+        "observed_runtime": { "$ref": "#/$defs/runtime_observation", "$comment": "review round 8, items 8/12: the actual object is embedded here AND its content hash recorded, so the stored hash references a defined artifact." },
         "observed_runtime_sha256": { "$ref": "#/$defs/sha256" }
       },
       "allOf": [
-        { "$comment": "Codex final-pass Q1.1: the execution-mode matrix applies to run-state too, not only BATCH. development run-state is permitted (a development run has in-progress state but never produces a BATCH).",
+        { "$comment": "final review pass, Q1.1: the execution-mode matrix applies to run-state too, not only BATCH. development run-state is permitted (a development run has in-progress state but never produces a BATCH).",
           "if": { "properties": { "execution_mode": { "const": "candidate" } } },
           "then": { "properties": { "sample_purpose": { "const": "calibration" }, "promotion_payload_sha256_at_start": { "type": "null" } } } },
         { "if": { "properties": { "execution_mode": { "const": "release" } } },
@@ -330,7 +330,7 @@
     },
     "wal_event": {
       "type": "object",
-      "$comment": "Immutable event-sourced record. Genuinely CLOSED oneOf per event_type (Codex v9 #1): each branch sets its own required/forbidden/const fields, additionalProperties:false. event_sha256 = SHA256(canon_v1(event∖event_sha256)). Retryability governed by sent_boundary_crossed. SV-023: the 'prepared' branch requires the literal idempotency_preimage.",
+      "$comment": "Immutable event-sourced record. Genuinely CLOSED oneOf per event_type (review round 9, item 1): each branch sets its own required/forbidden/const fields, additionalProperties:false. event_sha256 = SHA256(canon_v1(event∖event_sha256)). Retryability governed by sent_boundary_crossed. SV-023: the 'prepared' branch requires the literal idempotency_preimage.",
       "required": ["artifact_type", "event_type"],
       "oneOf": [
         { "type": "object", "additionalProperties": false, "required": ["artifact_type", "schema_version", "logical_call_id", "attempt_id", "attempt_ordinal", "wal_seq", "prev_wal_event_sha256", "attempt_event_seq", "prev_attempt_event_sha256", "event_type", "recorded_at", "request_bytes_sha256", "idempotency_key", "idempotency_preimage", "sent_boundary_crossed", "event_sha256"],
@@ -346,7 +346,7 @@
           "properties": {
             "artifact_type": { "const": "wal_event" }, "schema_version": { "const": "v14" }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "attempt_id": { "$ref": "#/$defs/nonempty_string" }, "attempt_ordinal": { "type": "integer", "minimum": 0 }, "wal_seq": { "type": "integer", "minimum": 0 }, "prev_wal_event_sha256": { "$ref": "#/$defs/sha256_or_null" }, "attempt_event_seq": { "type": "integer", "minimum": 0 }, "prev_attempt_event_sha256": { "$ref": "#/$defs/sha256_or_null" }, "event_type": { "const": "transport_failed" }, "recorded_at": { "$ref": "#/$defs/iso8601_tz" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "sent_boundary_crossed": { "const": false }, "transport_exception_class": { "$ref": "#/$defs/nonempty_string" }, "event_sha256": { "$ref": "#/$defs/sha256" } } },
         { "type": "object", "additionalProperties": false, "required": ["artifact_type", "schema_version", "logical_call_id", "attempt_id", "attempt_ordinal", "wal_seq", "prev_wal_event_sha256", "attempt_event_seq", "prev_attempt_event_sha256", "event_type", "recorded_at", "request_bytes_sha256", "idempotency_key", "sent_boundary_crossed", "http_status", "response_body_sha256", "response_body_ref", "response_headers_allowlisted", "provider_model_id", "response_id", "finish_reason", "event_sha256"],
-          "$comment": "RESPONSE_PERSISTED: boundary true; preserves transport facts. Provider model/response/finish are REQUIRED-NULLABLE (string|null) — a 4xx/5xx body has none, but the fields are always present so there are no byte-distinct equivalent states (Codex v10 WAL #2). The OK review_call requires the model audit separately.",
+          "$comment": "RESPONSE_PERSISTED: boundary true; preserves transport facts. Provider model/response/finish are REQUIRED-NULLABLE (string|null) — a 4xx/5xx body has none, but the fields are always present so there are no byte-distinct equivalent states (review round 10, WAL item 2). The OK review_call requires the model audit separately.",
           "properties": {
             "artifact_type": { "const": "wal_event" }, "schema_version": { "const": "v14" }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "attempt_id": { "$ref": "#/$defs/nonempty_string" }, "attempt_ordinal": { "type": "integer", "minimum": 0 }, "wal_seq": { "type": "integer", "minimum": 0 }, "prev_wal_event_sha256": { "$ref": "#/$defs/sha256_or_null" }, "attempt_event_seq": { "type": "integer", "minimum": 0 }, "prev_attempt_event_sha256": { "$ref": "#/$defs/sha256_or_null" }, "event_type": { "const": "response_persisted" }, "recorded_at": { "$ref": "#/$defs/iso8601_tz" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "sent_boundary_crossed": { "const": true }, "http_status": { "type": "integer", "minimum": 100, "maximum": 599 }, "response_body_sha256": { "$ref": "#/$defs/sha256" }, "response_body_ref": { "$ref": "#/$defs/nonempty_string" }, "response_headers_allowlisted": { "type": "object", "additionalProperties": { "type": "string" } }, "provider_model_id": { "type": ["string", "null"] }, "response_id": { "type": ["string", "null"] }, "finish_reason": { "type": ["string", "null"] }, "event_sha256": { "$ref": "#/$defs/sha256" } } },
         { "type": "object", "additionalProperties": false, "required": ["artifact_type", "schema_version", "logical_call_id", "attempt_id", "attempt_ordinal", "wal_seq", "prev_wal_event_sha256", "attempt_event_seq", "prev_attempt_event_sha256", "event_type", "recorded_at", "request_bytes_sha256", "idempotency_key", "sent_boundary_crossed", "transport_exception_class", "prev_attempt_terminal_sha256", "event_sha256"],
@@ -371,10 +371,10 @@
           "$comment": "provider_error / refusal / truncated / malformed: preserve HTTP status, body, headers.",
           "properties": { "call_made": { "const": true }, "status": { "enum": ["malformed", "refusal", "truncated", "provider_error"] }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "retry_wal_event_shas": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } }, "http_status": { "type": "integer", "minimum": 100, "maximum": 599 }, "raw_response_body_ref": { "$ref": "#/$defs/nonempty_string" }, "raw_response_body_sha256": { "$ref": "#/$defs/sha256" }, "response_headers_allowlisted": { "type": "object", "additionalProperties": { "type": "string" } }, "provider_model_id": { "type": "string" }, "response_id": { "type": "string" }, "finish_reason": { "type": "string" } } },
         { "additionalProperties": false, "required": ["call_made", "status", "logical_call_id", "request_bytes_sha256", "idempotency_key", "retry_wal_event_shas", "timeout_phase"],
-          "$comment": "timeout is TERMINAL only when PRE-SEND (connect). read is post-send and total may be either → both become indeterminate, never a terminal timeout (Codex v10 WAL #3).",
+          "$comment": "timeout is TERMINAL only when PRE-SEND (connect). read is post-send and total may be either → both become indeterminate, never a terminal timeout (review round 10, WAL item 3).",
           "properties": { "call_made": { "const": true }, "status": { "const": "timeout" }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "retry_wal_event_shas": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } }, "timeout_phase": { "const": "connect" } } },
         { "additionalProperties": false, "required": ["call_made", "status", "logical_call_id", "request_bytes_sha256", "idempotency_key", "retry_wal_event_shas", "transport_exception_class", "terminal_wal_event_sha256"],
-          "$comment": "transport_error = exhausted pre-send failure (DNS/TLS/connect) with no HTTP response (Codex v8 #6).",
+          "$comment": "transport_error = exhausted pre-send failure (DNS/TLS/connect) with no HTTP response (review round 8, item 6).",
           "properties": { "call_made": { "const": true }, "status": { "const": "transport_error" }, "logical_call_id": { "$ref": "#/$defs/nonempty_string" }, "request_bytes_sha256": { "$ref": "#/$defs/sha256" }, "idempotency_key": { "$ref": "#/$defs/sha256" }, "retry_wal_event_shas": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } }, "transport_exception_class": { "$ref": "#/$defs/nonempty_string" }, "terminal_wal_event_sha256": { "$ref": "#/$defs/sha256" } } },
         { "additionalProperties": false, "required": ["call_made", "status", "logical_call_id", "request_bytes_sha256", "idempotency_key", "retry_wal_event_shas", "empty_kind"],
           "$comment": "empty distinguishes zero-byte body from valid empty provider result.",
@@ -408,7 +408,7 @@
                 { "if": { "properties": { "answer_type": { "enum": ["single_choice", "multi_choice"] } } }, "then": { "required": ["choices"] }, "else": { "not": { "required": ["choices"] } } }
               ] } } } },
         "display_instructions": { "type": "string" },
-        "codebook_content": { "type": "string", "$comment": "Embedded so the UI truly renders solely from this object (Codex v8 #8)." },
+        "codebook_content": { "type": "string", "$comment": "Embedded so the UI truly renders solely from this object (review round 8, item 8)." },
         "codebook_sha256": { "$ref": "#/$defs/sha256", "$comment": "Must equal SHA256(codebook_content UTF-8) (semantic)." },
         "rendering_settings": { "type": "object", "additionalProperties": false, "required": ["truncation", "redaction", "ordering"], "properties": { "truncation": { "type": "string" }, "redaction": { "type": "string" }, "ordering": { "type": "string" } } }
       },
@@ -452,11 +452,11 @@
             "required": ["citation_id", "citing_pmcid", "ref_id", "occurrence_identity_version", "normalized_ref_key_type", "normalization_contract_sha256", "normalized_ref_key", "occurrence_identity", "source_xml_sha256", "ref_content_utf8", "extraction_contract_version", "source_occurrence_fingerprint", "corpus_source_id", "retrieval_record_sha256", "not_detector_sourced_attestation"],
             "properties": {
               "citation_id": { "$ref": "#/$defs/citation_id" }, "citing_pmcid": { "$ref": "#/$defs/pmcid" }, "ref_id": { "$ref": "#/$defs/nonempty_string" },
-              "occurrence_identity_version": { "const": "occ_id_v1", "$comment": "Codex v9 #4 (contradiction removed): occurrence_identity is computed from the CURRENT normalized key and is NOT claimed stable across a later resolution — a resolution change yields a NEW occurrence_identity. This is acceptable because contamination protection does NOT depend on it: exclusion is applied citing-paper-wide keyed on citing_pmcid, so the paper stays excluded regardless of key drift. Precedence resolved_pmid > resolved_doi > normalized_citation_string." },
+              "occurrence_identity_version": { "const": "occ_id_v1", "$comment": "review round 9, item 4 (contradiction removed): occurrence_identity is computed from the CURRENT normalized key and is NOT claimed stable across a later resolution — a resolution change yields a NEW occurrence_identity. This is acceptable because contamination protection does NOT depend on it: exclusion is applied citing-paper-wide keyed on citing_pmcid, so the paper stays excluded regardless of key drift. Precedence resolved_pmid > resolved_doi > normalized_citation_string." },
               "normalized_ref_key_type": { "enum": ["resolved_pmid", "resolved_doi", "normalized_citation_string"] },
               "normalization_contract_sha256": { "$ref": "#/$defs/sha256", "$comment": "content hash of the pinned normalization algorithm (DOI lowercase + strip URL prefix; NFC; whitespace/punct collapse; author/title/year rule)." },
               "normalized_ref_key": { "$ref": "#/$defs/nonempty_string", "$comment": "canonical value under the pinned contract." },
-              "occurrence_identity": { "$ref": "#/$defs/sha256", "$comment": "= SHA256(canon_v1({occurrence_identity_version, citing_pmcid, normalized_ref_key_type, normalized_ref_key})) — these four members EXACTLY, keyed by these field names; normalization_contract_sha256 is deliberately NOT in the preimage (it is stored alongside for recomputability; the contract is versioned via occurrence_identity_version). PROVENANCE/dedup aid only, NOT the contamination key and NOT claimed stable across resolution — exclusion is citing-paper-wide on citing_pmcid (closed decision). Matches SV-061 verbatim (Codex final-pass Q2.2)." },
+              "occurrence_identity": { "$ref": "#/$defs/sha256", "$comment": "= SHA256(canon_v1({occurrence_identity_version, citing_pmcid, normalized_ref_key_type, normalized_ref_key})) — these four members EXACTLY, keyed by these field names; normalization_contract_sha256 is deliberately NOT in the preimage (it is stored alongside for recomputability; the contract is versioned via occurrence_identity_version). PROVENANCE/dedup aid only, NOT the contamination key and NOT claimed stable across resolution — exclusion is citing-paper-wide on citing_pmcid (closed decision). Matches SV-061 verbatim (final review pass, Q2.2)." },
               "source_xml_sha256": { "$ref": "#/$defs/sha256" }, "ref_content_utf8": { "type": "string" }, "extraction_contract_version": { "$ref": "#/$defs/nonempty_string" },
               "source_occurrence_fingerprint": { "$ref": "#/$defs/sha256", "$comment": "= SHA256(canon_v1({source_xml_sha256, ref_content_utf8, extraction_contract_version})); PROVENANCE only, snapshot-dependent." },
               "corpus_source_id": { "$ref": "#/$defs/nonempty_string" }, "retrieval_record_sha256": { "$ref": "#/$defs/sha256" }, "not_detector_sourced_attestation": { "const": true },
@@ -500,7 +500,7 @@
     "promotion": {
       "type": "object", "additionalProperties": false,
       "required": ["artifact_type", "schema_version", "payload", "payload_sha256"],
-      "$comment": "Codex v10 #2: PROMOTION REFERENCES the pre-committed artifacts by hash (no duplication, no opaque array). Semantic validator walks these: candidate_protocol_sha256 == CONFIG's; exposure_plan.run_hash == run_hash and every exposure row ∈ the run's review chain; post_exposure_exclusion_checkpoint_sha256 (N+1) strictly newer than the candidate BATCH's N and citing-paper-wide covers every exposure row; the exposure_plan commit precedes UI access; freeze criterion is the protocol's (not restated); target BATCH is candidate/calibration under the same CONFIG.",
+      "$comment": "review round 10, item 2: PROMOTION REFERENCES the pre-committed artifacts by hash (no duplication, no opaque array). Semantic validator walks these: candidate_protocol_sha256 == CONFIG's; exposure_plan.run_hash == run_hash and every exposure row ∈ the run's review chain; post_exposure_exclusion_checkpoint_sha256 (N+1) strictly newer than the candidate BATCH's N and citing-paper-wide covers every exposure row; the exposure_plan commit precedes UI access; freeze criterion is the protocol's (not restated); target BATCH is candidate/calibration under the same CONFIG.",
       "properties": {
         "artifact_type": { "const": "promotion" }, "schema_version": { "const": "v14" },
         "payload": { "type": "object", "additionalProperties": false, "required": ["config_hash", "run_hash", "candidate_protocol_sha256", "exposure_plan_sha256", "post_exposure_exclusion_checkpoint_sha256", "recorded_by", "recorded_at"],

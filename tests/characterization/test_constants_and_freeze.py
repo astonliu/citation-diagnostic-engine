@@ -100,7 +100,7 @@ def test_the_pinned_schema_digest_and_size_are_unchanged():
     import hashlib
     raw = schema_gate.SCHEMA_PATH.read_bytes()
     assert hashlib.sha256(raw).hexdigest() == schema_gate.PINNED_SCHEMA_SHA256
-    assert len(raw) == schema_gate.PINNED_SCHEMA_BYTES == 69138
+    assert len(raw) == schema_gate.PINNED_SCHEMA_BYTES == 69286
 
 
 def test_the_canonicaliser_refuses_a_float_it_cannot_reproduce():
