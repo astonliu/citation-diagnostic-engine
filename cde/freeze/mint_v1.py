@@ -83,7 +83,7 @@ TEMPLATE_ATTRS = {"claim_extract": "CLAIM_EXTRACT_PROMPT",
 FREEZE_DIR = pathlib.Path(__file__).resolve().parent
 DEFAULT_INPUTS_PATH = FREEZE_DIR / "MINT_INPUTS.json"
 DEFAULT_CONFIG_OUT_DIR = FREEZE_DIR / "_mint_out"  # gitignored, never committed
-DECISIONS_DOC = "cre/f1/freeze/MINT_DECISIONS_PENDING_ZD.md"
+DECISIONS_DOC = "cde/freeze/MINT_DECISIONS_PENDING_ZD.md"
 
 E_MINT_EXIT = 2
 
