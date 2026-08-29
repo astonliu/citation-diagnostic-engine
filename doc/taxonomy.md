@@ -6,19 +6,53 @@ annotator applies *before* exercising judgment. Those procedures are the point
 of this document; the category names on their own are not enough to annotate
 with.
 
+The paper's category names are authoritative; the F-numbers are internal
+shorthand that appears in the code and in run records.
+
 | | category | decided by | stage |
 |---|---|---|---|
-| F1 | Fabricated | identifier and metadata fail to resolve anywhere | Band 1 |
-| F2 | Wrong reference | metadata resolves, to a different work | Band 1 |
-| F3 | Misattribution | full claim coverage, wrong origin | Band 2 |
-| F4 | Overstatement | strength/modality mismatch | Band 2 |
-| F5 | Stale / superseded | contradiction + supersession gate | Band 2 |
-| F6 | Partial support | any unestablished claim after complete retrieval | Band 2 |
-| F7 | Wrong entity | drug / gene / disease mismatch | Band 2 |
-| F8 | Retracted | retraction notice + timing gate | Band 1 |
+| F1 | Unresolvable Reference | printed DOI or PMID fails to resolve and the resolution attempt is complete | Band 1 |
+| F2 | Wrong Reference | identifier resolves, to a different work than the citation describes | Band 1 |
+| F3 | Misattribution | full claim coverage, credit given to a non-originator | Band 2 |
+| F4 | Overstatement | strength or modality mismatch | Band 2 |
+| F5 | Supersession | later comparable evidence contradicts, cited as current | Band 2 |
+| F6 | Insufficient Support | any unestablished claim after complete retrieval | Band 2 |
+| F7 | Wrong Entity | different entity of the same type — gene, drug, variant, organism, disease | Band 2 |
+| F8 | Retracted Source | retraction notice predating the citing paper by ≥ 31 days | Band 1 |
 
-F1, F2 and F8 are database-resolvable and never reach a human classifier. Human
-and model judgment is confined to F3–F7.
+**Unresolvable Reference is not an allegation of fabrication.** Incomplete index
+coverage makes genuine regional, non-English, dataset and supplement citations
+look absent, so the author-facing output is "could not be resolved in the sources
+consulted". The audited stratum bears this out: it held regional journals using
+publisher-local identifiers, non-English material, a deposited dataset, a
+conference-supplement abstract, and a malformed identifier.
+
+**Wrong Entity does not fire on encapsulation.** A broader source that explicitly
+encompasses the claimed entity is not a fault.
+
+**Supersession abstains** where comparability and endorsement are interpretive and
+the later evidence does not settle the comparison.
+
+## Precedence
+
+Multiple faults can co-occur on one citation. A fixed order makes the label
+reproducible, and each citation receives exactly one primary label naming its
+first point of failure:
+
+> Unresolvable Reference → Wrong Reference → Retracted Source → Wrong Entity →
+> Insufficient Support → Overstatement → Misattribution → Supersession
+
+Two orderings are non-obvious. **Retracted Source follows the bibliographic
+checks** because retraction status is undefined for a work that does not resolve,
+or resolves to a work other than the one described. **Overstatement precedes
+Misattribution** because an overstatement makes the citing sentence as written
+false, whereas a misattribution carries a true and supported claim whose remedy is
+advisory — so a citation that both restates and overstates is labelled an
+overstatement.
+
+Unresolvable Reference, Wrong Reference and Retracted Source are
+database-resolvable and never reach a human classifier. Human and model judgment
+is confined to the five semantic categories.
 
 ## The three collisions
 

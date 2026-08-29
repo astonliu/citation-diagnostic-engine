@@ -1,32 +1,40 @@
-# Citation Diagnosis Engine
+# Citation Diagnostic Engine
 
 Fine-grained diagnosis of citation faults in biomedical papers: not just whether
 a citation is wrong, but *how*, with the evidence that says so.
 
-Paper: preprint in preparation — this line will carry the link when there is one.
+Paper: Aston Liu and Kirk Roberts, "Diagnosing Biomedical Citation Faults: An
+Eight-Category Taxonomy and Multi-Design Evaluation." This line will carry the
+link on publication.
 
 ## What it does
 
 Most citation checking answers one question: does this reference support this
 sentence, yes or no. That answer is not actionable, because "no" covers a
-fabricated reference, a transposed identifier, a real paper that says something
+reference that will not resolve, a transposed identifier, a real paper that says something
 weaker than claimed, and a real paper that has since been overturned — and those
 need four different fixes.
 
 `cde` splits the question in two. **Band 1** asks whether the reference is the
-work it claims to be, which databases can answer: fabricated (F1), wrong
-reference (F2), retracted before the citing paper appeared (F8). **Band 2** asks
-whether the citing sentence is a fair use of that work, which needs both texts:
-misattribution (F3), overstatement (F4), superseded findings (F5), partial
-support (F6), wrong entity (F7).
+work it claims to be, which databases can answer: Unresolvable Reference, Wrong
+Reference, and Retracted Source. **Band 2** asks whether the citing sentence is a
+fair use of that work, which needs both texts: Wrong Entity, Insufficient
+Support, Overstatement, Misattribution, and Supersession.
+
+The full precedence order is Unresolvable Reference → Wrong Reference →
+Retracted Source → Wrong Entity → Insufficient Support → Overstatement →
+Misattribution → Supersession. Each citation receives exactly one primary label,
+naming its first point of failure.
 
 Every finding comes with the atomic claims the sentence was decomposed into and
 the verbatim spans from the cited paper that the verdict rests on. The system
 abstains rather than guessing: an unwired discriminator, an incomplete
 retrieval, or a search that never answered produces a hold, never a confident
-negative. This matters more than it sounds — F1 accuses an author of inventing a
-reference, and the cost of one false accusation is not symmetric with the cost
-of a miss.
+negative. This matters more than it sounds: an Unresolvable Reference finding
+sits one careless sentence away from accusing an author of inventing a source, so
+the output says "could not be resolved in the sources consulted" and stops there.
+Index coverage is incomplete, and regional, non-English, dataset and supplement
+citations are the ones it misses.
 
 ## Setup
 
@@ -104,52 +112,88 @@ repo reads or writes are in `doc/data.md`.
 
 ## Limitations
 
-These are real and current, not hypothetical.
+These are real and current, not hypothetical. They follow the paper's own
+limitations section; where this file and the paper differ, the paper governs.
+
+**No design here estimates population prevalence, population recall, repair
+accuracy, or end-to-end eight-class performance.** The four evaluation designs
+estimate different quantities and must not be pooled: route and selected-flag
+audits estimate confirmation among reviewed flags; the constructed panels
+estimate detection on hunted positives and false alarms on selected controls.
+
+**No baseline.** Nothing here demonstrates that the full architecture beats
+simpler metadata rules, string matching, or a general-purpose claim-verification
+prompt. That comparison is future work.
+
+**Annotation was principally by one adjudicator**, who was involved in
+developing the taxonomy. Several boundaries are interpretive — same versus
+related work, historical reporting versus current endorsement, plausible versus
+incorrect entity scope. Written rules and recorded rationales improve
+auditability, but they are not a substitute for independent duplicate annotation,
+and no agreement estimate is reported.
+
+**Model assistance entered both candidate discovery and diagnostic judgment.**
+Different model families and human confirmation reduce direct self-scoring but do
+not establish independence: models may share training data and interpretive
+priors.
+
+**A citation-marker parsing defect affects the claim-support results.** In the
+52-article run it affected 114 of 373 references carrying a claim-support
+finding, 100 of them where a marker followed terminal punctuation. The
+Insufficient Support and Overstatement numbers are therefore an exploratory
+selected-flag audit over rows with confirmed marker attribution, not category-wide
+precision.
+
+**The semantic panels carry one-sided cues.** All five multi-reference Wrong
+Entity items are positives; two no-PMID Misattribution references and one
+statistics/methods example occur only among positives. Only the cited-title cue
+was ablated — repeating the 40-item Wrong Entity run without titles gave the same
+37/40 and identical item-level verdicts. The others were not.
+
+**The Supersession arm is short and clustered.** It contributed 16 positives
+against a declared 20, and those 16 rows represent only eight distinct superseded
+sources, with two sources accounting for nine rows. One Supersession control
+remained source-linkage-indeterminate and is excluded from the false-alarm
+denominator, leaving 55 fully verified controls rather than 56. Row-level
+confidence intervals treat rows as independent where sources, citing articles and
+faulty identifiers recur.
 
 **Evidence scope is PMC-only.** Band 2 reads abstracts, and full text only where
-PMC has it. A claim supported in a paper's Results but not its abstract is
-recorded as unestablished when only the abstract was available. The evidence
-scope is stamped on every record, so this is visible per-pair — but it means F6
-rates are an upper bound on abstract-scoped runs.
+PMC has it. The scope is stamped on every record, so it is visible per-pair.
 
-**F4 has a non-reportable development mode.** Its strength judgments are not
-corpus-calibrated. The mode is recorded in the run manifest; numbers from it are
-for engineering, not for a Results section.
-
-**F5 ships escalation-only.** Contradiction detection and the three-criterion
-supersession gate run, but autonomous replacement (Path A) is locked off in this
-build, so a case can be computed Path-A eligible and still be emitted as Path B.
-The "successful repair" metric therefore does not apply to F5.
-
-**F7 is pending an advisor lock** on the entity authorities. It runs, and its
-findings are not reportable until that lock.
+**Repair is not evaluated.** Each diagnosis maps to a corrective action, and F5
+ships escalation-only: contradiction detection and the supersession gate run, but
+autonomous replacement is locked off in this build. Whether a proposed repair
+identifies the right work, retrieves an appropriate replacement, and preserves
+the claim without overstatement is untested.
 
 **The freeze subsystem is deferred, not live.** Several trust-boundary roles are
 specified but not instantiated, and `MINT_INPUTS.json` does not exist in this
-tree, so `mint_v1 --config` cannot run: the role→module manifest cannot be
-completed and the bootstrap fails closed rather than minting a config it cannot
-verify. What the subsystem still does carry is the evidence that matters for a
-Methods claim — the two sealed prompt packages, which show the prompts were
-frozen before the graded run.
+tree, so `mint_v1 --config` cannot run. What it still carries is the two sealed
+prompt packages — the evidence that the prompts were frozen before the graded
+run.
 
-**F4 has no worked example** in the per-category case set
-(`tests/characterization/test_taxonomy_cases.py`). Its decision rule is
-specified and unit-tested; what is missing is a published citing/cited pair to
-point at. The case is a strict `xfail` rather than an invented example, so the
-gap fails loudly instead of looking complete.
+**Overstatement has no worked example** in the per-category case set
+(`tests/characterization/test_taxonomy_cases.py`). Its decision rule is specified
+and unit-tested; what is missing is a published citing/cited pair to point at. The
+case is a strict `xfail` rather than an invented example, so the gap fails loudly
+instead of looking complete.
 
 ## Citation
 
 ```bibtex
-@software{cde,
-  author  = {Liu, Zhandong},
-  title   = {Citation Diagnosis Engine: fine-grained diagnosis of
-             biomedical citation faults},
-  year    = {2026},
-  note    = {Repository URL to be added on publication}
+@inproceedings{liu2026cde,
+  author    = {Liu, Aston and Roberts, Kirk},
+  title     = {Diagnosing Biomedical Citation Faults: An Eight-Category
+               Taxonomy and Multi-Design Evaluation},
+  year      = {2026},
+  note      = {Venue and DOI to be added on publication}
 }
 ```
 
 ## Contact
 
-Zhandong Liu — zhandong.liu@bcm.edu
+Aston Liu<sup>1,2</sup>, Kirk Roberts, PhD<sup>2</sup>
+
+1. Kinkaid School, Houston, TX, USA
+2. McWilliams School of Biomedical Informatics, UTHealth Houston, Houston, TX, USA

@@ -20,7 +20,8 @@ preprint, a translation), `unscoreable` (nothing to compare, e.g. no title), and
 `unverifiable` (no identifier at all).
 
 The important asymmetry: a search that did not *answer* is never evidence of
-absence. F1 accuses an author of inventing a reference, so it requires all three
+absence. An Unresolvable Reference finding is read by authors as an accusation
+whether or not it is phrased as one, so it requires all three
 databases to have replied and none to have found the title. A transport failure,
 a rate limit, or a skipped search holds the reference instead. The same rule
 appears again in Band 2 and is the single most consequential design decision in

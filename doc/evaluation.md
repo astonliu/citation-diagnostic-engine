@@ -43,19 +43,49 @@ fixed corpus for exactly this reason.
 
 ## What is reportable today
 
-Reportable: Band 1's F1/F2/F8 dispositions; Band 2's F6 route and the coverage
-decomposition behind it; the hold and exclusion rates; the Path A / Path B split
-for F5, which characterises F5 difficulty in the corpus.
+The four evaluation designs estimate **different quantities and must never be
+pooled into one number**. Route and selected-flag audits estimate confirmation
+among reviewed flags. The constructed panels estimate detection on hunted
+positives and false alarms on selected controls. No design estimates population
+prevalence, population recall, repair accuracy, or end-to-end eight-class
+performance.
 
-**Not reportable as a headline number:**
+- **Unresolvable Reference and Retracted Source** — exhaustive adjudication of
+  locked route-specific flagged strata. Flag precision for the audited route
+  only; not recall, not a per-paper rate.
+- **Wrong Reference** — held-out seed 47, after earlier development seeds were
+  spent. Precision among flags, characterising the seed 47 configuration rather
+  than every later pipeline version.
+- **Insufficient Support and Overstatement** — an *exploratory selected-flag
+  audit*, not end-to-end precision. A citation-marker parsing defect affected 114
+  of 373 references carrying a claim-support finding, so the audit selected rows
+  with confirmed marker attribution and, for Insufficient Support, available full
+  text. Report determinate precision and the worst-case convention that counts
+  every ambiguous judgment as incorrect, side by side; never the determinate
+  figure alone.
+- **Misattribution, Supersession, Wrong Entity** — constructed matched panels.
+  Positives were located by targeted search and human-confirmed; controls were
+  built to resemble faults on specified surface dimensions. Detection is
+  conditional on hunted positives, and the control result describes the panels,
+  not deployment false-alarm rates. Report per stratum; no pooled estimate,
+  because the strata were assembled differently.
 
-- **F4** has a development mode that is not corpus-calibrated. Its numbers are
-  for engineering, not for the Results section, and the manifest records which
-  mode produced them.
-- **F5** ships escalation-only (Path B). Contradiction detection runs; autonomous
-  replacement (Path A) is deferred, so the "successful repair" metric does not
-  apply to F5 cases.
-- **F7** is pending an advisor lock on the entity authorities.
+**Denominator care in the panels.** Two control counts are both correct and are
+easy to swap by accident. The control arms as *built* are 20 Misattribution,
+**16** Supersession, 20 Wrong Entity — 56 candidate controls. The false-alarm
+denominators as *scored* are 20, **15**, 20 — 55 fully verified controls. The
+difference is one Supersession control that remained source-linkage-indeterminate
+and is excluded from the false-alarm denominator, not from the panel. Use 16 when
+describing how the arm was constructed; use 15 in any rate whose denominator is
+controls the system was scored against. Row-level intervals assume more
+independence than the data provide: the 16 Supersession positive rows represent
+eight distinct superseded sources, and two sources account for nine of them.
+Supersession is most honestly read by distinct source.
+
+**One-sided cues are a property of the panels and belong in every report of
+them.** Only the Wrong Entity cited-title cue was ablated; the run without titles
+returned the same 37/40 and identical item-level verdicts. The others stand
+unablated and must be disclosed rather than left unmentioned.
 
 ## Protocol
 
@@ -100,6 +130,11 @@ Three constraints keep that precision number meaning something:
 
 Report it as **precision of the pipeline as configured**, not as "the engine's
 precision" in the abstract.
+
+**Agreement.** None is reported. Annotation was principally by one adjudicator,
+so there is no double-annotated overlap to compute a statistic over — neither
+Cohen's κ nor Gwet's AC1. This is carried as a limitation, and independent
+duplicate annotation is the first item of future work. See `preregistration.md`.
 
 **Verifiers.** The judge is a different model family from the generator, and the
 launcher refuses to start a run where it is not — see `preregistration.md`. No

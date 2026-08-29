@@ -84,16 +84,27 @@ generalization, and human adjudication is named as a limitation.
 
 ## Agreement
 
-Cohen's κ ≥ 0.60 on the IAA subset (≥100 examples double-annotated), κ ≥ 0.70
-"good". A taxonomy pre-pilot of ~20 examples targets only the F3/F6 and F4/F6
-confusable pairs — F8 is deterministic and excluded from κ, and IAA is over
-F3–F7. Proceed if each pair holds κ ≥ 0.60; otherwise merge the offending pair
-and report the pilot as the justification. Any second annotator must reach
-κ ≥ 0.60 against gold on a 20-example calibration set before paid annotation,
-and that calibration κ is reported.
+**What the paper reports, and it is not an agreement statistic.** Gold-standard
+annotation was performed principally by one adjudicator, who was involved in
+developing the taxonomy. No inter-annotator agreement estimate is reported,
+because there is no second independent pass to compute one over. This is stated
+as a limitation rather than worked around.
 
-Amendment 3 operationalized F5 as a deterministic three-criterion gate, which is
-what makes it annotatable at acceptable κ at all. See `taxonomy.md`.
+That supersedes everything this section previously said about a reliability
+statistic. Earlier drafts specified Cohen's κ gates — a ≥ 0.60 IAA threshold, a
+κ ≥ 0.70 "good" band, an F3/F6 and F4/F6 pre-pilot, and a second-annotator
+calibration gate — and a later revision replaced them with Gwet's AC1. Neither is
+in force. No κ gate is applied, and no AC1 figure is reported, because neither
+statistic has a double-annotated overlap to be computed on.
+
+Several category boundaries are interpretive and are the ones a second annotator
+would be needed to test: same versus related work, historical reporting versus
+current endorsement, and plausible versus incorrect entity scope. Written decision
+rules and recorded rationales improve auditability; they do not replace
+independent duplicate annotation.
+
+The highest-priority item in future work is independent, category-specific
+annotation with disagreement adjudication and explicit reporting of reliability.
 
 ## Dataset
 
@@ -116,16 +127,17 @@ should be.
 F3–F7 gold set as a naturally-occurring sample with a denominator. It is amended
 to the precision-on-flagged-set audit described in `evaluation.md`. Everything
 else converts unchanged: the taxonomy, the decision rules, the annotator and
-adjudication protocol, and every confirmed positive already sourced. The
-solo-annotation assumption and the F3–F7 pre-pilot κ gate are superseded with it.
+adjudication protocol, and every confirmed positive already sourced. The F3–F7
+pre-pilot κ gate goes with it — see Agreement above.
 
-**One item is genuinely open and is not settled here.** The 3 July decisions
-compute κ *on the adjudications*. A queued amendment holds that this is the wrong
-basis — that κ belongs on independent pre-adjudication labels — and that
-"sensitivity on known positives" should be framed as a diagnostic on the
-confirmed set rather than as a lower bound on population recall. ZD supplies that
-wording; it is explicitly not to be drafted by an implementer. It is recorded
-here because this is now the only place it is written down.
+**One item is genuinely open and is not settled here.** The κ half of the queued
+amendment is moot: κ is no longer reported on any basis, adjudications or
+independent labels. What remains open is the framing of sensitivity on known
+positives — whether it is reported as a diagnostic on the confirmed set or as a
+lower bound on population recall. `evaluation.md` currently states the diagnostic
+reading: sensitivity on known positives, never population recall. ZD supplies the
+final wording; it is explicitly not to be drafted by an implementer. It is recorded here because this is the only place it is written
+down.
 
 **An invariant, not a preference.** No model assigns a semantic label or curates
 ground truth at any point in this project.

@@ -1,4 +1,4 @@
-"""Citation Diagnosis Engine -- evidence-backed diagnosis of citation faults.
+"""Citation Diagnostic Engine -- evidence-backed diagnosis of citation faults.
 
 The package is split by what each part DOES, not by which taxonomy category
 motivated it:

@@ -1,1 +1,1 @@
-"""Tests for the citation diagnosis engine."""
+"""Tests for the citation diagnostic engine."""
