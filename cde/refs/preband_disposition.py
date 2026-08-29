@@ -1,0 +1,435 @@
+"""The canonical Band-1 -> Band-2 disposition artifact (schema ``preband_disposition_v2``).
+
+Band 1 (F1/F2/F8, deterministic) and Band 2 (F3-F7, judgment) do not share code.
+They join through ONE file: a citation_id -> label map that Band 2's orchestrator
+consumes and fails closed against. This module is the only sanctioned producer of
+that file.
+
+WHY THE LOG, NEVER THE PREDICTION FILE. ``run.run`` writes two artifacts. The
+prediction file drops every ``UNVERIFIABLE`` and ``UNSCOREABLE`` reference
+(``run.py`` -- "unverifiable AND unscoreable refs are dropped from the prediction
+set"), because those carry no taxonomy label. Feeding it to Band 2 would make a
+reference Band 1 merely could not score indistinguishable from a reference Band 1
+never saw at all: both land in Band 2's ``excluded_preband_disposition_missing``
+bucket, which is the alarm for "this document was never covered by Band 1". A
+routine ~4% unscoreable rate would keep that alarm permanently lit and therefore
+useless. The LOG record is lossless -- one row per reference, carrying the
+pipeline state verbatim -- so it is the only correct source.
+
+WHAT THE ARTIFACT BINDS. A disposition is not just rows: it defines the POPULATION
+every downstream rate is a fraction of. So the sidecar manifest binds the exact
+bytes (sha256 over the artifact as written), the schema version, the F2 commit
+that produced it, the corpus it was built over, and the row/label accounting. A
+disposition whose provenance is not recorded cannot be reconstructed, and a number
+computed from it cannot be defended.
+
+WHAT v2 ADDED, AND WHY IT HAD TO. v1 carried citation_id, citing_pmcid, cleared
+and label -- and nothing about WHICH WORK Band 1 had cleared the reference to. So
+Band 2 re-derived the identity from the reference's own CLAIMED pmid, and every
+reference Band 1 had resolved through a DOI lookup was dropped as
+``excluded_no_cited_pmid`` seconds after being cleared. v2 carries the resolved
+identifier with its source and status (:func:`resolved_identifier`). It is never
+guessed: an unresolved reference carries an empty value and says so.
+
+This module performs NO network call and NO model call. It is a pure transform
+over records ``run.run`` already wrote.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+from typing import Iterable
+
+#: Bump when the row shape, the label vocabulary, or the id format changes.
+#: Band 2's loader pins this string and refuses an artifact declaring anything else.
+DISPOSITION_SCHEMA = "preband_disposition_v2"
+
+# --- the label vocabulary, split by what it AUTHORIZES -------------------
+#: Band 2 may judge this reference: Band 1 verified the right, existing work.
+#: An F2 CLEAR. `same_work` is deliberately NOT here -- see BAND2_ADMITTING_LABELS.
+CLEARING_LABELS = frozenset({"cleared"})
+#: A deterministic identity rule proved the resolved record is the same work or a
+#: variant of it. Machine-final: not a clear, not an abstain, not a fault.
+SAME_WORK_LABELS = frozenset({"same_work"})
+#: WHAT BAND 2 MAY JUDGE -- which is NOT the same set as what F2 counts as clear,
+#: and conflating the two is the defect this pair of names exists to prevent.
+#:
+#: A same-work row is excluded from the F2 scoreable denominator (counting it as
+#: cleared would inflate a precision-only metric) AND admitted to the F3-F7 band
+#: (a translated or retitled paper is the right paper, so claim support is
+#: unaffected and withholding it would drop band population for an irrelevant
+#: reason). The artifact row says both true things at once: `cleared: false`,
+#: and a label this set admits.
+BAND2_ADMITTING_LABELS = CLEARING_LABELS | SAME_WORK_LABELS
+#: Band 1 asserted a deterministic fault. Band 2 must not judge it.
+FAULT_LABELS = frozenset({"F1", "F2", "F8"})
+#: Band 1 reached no verdict. Band 2 must not judge it, and must be able to tell
+#: this apart from "Band 1 never saw this reference".
+OPERATIONAL_LABELS = frozenset({"unverifiable", "unscoreable", "human_review"})
+DISPOSITION_LABELS = (CLEARING_LABELS | SAME_WORK_LABELS | FAULT_LABELS
+                      | OPERATIONAL_LABELS)
+
+#: ``<citing_pmcid>:<ref_id>`` -- the format both parsers emit
+#: (``parser.parse_pmc_xml``). Verified byte-identical across the Band 1 and
+#: Band 2 checkouts; pinned here so a drift on either side fails loudly.
+CITATION_ID_RE = re.compile(r"^PMC\d+:\S+$")
+
+ARTIFACT_FILENAME = "preband_disposition_v2.jsonl"
+MANIFEST_SUFFIX = ".manifest.json"
+ATTESTED_CHECKS = ("F1", "F2", "F8")
+
+
+class DispositionBuildError(ValueError):
+    """The log source cannot produce a valid canonical artifact."""
+
+
+def _sha256_file(path: str) -> str:
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def head_commit(repo_dir: str) -> str:
+    """The producing commit, read from ``.git`` without shelling out.
+
+    Returns "" when it cannot be determined -- callers that need provenance must
+    treat "" as a hard failure rather than writing an unattributed artifact.
+    """
+    head_path = os.path.join(repo_dir, ".git", "HEAD")
+    try:
+        with open(head_path, encoding="utf-8") as f:
+            head = f.read().strip()
+    except OSError:
+        return ""
+    if not head.startswith("ref:"):
+        return head if re.fullmatch(r"[0-9a-f]{40}", head) else ""
+    ref = head.split(":", 1)[1].strip()
+    try:
+        with open(os.path.join(repo_dir, ".git", ref), encoding="utf-8") as f:
+            oid = f.read().strip()
+        return oid if re.fullmatch(r"[0-9a-f]{40}", oid) else ""
+    except OSError:
+        pass
+    # Packed refs fallback.
+    try:
+        with open(os.path.join(repo_dir, ".git", "packed-refs"),
+                  encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) == 2 and parts[1] == ref:
+                    return parts[0]
+    except OSError:
+        pass
+    return ""
+
+
+def _iter_log_records(source) -> "Iterable[dict]":
+    """Accept a list of log-record dicts or a path to the log JSONL."""
+    if isinstance(source, (str, os.PathLike)):
+        with open(source, encoding="utf-8") as f:
+            for lineno, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise DispositionBuildError(
+                        f"log line {lineno} is not valid JSON: {exc}") from exc
+                if not isinstance(rec, dict):
+                    raise DispositionBuildError(
+                        f"log line {lineno} is not a JSON object")
+                yield rec
+        return
+    for rec in source:
+        yield rec
+
+
+#: The identifier kinds this artifact may carry forward. A kind is only ever the
+#: kind of an identifier Band 1 ACTUALLY RESOLVED; there is deliberately no value
+#: meaning "probably a PMID".
+IDENTIFIER_PMID = "pmid"
+IDENTIFIER_DOI = "doi"
+IDENTIFIER_NONE = ""
+
+#: Resolution status, as distinct from the identifier itself. "resolved" means
+#: Band 1 matched the cited work to a record; "unresolved" means it did not.
+#: Band 2 needs both -- an empty value with status "resolved" is exactly the
+#: PMID-less DOI match that used to be dropped.
+STATUS_RESOLVED = "resolved"
+STATUS_UNRESOLVED = "unresolved"
+
+
+def resolved_identifier(rec: dict) -> dict:
+    """The identifier Band 1 actually resolved, with its source and status.
+
+    THE JOIN DEFECT THIS CLOSES. ``preband_disposition_v1`` carried four fields --
+    citation_id, citing_pmcid, cleared, label -- and nothing about WHICH work
+    Band 1 had cleared the reference to. Band 2 therefore re-derived the identity
+    from the reference's own CLAIMED pmid, and a reference whose bibliography
+    entry prints no PMID was dropped as ``excluded_no_cited_pmid`` even though
+    Band 1 had resolved it minutes earlier through a DOI lookup. 77 cleared
+    references on the natural run died in that gap.
+
+    NEVER GUESSED. Only an identifier present in the record is emitted; a
+    reference Band 1 could not resolve carries an empty value, kind
+    :data:`IDENTIFIER_NONE`, and status :data:`STATUS_UNRESOLVED`. The PMID is
+    preferred when there is one because it is the identifier every downstream
+    retrieval path takes, and the DOI is carried when there is not -- but neither
+    is invented, and carrying a DOI is NOT a claim that the work's text can be
+    fetched (see ``terminal_outcome.REASON_CITED_TEXT_UNAVAILABLE``).
+    """
+    retrieved = rec.get("retrieved") or {}
+    claimed = rec.get("claimed") or {}
+    log = rec.get("log") or {}
+    resolved = retrieved.get("resolved") is True
+
+    pmid = str(retrieved.get("pmid") or "").strip()
+    if not pmid:
+        pmid = str(claimed.get("claimed_pmid") or "").strip()
+        pmid_source = "claimed_reference" if pmid else ""
+    else:
+        pmid_source = "pubmed"
+    if pmid:
+        return {
+            "value": pmid,
+            "kind": IDENTIFIER_PMID,
+            "source": pmid_source,
+            "status": STATUS_RESOLVED if resolved else STATUS_UNRESOLVED,
+            "decided_by": str(log.get("decided_by") or ""),
+        }
+
+    doi = str(retrieved.get("doi") or "").strip()
+    if not doi:
+        doi = str(claimed.get("claimed_doi") or "").strip()
+    if doi:
+        return {
+            "value": doi,
+            "kind": IDENTIFIER_DOI,
+            # Which provider's metadata backed the match -- crossref, datacite --
+            # so a reader can weigh the resolution rather than take it on trust.
+            "source": str(log.get("doi_metadata_source")
+                          or log.get("doi_lookup_status") or "") or "reference",
+            "status": STATUS_RESOLVED if resolved else STATUS_UNRESOLVED,
+            "decided_by": str(log.get("decided_by") or ""),
+        }
+
+    return {
+        "value": "",
+        "kind": IDENTIFIER_NONE,
+        "source": "",
+        "status": STATUS_RESOLVED if resolved else STATUS_UNRESOLVED,
+        "decided_by": str(log.get("decided_by") or ""),
+    }
+
+
+def build_rows(log_source) -> list:
+    """Canonical rows from the LOSSLESS log source, validated as it goes.
+
+    Raises ``DispositionBuildError`` on a duplicate citation_id, a non-canonical
+    citation_id, a missing/None label, or a label outside the vocabulary. The
+    producer refuses rather than emitting an artifact the consumer would have to
+    guess about.
+    """
+    rows: list = []
+    seen: dict = {}
+    for i, rec in enumerate(_iter_log_records(log_source)):
+        cid = rec.get("citation_id")
+        if not isinstance(cid, str) or not cid.strip():
+            raise DispositionBuildError(
+                f"log record {i} has no usable citation_id: {cid!r}")
+        cid = cid.strip()
+        if not CITATION_ID_RE.match(cid):
+            raise DispositionBuildError(
+                f"log record {i} citation_id {cid!r} is not canonical "
+                f"'<citing_pmcid>:<ref_id>' (expected e.g. 'PMC12967000:bibr1')")
+        label = rec.get("label")
+        if not isinstance(label, str) or not label.strip():
+            raise DispositionBuildError(
+                f"{cid}: label is missing or not a string ({label!r}); an "
+                "unprocessed reference must never reach the disposition")
+        label = label.strip()
+        if label not in DISPOSITION_LABELS:
+            raise DispositionBuildError(
+                f"{cid}: label {label!r} is outside schema {DISPOSITION_SCHEMA} "
+                f"({sorted(DISPOSITION_LABELS)})")
+        if cid in seen:
+            raise DispositionBuildError(
+                f"duplicate citation_id {cid!r}: first seen as "
+                f"{seen[cid]!r}, again as {label!r}. A duplicate id is a join "
+                "defect -- last-write-wins could clear a known F2.")
+        seen[cid] = label
+        rows.append({
+            "citation_id": cid,
+            "label": label,
+            "citing_pmcid": cid.split(":", 1)[0],
+            "cleared": label in CLEARING_LABELS,
+            # Kept alongside `cleared`, never folded into it: a same-work row is
+            # admissible to the band AND not an F2 clear, and one boolean cannot
+            # say both.
+            "band2_admitted": label in BAND2_ADMITTING_LABELS,
+            "unscoreable_reason": str(
+                (rec.get("log") or {}).get("unscoreable_reason") or ""),
+            # The fifth field, and the reason this schema needed a fifth: without
+            # it Band 2 re-derives identity from the CLAIMED pmid and discards
+            # every reference Band 1 resolved by DOI. See resolved_identifier().
+            "resolved_identifier": resolved_identifier(rec),
+        })
+    return rows
+
+
+def unscoreable_reason_counts(rows: "Iterable[dict]") -> dict:
+    """Unscoreable rows tallied by the reason they carry."""
+    out: dict = {}
+    for r in rows:
+        reason = str(r.get("unscoreable_reason") or "")
+        if r.get("label") == "unscoreable":
+            key = reason or "unspecified"
+            out[key] = out.get(key, 0) + 1
+    return dict(sorted(out.items()))
+
+
+def label_counts(rows: "Iterable[dict]") -> dict:
+    out: dict = {}
+    for r in rows:
+        out[r["label"]] = out.get(r["label"], 0) + 1
+    return dict(sorted(out.items()))
+
+
+def _normalise_check_attestations(value) -> dict:
+    """Canonical per-check evidence for the Band-1 checks.
+
+    Omission is represented explicitly as ``performed=False`` rather than by
+    absence, so a checked-clean disposition and a never-checked disposition can
+    never have the same provenance bytes.
+    """
+    supplied = value if isinstance(value, dict) else {}
+    unknown = sorted(set(supplied) - set(ATTESTED_CHECKS))
+    if unknown:
+        raise DispositionBuildError(
+            f"check_attestations has unknown check(s): {unknown}")
+    out = {}
+    for name in ATTESTED_CHECKS:
+        raw = supplied.get(name)
+        if raw is None:
+            out[name] = {
+                "performed": False, "source": "", "snapshot_date": "",
+                "attempted": 0, "answered": 0, "transport_failed": 0,
+                "fired": 0, "reason": "not_attested",
+            }
+            continue
+        if not isinstance(raw, dict):
+            raise DispositionBuildError(
+                f"check_attestations.{name} must be an object")
+        performed = raw.get("performed")
+        source = raw.get("source", "")
+        snapshot = raw.get("snapshot_date", "")
+        if type(performed) is not bool:
+            raise DispositionBuildError(
+                f"check_attestations.{name}.performed must be a bool")
+        if not isinstance(source, str) or not isinstance(snapshot, str):
+            raise DispositionBuildError(
+                f"check_attestations.{name} source and snapshot_date must be strings")
+        if performed and (not source.strip() or not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}", snapshot.strip())):
+            raise DispositionBuildError(
+                f"performed {name} requires a nonblank source and an ISO "
+                "YYYY-MM-DD snapshot_date")
+        counts = {}
+        for field in ("attempted", "answered", "transport_failed", "fired"):
+            count = raw.get(field, 0)
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                raise DispositionBuildError(
+                    f"check_attestations.{name}.{field} must be a nonnegative int")
+            counts[field] = count
+        out[name] = {
+            "performed": performed,
+            "source": source.strip(),
+            "snapshot_date": snapshot.strip(),
+            **counts,
+            "reason": str(raw.get("reason") or "").strip(),
+        }
+    return out
+
+
+def write_disposition(log_source, out_path: str, *, f2_commit: str,
+                      corpus_manifest_path: str = "",
+                      generated_by: str = "",
+                      generated_at: str = "",
+                      check_attestations=None) -> dict:
+    """Write the canonical artifact plus its binding manifest; return the manifest.
+
+    ``f2_commit`` is REQUIRED and must be a full 40-hex OID: the artifact defines
+    the population of every downstream rate, so an unattributed one is refused
+    rather than written. ``corpus_manifest_path``, when given, is hashed and
+    bound too, so the disposition and the frozen corpus cannot drift apart
+    silently.
+    """
+    if not re.fullmatch(r"[0-9a-f]{40}", (f2_commit or "").strip()):
+        raise DispositionBuildError(
+            "f2_commit must be a full 40-hex commit OID; an unattributed "
+            "disposition cannot be bound to the code that produced it")
+    rows = build_rows(log_source)
+    if not rows:
+        raise DispositionBuildError(
+            "refusing to write an EMPTY disposition: a zero-row artifact would "
+            "exclude every pair in Band 2 and complete as a clean empty run")
+
+    tmp = out_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    os.replace(tmp, out_path)
+
+    counts = label_counts(rows)
+    unscoreable_reasons = unscoreable_reason_counts(rows)
+    pmcids = sorted({r["citing_pmcid"] for r in rows})
+    attestations = _normalise_check_attestations(check_attestations)
+    manifest = {
+        "schema": DISPOSITION_SCHEMA,
+        "artifact_path": out_path,
+        "artifact_sha256": _sha256_file(out_path),
+        "f2_commit": f2_commit.strip(),
+        "source": "band1_log_records",
+        "source_note": (
+            "Built from the LOSSLESS log source. The prediction file is NOT a "
+            "valid source: it drops UNVERIFIABLE and UNSCOREABLE rows, which "
+            "would make an unscoreable reference indistinguishable from one "
+            "Band 1 never saw."
+        ),
+        "row_count": len(rows),
+        "label_counts": counts,
+        "cleared_count": sum(1 for r in rows if r["cleared"]),
+        # ADMITTED-TO-THE-BAND is a different number from CLEARED, and both are
+        # reported so neither can stand in for the other.
+        "band2_admitted_count": sum(
+            1 for r in rows if r["label"] in BAND2_ADMITTING_LABELS),
+        "same_work_count": counts.get("same_work", 0),
+        # Why each unscoreable row is unscoreable. `non_article_reference` is a
+        # SCOPE exclusion -- a database, website, report or book -- and reads as a
+        # methods sentence, not as a failure.
+        "unscoreable_by_reason": unscoreable_reasons,
+        "citing_pmcid_count": len(pmcids),
+        "citing_pmcids": pmcids,
+        "label_vocabulary": sorted(DISPOSITION_LABELS),
+        "clearing_labels": sorted(CLEARING_LABELS),
+        "band2_admitting_labels": sorted(BAND2_ADMITTING_LABELS),
+        "citation_id_pattern": CITATION_ID_RE.pattern,
+        "generated_by": generated_by,
+        "generated_at": generated_at,
+        "check_attestations": attestations,
+    }
+    if corpus_manifest_path:
+        manifest["corpus_manifest_path"] = corpus_manifest_path
+        manifest["corpus_manifest_sha256"] = _sha256_file(corpus_manifest_path)
+
+    manifest_path = out_path + MANIFEST_SUFFIX
+    tmp_m = manifest_path + ".tmp"
+    with open(tmp_m, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(tmp_m, manifest_path)
+    manifest["manifest_path"] = manifest_path
+    return manifest

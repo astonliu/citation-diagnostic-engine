@@ -1,0 +1,602 @@
+[
+ {
+  "id": "lang_fre_vs_bracket",
+  "entry": "language",
+  "verdict": "SAME_WORK",
+  "defends": "NLM bracket translation",
+  "note": "",
+  "w": {
+   "title": "Le glaucome juvenile au Cameroun",
+   "first_author": "Moune",
+   "year": 2007,
+   "volume": "305",
+   "pages": "69-77",
+   "journal": "Bull Soc Belge Ophtalmol",
+   "doi": ""
+  },
+  "r": {
+   "title": "[Juvenile glaucoma in Cameroon].",
+   "first_author": "Nyouma Moune",
+   "year": 2007,
+   "volume": "305",
+   "pages": "69-77",
+   "journal": "Bull Soc Belge Ophtalmol",
+   "doi": ""
+  }
+ },
+ {
+  "id": "lang_fre_written_eng_record",
+  "entry": "language",
+  "verdict": "SAME_WORK",
+  "defends": "reference-side translation, record is LA - eng",
+  "note": "German written title; the RECORD is eng, so resolved_language would have missed it",
+  "w": {
+   "title": "Die physiologischen Vorgänge im Eutergewebe der Milchkuh während der Trockenstehzeit",
+   "first_author": "Tho Seeth",
+   "year": 2015,
+   "volume": "128",
+   "pages": "Wa76-Wa83",
+   "journal": "Berl. Munch. Tierarztl. Wochenschr.",
+   "doi": ""
+  },
+  "r": {
+   "title": "[Physiological processes in the mammary gland tissue of dairy cows during the dry  period].",
+   "first_author": "Seeth Mt",
+   "year": 2015,
+   "volume": "128",
+   "pages": "76-83",
+   "journal": "Berl Munch Tierarztl Wochenschr",
+   "doi": ""
+  }
+ },
+ {
+  "id": "lang_por_written_eng_record",
+  "entry": "language",
+  "verdict": "SAME_WORK",
+  "defends": "bilingual journal, no vernacular title exists",
+  "note": "",
+  "w": {
+   "title": "Les tumeurs et pseudotumeurs du genou",
+   "first_author": "Larbi",
+   "year": 2016,
+   "volume": "97",
+   "pages": "295",
+   "journal": "J. Radiol. Diagn. Interv.",
+   "doi": "10.1016/j.diii.2016.06.004"
+  },
+  "r": {
+   "title": "Imaging of tumors and tumor-like lesions of the knee.",
+   "first_author": "Larbi",
+   "year": 2016,
+   "volume": "97",
+   "pages": "767-77",
+   "journal": "Diagn Interv Imaging",
+   "doi": "10.1016/j.diii.2016.06.004"
+  }
+ },
+ {
+  "id": "lang_cjk_script",
+  "entry": "language",
+  "verdict": "SAME_WORK",
+  "defends": "non-Latin script on one side",
+  "note": "",
+  "w": {
+   "title": "日本の梨における果実成熟期の遺伝子発現解析",
+   "first_author": "Itai",
+   "year": 1999,
+   "volume": "50",
+   "pages": "877-887",
+   "journal": "J Exp Bot",
+   "doi": "10.1093/jxb/50.336.877"
+  },
+  "r": {
+   "title": "A beta-D-xylosidase-like gene is expressed during fruit ripening in Japanese pear.",
+   "first_author": "Itai",
+   "year": 1999,
+   "volume": "50",
+   "pages": "877-887",
+   "journal": "J. Exp. Bot.",
+   "doi": "10.1093/jxb/50.336.877"
+  }
+ },
+ {
+  "id": "lang_cyrillic_dual_thin_address",
+  "entry": "subset",
+  "verdict": "FLAG",
+  "defends": "VOIDED 2026-08-14: entry was 'language' via RULE L2's resolved-bracket arm, which is cut (resolved-side only, out of contract). Both titles are Latin script and the transliterated-Russian written title carries no profiled non-English function words, so no language arm fires and the row now classifies 'subset'. Verdict is UNCHANGED at FLAG -- the address was always too thin -- so only the entry label moved. KNOWN L2 non-coverage: transliterated-Latin source titles are outside all remaining arms by design. Do not add a trigger: first authors Tynybekov vs Stepanov are not a transliteration pair, so one-work identity is unproven and an adjudicator decides it.",
+  "note": "",
+  "w": {
+   "title": "Zoonoznyye infektsii v ochagakh chumy Respubliki Kazakhstan [Zoonotic infections in plague foci of the Republic of Kazakhstan]",
+   "first_author": "Tynybekov",
+   "year": 1997,
+   "volume": "2",
+   "pages": "44-47",
+   "journal": "Meditsinskaia parazitologiia i parazitarnye bolezni",
+   "doi": ""
+  },
+  "r": {
+   "title": "[Zoonotic infections in plague foci of the Republic of Kazakhstan].",
+   "first_author": "Stepanov",
+   "year": 1997,
+   "volume": "",
+   "pages": "44-7",
+   "journal": "Med Parazitol (Mosk)",
+   "doi": ""
+  }
+ },
+ {
+  "id": "cont_statpearls_clean_equal",
+  "entry": "container",
+  "verdict": "SAME_WORK",
+  "defends": "strip container text, compare exactly",
+  "note": "",
+  "w": {
+   "title": "Ewing Sarcoma. StatPearls. Treasure",
+   "first_author": "Durer",
+   "year": 2022,
+   "volume": "",
+   "pages": "",
+   "journal": "",
+   "doi": ""
+  },
+  "r": {
+   "title": "Ewing Sarcoma.",
+   "first_author": "Durer",
+   "year": 2026,
+   "volume": "",
+   "pages": "",
+   "journal": "",
+   "doi": ""
+  }
+ },
+ {
+  "id": "cont_statpearls_plural_differs",
+  "entry": "container",
+  "verdict": "FLAG",
+  "defends": "exact compare, no fuzzy",
+  "note": "",
+  "w": {
+   "title": "Clavicle Fractures. StatPearls. Treasure Island",
+   "first_author": "Hyland",
+   "year": 2022,
+   "volume": "",
+   "pages": "",
+   "journal": "",
+   "doi": ""
+  },
+  "r": {
+   "title": "Clavicle Fracture.",
+   "first_author": "Hyland",
+   "year": 2026,
+   "volume": "",
+   "pages": "",
+   "journal": "",
+   "doi": ""
+  }
+ },
+ {
+  "id": "cont_press_de_banca",
+  "entry": "language",
+  "verdict": "SAME_WORK",
+  "defends": "`press` must not fire container as a substring",
+  "note": "",
+  "w": {
+   "title": "Efecto del entrenamiento de la fuerza en el press de banca en jugadores",
+   "first_author": "Garcia",
+   "year": 2015,
+   "volume": "24",
+   "pages": "101-108",
+   "journal": "Rev Andal Med Deporte",
+   "doi": "10.1016/j.ramd.2015.02.001"
+  },
+  "r": {
+   "title": "Effect of strength training on the bench press in players.",
+   "first_author": "Garcia",
+   "year": 2015,
+   "volume": "24",
+   "pages": "101-108",
+   "journal": "Rev Andal Med Deporte",
+   "doi": "10.1016/j.ramd.2015.02.001"
+  }
+ },
+ {
+  "id": "cont_expression_substring",
+  "entry": null,
+  "verdict": "FLAG",
+  "defends": "`expression` must not fire container",
+  "note": "",
+  "w": {
+   "title": "Gene expression profiling of hepatic stellate cells",
+   "first_author": "Ito",
+   "year": 2011,
+   "volume": "54",
+   "pages": "1-9",
+   "journal": "Hepatology",
+   "doi": "10.1002/hep.24001"
+  },
+  "r": {
+   "title": "Proteomic analysis of pancreatic islet beta cells.",
+   "first_author": "Sato",
+   "year": 2013,
+   "volume": "12",
+   "pages": "441-450",
+   "journal": "J Proteome Res",
+   "doi": "10.1021/pr300921k"
+  }
+ },
+ {
+  "id": "subset_leading_series_phrase",
+  "entry": "subset",
+  "verdict": "SAME_WORK",
+  "defends": "leading series phrase dropped, corporate author dropped",
+  "note": "",
+  "w": {
+   "title": "Focus: Health Equity: Gender Issues in Obstructive Sleep Apnea",
+   "first_author": "Geer",
+   "year": 2021,
+   "volume": "94",
+   "pages": "487",
+   "journal": "Yale J. Biol. Med.",
+   "doi": ""
+  },
+  "r": {
+   "title": "Gender Issues in Obstructive Sleep Apnea.",
+   "first_author": "Geer",
+   "year": 2021,
+   "volume": "94",
+   "pages": "487-496",
+   "journal": "Yale J Biol Med",
+   "doi": ""
+  }
+ },
+ {
+  "id": "subset_interior_quote",
+  "entry": "subset",
+  "verdict": "SAME_WORK",
+  "defends": "interior portion quoted",
+  "note": "",
+  "w": {
+   "title": "Applications of the generalized gradient approximation for exchange and correlation",
+   "first_author": "Perdew",
+   "year": 1992,
+   "volume": "46",
+   "pages": "6671-6687",
+   "journal": "Phys Rev B",
+   "doi": "10.1103/PhysRevB.46.6671"
+  },
+  "r": {
+   "title": "Atoms, molecules, solids, and surfaces: Applications of the generalized gradient approximation for exchange and correlation.",
+   "first_author": "Perdew",
+   "year": 1992,
+   "volume": "46",
+   "pages": "6671-6687",
+   "journal": "Phys. Rev. B",
+   "doi": "10.1103/PhysRevB.46.6671"
+  }
+ },
+ {
+  "id": "subset_leading_question_dropped",
+  "entry": "subset",
+  "verdict": "SAME_WORK",
+  "defends": "leading question dropped, author slot corrupted",
+  "note": "",
+  "w": {
+   "title": "A review of interventions for adolescent depression in primary care",
+   "first_author": "listen?",
+   "year": 2018,
+   "volume": "33",
+   "pages": "22-31",
+   "journal": "J Adolesc Health",
+   "doi": "10.1016/j.jadohealth.2018.01.004"
+  },
+  "r": {
+   "title": "Do they listen? A review of interventions for adolescent depression in primary care.",
+   "first_author": "Rodgers",
+   "year": 2018,
+   "volume": "33",
+   "pages": "22-31",
+   "journal": "J Adolesc Health",
+   "doi": "10.1016/j.jadohealth.2018.01.004"
+  }
+ },
+ {
+  "id": "subset_soyabean_vs_poultry",
+  "entry": "subset",
+  "verdict": "FLAG",
+  "defends": "ONE content word swapped - the row that sets the threshold at 4",
+  "note": "",
+  "w": {
+   "title": "Evaluation of soyabean meal as a protein source in canine foods",
+   "first_author": "Yamka",
+   "year": 2003,
+   "volume": "109",
+   "pages": "121-132",
+   "journal": "Anim. Feed Sci. Technol",
+   "doi": "10.1016/S0377-8401(03)00203-7"
+  },
+  "r": {
+   "title": "Evaluation of low-ash poultry meal as a protein source in canine foods.",
+   "first_author": "Yamka",
+   "year": 2003,
+   "volume": "81",
+   "pages": "2279-84",
+   "journal": "J Anim Sci",
+   "doi": "10.2527/2003.8192279x"
+  }
+ },
+ {
+  "id": "subset_commentary_blocked",
+  "entry": null,
+  "verdict": "FLAG",
+  "defends": "blocklist",
+  "note": "",
+  "w": {
+   "title": "Statins and muscle injury in older adults",
+   "first_author": "Ward",
+   "year": 2019,
+   "volume": "70",
+   "pages": "12-20",
+   "journal": "J Am Geriatr Soc",
+   "doi": "10.1111/jgs.15701"
+  },
+  "r": {
+   "title": "Commentary on: Statins and muscle injury in older adults.",
+   "first_author": "Ward",
+   "year": 2019,
+   "volume": "70",
+   "pages": "12-20",
+   "journal": "J Am Geriatr Soc",
+   "doi": "10.1111/jgs.15701"
+  }
+ },
+ {
+  "id": "subset_corrigendum_blocked",
+  "entry": null,
+  "verdict": "FLAG",
+  "defends": "blocklist",
+  "note": "",
+  "w": {
+   "title": "Cardiac outcomes after myocardial infarction in diabetic patients",
+   "first_author": "Nolan",
+   "year": 2020,
+   "volume": "41",
+   "pages": "301-310",
+   "journal": "Eur Heart J",
+   "doi": "10.1093/eurheartj/ehz001"
+  },
+  "r": {
+   "title": "Corrigendum to: Cardiac outcomes after myocardial infarction in diabetic patients.",
+   "first_author": "Nolan",
+   "year": 2020,
+   "volume": "41",
+   "pages": "301-310",
+   "journal": "Eur Heart J",
+   "doi": "10.1093/eurheartj/ehz001"
+  }
+ },
+ {
+  "id": "subset_too_short",
+  "entry": null,
+  "verdict": "FLAG",
+  "defends": "`Diabetes mellitus` cannot identify a paper",
+  "note": "",
+  "w": {
+   "title": "Diabetes mellitus",
+   "first_author": "Cho",
+   "year": 2018,
+   "volume": "61",
+   "pages": "1-8",
+   "journal": "Diabetologia",
+   "doi": "10.1007/s00125-018-4711-2"
+  },
+  "r": {
+   "title": "Diabetes mellitus and the risk of incident heart failure in older adults.",
+   "first_author": "Cho",
+   "year": 2018,
+   "volume": "61",
+   "pages": "1-8",
+   "journal": "Diabetologia",
+   "doi": "10.1007/s00125-018-4711-2"
+  }
+ },
+ {
+  "id": "subset_generic_run",
+  "entry": null,
+  "verdict": "FLAG",
+  "defends": "shared run carries no distinctive word",
+  "note": "",
+  "w": {
+   "title": "A new study of the data",
+   "first_author": "Ling",
+   "year": 2016,
+   "volume": "9",
+   "pages": "55-60",
+   "journal": "Data Sci J",
+   "doi": ""
+  },
+  "r": {
+   "title": "A new study of the data from the national cardiac surgery audit.",
+   "first_author": "Ling",
+   "year": 2016,
+   "volume": "9",
+   "pages": "55-60",
+   "journal": "Data Sci J",
+   "doi": ""
+  }
+ },
+ {
+  "id": "addr_shared_doi_different_paper",
+  "entry": null,
+  "verdict": "FLAG",
+  "defends": "same DOI/volume/page, unrelated titles",
+  "note": "",
+  "w": {
+   "title": "Compliance and adherence in glaucoma management",
+   "first_author": "Robin",
+   "year": 2011,
+   "volume": "59",
+   "pages": "93",
+   "journal": "Indian J Ophthalmol",
+   "doi": "10.4103/0301-4738.77008"
+  },
+  "r": {
+   "title": "A comparative study between intravitreal triamcinolone and bevacizumab for  macular edema due to central retinal vein occlusion with poor vision.",
+   "first_author": "Lim",
+   "year": 2011,
+   "volume": "59",
+   "pages": "93-6",
+   "journal": "Indian J Ophthalmol",
+   "doi": "10.4103/0301-4738.77008"
+  }
+ },
+ {
+  "id": "addr_shared_doi_conference_abstract",
+  "entry": null,
+  "verdict": "FLAG",
+  "defends": "abstract sharing a DOI with an article",
+  "note": "",
+  "w": {
+   "title": "POS1366 Efficacy of tofacitinib in refractory rheumatoid arthritis",
+   "first_author": "Alten",
+   "year": 2021,
+   "volume": "80",
+   "pages": "972",
+   "journal": "Ann Rheum Dis",
+   "doi": "10.1136/annrheumdis-2021-eular.1234"
+  },
+  "r": {
+   "title": "Long-term safety of upadacitinib in psoriatic arthritis.",
+   "first_author": "Burmester",
+   "year": 2021,
+   "volume": "80",
+   "pages": "972",
+   "journal": "Ann Rheum Dis",
+   "doi": "10.1136/annrheumdis-2021-eular.1234"
+  }
+ },
+ {
+  "id": "author_typo_one_char",
+  "entry": "subset",
+  "verdict": "SAME_WORK",
+  "defends": "`Nagendra babu` vs `Nagendrababu` at fuzz 85",
+  "note": "",
+  "w": {
+   "title": "Factors associated with post obturation pain following single-visit nonsurgical root canal treatment: a systematic review",
+   "first_author": "Nagendra babu",
+   "year": 2017,
+   "volume": "48",
+   "pages": "193-208",
+   "journal": "Quintessence Int",
+   "doi": "10.3290/j.qi.a36894"
+  },
+  "r": {
+   "title": "Factors associated with postobturation pain following single-visit nonsurgical  root canal treatment: A systematic review.",
+   "first_author": "Nagendrababu",
+   "year": 2017,
+   "volume": "48",
+   "pages": "193-208",
+   "journal": "Quintessence Int",
+   "doi": "10.3290/j.qi.a36894"
+  }
+ },
+ {
+  "id": "author_corporate_dropped",
+  "entry": "subset",
+  "verdict": "SAME_WORK",
+  "defends": "corporate author must return None, not False",
+  "note": "",
+  "w": {
+   "title": "Scientific opinion on dietary reference values for vitamin D",
+   "first_author": "EFSA Panel on Dietetic Products Nutrition and Allergies",
+   "year": 2016,
+   "volume": "14",
+   "pages": "4547",
+   "journal": "EFSA J",
+   "doi": "10.2903/j.efsa.2016.4547"
+  },
+  "r": {
+   "title": "Dietary reference values for vitamin D.",
+   "first_author": "Turck",
+   "year": 2016,
+   "volume": "14",
+   "pages": "4547",
+   "journal": "EFSA Journal",
+   "doi": "10.2903/j.efsa.2016.4547"
+  }
+ },
+ {
+  "id": "author_near_miss_short_surname",
+  "entry": null,
+  "verdict": "FLAG",
+  "defends": "`Chen`/`Chan` must not match",
+  "note": "",
+  "w": {
+   "title": "Hepatic fibrosis staging by elastography",
+   "first_author": "Chen",
+   "year": 2019,
+   "volume": "70",
+   "pages": "100-110",
+   "journal": "J Hepatol",
+   "doi": ""
+  },
+  "r": {
+   "title": "Renal clearance of contrast agents in elderly patients.",
+   "first_author": "Chan",
+   "year": 2019,
+   "volume": "70",
+   "pages": "100-110",
+   "journal": "J Hepatol",
+   "doi": ""
+  }
+ },
+ {
+  "id": "volume_parser_error_not_fuzzed",
+  "entry": "subset",
+  "verdict": "SAME_WORK",
+  "defends": "114 vs 144 stays a disagreement; the row still reaches 4",
+  "note": "",
+  "w": {
+   "title": "Extended DNA binding interface beyond the canonical SAP domain",
+   "first_author": "Weinheimer",
+   "year": 2022,
+   "volume": "114",
+   "pages": "102268",
+   "journal": "J. Biol. Chem.",
+   "doi": "10.1016/j.jbc.2022.102268"
+  },
+  "r": {
+   "title": "Extended DNA binding interface beyond the canonical SAP domain contributes to function.",
+   "first_author": "Weinheimer",
+   "year": 2022,
+   "volume": "144",
+   "pages": "102268",
+   "journal": "J Biol Chem",
+   "doi": "10.1016/j.jbc.2022.102268"
+  }
+ },
+ {
+  "id": "first_page_letter_prefix",
+  "entry": "subset",
+  "verdict": "SAME_WORK",
+  "defends": "6040 vs e06040 agree",
+  "note": "fixture carries a >=7-char shared word (worldwide) so the subset guard is not what is under test here",
+  "w": {
+   "title": "Global burden of stroke in young adults worldwide",
+   "first_author": "Feigin",
+   "year": 2021,
+   "volume": "12",
+   "pages": "6040",
+   "journal": "Nat Commun",
+   "doi": ""
+  },
+  "r": {
+   "title": "Global burden of stroke in young adults worldwide: a systematic analysis.",
+   "first_author": "Feigin",
+   "year": 2021,
+   "volume": "12",
+   "pages": "e06040",
+   "journal": "Nature Communications",
+   "doi": ""
+  }
+ }
+]

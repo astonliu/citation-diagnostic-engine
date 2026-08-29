@@ -1,0 +1,198 @@
+{
+  "_note": [
+    "The fixed Band 2 input corpus. Two documents, twelve reference/citance",
+    "pairs, chosen so that every route the band can produce is exercised at",
+    "least once -- the point of a route-distribution test is the DENOMINATOR,",
+    "and a denominator that never sees an exclusion bucket does not pin it.",
+    "",
+    "Each pair names the route it was authored to reach. That name is",
+    "documentation of INTENT and is never asserted against: the test asserts",
+    "the distribution the real pipeline produces, recorded into a golden file.",
+    "If the code disagrees with an intent note, the golden file is right and",
+    "the note is stale."
+  ],
+  "abstracts": {
+    "111": "Drug X reduced outcome Y in a randomised controlled study of 400 adults; the primary trial reduced outcome Y by 38 percent over two years.",
+    "222": "This cohort study examined hospital readmission among older adults and found no association with outcome Y.",
+    "333": "A narrative overview of drug X pharmacology in which outcome Y is discussed only in passing.",
+    "444": "Early mobilisation shortened ventilator days in a single-centre trial of critically ill adults.",
+    "555": "Drug X reduced outcome Y in a randomised controlled study of 400 adults."
+  },
+  "documents": [
+    {
+      "source_pmcid": "PMC7000001",
+      "source_pmid": "9000001",
+      "source_title": "A citing paper about drug X",
+      "references": [
+        {
+          "citation_id": "PMC7000001:ref-01",
+          "marker": "1",
+          "pmid": "111",
+          "title": "Randomised trial of drug X",
+          "citance": "Drug X reduces outcome Y in adults [1].",
+          "intent": "FULL_COVERAGE -- every atomic claim established"
+        },
+        {
+          "citation_id": "PMC7000001:ref-02",
+          "marker": "2",
+          "pmid": "222",
+          "title": "Cohort study of readmission",
+          "citance": "Drug X reduces outcome Y and also prevents readmission [2].",
+          "intent": "F6_FLAGGED -- second claim unestablished by the cited work"
+        },
+        {
+          "citation_id": "PMC7000001:ref-03",
+          "marker": "3",
+          "pmid": "333",
+          "title": "Narrative overview of drug X",
+          "citance": "Drug X reduces outcome Y and is well tolerated [3].",
+          "intent": "HELD_LOW_CONFIDENCE -- one claim the judge cannot settle"
+        },
+        {
+          "citation_id": "PMC7000001:ref-04",
+          "marker": "4",
+          "pmid": "444",
+          "title": "Early mobilisation trial",
+          "citance": "See also the literature on early mobilisation [4].",
+          "intent": "NO_CLAIMS -- a pointer sentence with no atomic claim"
+        },
+        {
+          "citation_id": "PMC7000001:ref-05",
+          "marker": "5",
+          "pmid": "111",
+          "title": "Randomised trial of drug X",
+          "citance": "[5]",
+          "intent": "marker-only citing sentence; recorded as NO_CLAIMS with a HUMAN_REVIEW_REQUIRED outcome, not a parse quarantine"
+        },
+        {
+          "citation_id": "PMC7000001:ref-06",
+          "marker": "6",
+          "pmid": "111",
+          "title": "Randomised trial of drug X",
+          "citance": "",
+          "intent": "excluded_no_citance"
+        }
+      ]
+    },
+    {
+      "source_pmcid": "PMC7000002",
+      "source_pmid": "9000002",
+      "source_title": "A second citing paper",
+      "references": [
+        {
+          "citation_id": "PMC7000002:ref-01",
+          "marker": "1",
+          "pmid": "",
+          "title": "A reference with no resolvable PMID",
+          "citance": "Outcome Y is reduced by drug X [1].",
+          "intent": "excluded_no_cited_pmid"
+        },
+        {
+          "citation_id": "PMC7000002:ref-02",
+          "marker": "2",
+          "pmid": "111",
+          "title": "Randomised trial of drug X",
+          "citance": "Drug X reduces outcome Y in adults [2].",
+          "intent": "excluded_preband_disposition_missing -- absent from the map"
+        },
+        {
+          "citation_id": "PMC7000002:ref-03",
+          "marker": "3",
+          "pmid": "222",
+          "title": "A reference Band 1 called F1",
+          "citance": "Drug X reduces outcome Y in adults [3].",
+          "intent": "excluded_preband -- F1"
+        },
+        {
+          "citation_id": "PMC7000002:ref-04",
+          "marker": "4",
+          "pmid": "222",
+          "title": "A reference Band 1 called F2",
+          "citance": "Drug X reduces outcome Y in adults [4].",
+          "intent": "excluded_preband -- F2"
+        },
+        {
+          "citation_id": "PMC7000002:ref-05",
+          "marker": "5",
+          "pmid": "555",
+          "title": "Randomised trial of drug X, duplicate work",
+          "citance": "Drug X reduces outcome Y and shortens ventilator days [5,6].",
+          "intent": "shares a citance with ref-06; recorded solo, the group overlay is pinned directly against the engine in test_hierarchy"
+        },
+        {
+          "citation_id": "PMC7000002:ref-06",
+          "marker": "6",
+          "pmid": "444",
+          "title": "Early mobilisation trial",
+          "citance": "Drug X reduces outcome Y and shortens ventilator days [5,6].",
+          "intent": "shares a citance with ref-05; see the note on ref-05"
+        }
+      ]
+    }
+  ],
+  "disposition": {
+    "PMC7000001:ref-01": "cleared",
+    "PMC7000001:ref-02": "cleared",
+    "PMC7000001:ref-03": "cleared",
+    "PMC7000001:ref-04": "cleared",
+    "PMC7000001:ref-05": "cleared",
+    "PMC7000001:ref-06": "cleared",
+    "PMC7000002:ref-01": "cleared",
+    "PMC7000002:ref-03": "F1",
+    "PMC7000002:ref-04": "F2",
+    "PMC7000002:ref-05": "cleared",
+    "PMC7000002:ref-06": "cleared"
+  },
+  "extractor": {
+    "Drug X reduces outcome Y in adults [1].": [
+      "Drug X reduces outcome Y in adults"
+    ],
+    "Drug X reduces outcome Y and also prevents readmission [2].": [
+      "Drug X reduces outcome Y",
+      "Drug X prevents hospital readmission"
+    ],
+    "Drug X reduces outcome Y and is well tolerated [3].": [
+      "Drug X reduces outcome Y",
+      "Drug X is well tolerated"
+    ],
+    "See also the literature on early mobilisation [4].": [],
+    "Drug X reduces outcome Y in adults [2].": [
+      "Drug X reduces outcome Y in adults"
+    ],
+    "Drug X reduces outcome Y in adults [3].": [
+      "Drug X reduces outcome Y in adults"
+    ],
+    "Drug X reduces outcome Y in adults [4].": [
+      "Drug X reduces outcome Y in adults"
+    ],
+    "Outcome Y is reduced by drug X [1].": [
+      "Drug X reduces outcome Y"
+    ],
+    "Drug X reduces outcome Y and shortens ventilator days [5,6].": [
+      "Drug X reduces outcome Y",
+      "Early mobilisation shortens ventilator days"
+    ],
+    "[5]": []
+  },
+  "coverage": {
+    "_note": "cited_pmid :: claim -> established tri-state (true / false / null)",
+    "111 :: Drug X reduces outcome Y in adults": true,
+    "111 :: Drug X reduces outcome Y": true,
+    "222 :: Drug X reduces outcome Y": true,
+    "222 :: Drug X prevents hospital readmission": false,
+    "222 :: Drug X reduces outcome Y in adults": true,
+    "333 :: Drug X reduces outcome Y": true,
+    "333 :: Drug X is well tolerated": null,
+    "444 :: Drug X reduces outcome Y": false,
+    "444 :: Early mobilisation shortens ventilator days": true,
+    "555 :: Drug X reduces outcome Y": true,
+    "555 :: Early mobilisation shortens ventilator days": false
+  },
+  "evidence_spans": {
+    "111": "Drug X reduced outcome Y in a randomised controlled study of 400 adults",
+    "222": "This cohort study examined hospital readmission among older adults",
+    "333": "A narrative overview of drug X pharmacology",
+    "444": "Early mobilisation shortened ventilator days in a single-centre trial of critically ill adults",
+    "555": "Drug X reduced outcome Y in a randomised controlled study of 400 adults"
+  }
+}

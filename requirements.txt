@@ -1,0 +1,31 @@
+# Python 3.11+.
+#
+# Pinned to the versions this project has actually run against, not to ranges.
+# A citation-diagnosis result is only reproducible if the string matching that
+# produced it is -- rapidfuzz in particular decides whether two titles are the
+# same work, and its scorers have changed between minor versions.
+
+requests==2.34.2          # every HTTP leg: PubMed, Crossref, OpenAlex, DOI
+lxml==6.1.1               # PMC JATS XML parsing
+rapidfuzz==3.14.5         # title / author similarity, and so the same-work rule
+jsonschema==4.26.0        # the frozen finder schemas
+anthropic==0.111.0        # generator-side provider
+
+# Judge-side provider, deliberately a DIFFERENT family from the generator: a
+# model scoring its own family's output scores against its own preferences.
+# NOTE: this pin is NOT exercised by the test suite. Every OpenAI test runs
+# against a double, so what is verified is that this code does what the API is
+# documented to do -- not that the API does it. `python -m
+# cde.runtime.check_openai_judge` is the live check, and it needs a key.
+openai==2.9.0
+
+# Test only.
+pytest==9.1.1
+
+# OPTIONAL, and imported inside the functions that need them so the package
+# works without either. Install only if you want them:
+#
+#   the cross-encoder reranking stage (refs/biblio_rerank):
+#     pip install torch transformers
+#   streaming reads of the large F7 authority snapshots (diagnose/f7_seams):
+#     pip install ijson

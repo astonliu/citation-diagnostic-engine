@@ -1,0 +1,12 @@
+PMC7000001:ref-01	UNJUDGEABLE	held_held_full_coverage_pending_F3_F5_F7	FULL_COVERAGE	held_full_coverage_pending_F3_F5_F7		
+PMC7000001:ref-02	F6	taxonomy_finding	F6_FLAGGED	predicted	F6	F6
+PMC7000001:ref-03	UNJUDGEABLE	held_held_insufficient_evidence	HELD_LOW_CONFIDENCE	held_insufficient_evidence		
+PMC7000001:ref-04	NONE	prose_sentence_asserts_nothing_empirical	NO_CLAIMS	held_no_atomic_claims		
+PMC7000001:ref-05	HUMAN_REVIEW_REQUIRED	malformed_claim_input	NO_CLAIMS	held_no_atomic_claims		
+PMC7000001:ref-06	HUMAN_REVIEW_REQUIRED	empty_claim_input		excluded_no_citance		
+PMC7000002:ref-01	UNJUDGEABLE	preband_excluded_no_cited_pmid		excluded_no_cited_pmid		
+PMC7000002:ref-02	UNJUDGEABLE	preband_excluded_preband_disposition_missing		excluded_preband_disposition_missing		
+PMC7000002:ref-03	UNJUDGEABLE	preband_excluded_preband		excluded_preband		
+PMC7000002:ref-04	UNJUDGEABLE	preband_excluded_preband		excluded_preband		
+PMC7000002:ref-05	F6	taxonomy_finding	F6_FLAGGED	predicted	F6	F6
+PMC7000002:ref-06	F6	taxonomy_finding	F6_FLAGGED	predicted	F6	F6
