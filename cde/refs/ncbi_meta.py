@@ -1,11 +1,11 @@
 """Shared NCBI metadata helpers -- publication type, review classification, and
 PMC full-text / reference-list resolution.
 
-These four helpers were extracted from ``f3_candidate_collect.py`` (which is
-documented CALIBRATION-ONLY) so the production F3-F7 judgment band can depend on
-them WITHOUT importing a calibration-only module -- a cold session must never
-mistake the band for calibration tooling. ``f3_candidate_collect`` now re-imports
-(re-exports) these names, so its public API and tests are unchanged.
+These four helpers were extracted from the F3 candidate-collection tool, which
+was documented CALIBRATION-ONLY, so the production F3-F7 judgment band could
+depend on them WITHOUT importing a calibration-only module -- a cold session
+must never mistake the band for calibration tooling. That tool has since been
+removed; the helpers stay here, which is where the band needs them.
 
 All network calls go through the shared NCBI limiter (``ratelimit.NCBI``), so a
 scaled run that mixes the collector and the band still respects one per-IP
@@ -323,7 +323,7 @@ def ncbi_pmid_to_pmcid(pmid: str, api_key: str = "", email: str = "",
 
     Routes through :func:`ncbi_pmids_to_pmcids` but keeps its own
     swallow-everything contract, because its existing caller
-    (``f3_candidate_collect``) documents "returns a safe can't-judge value on any
+    (the removed F3 calibration tool) documented "returns a safe can't-judge value on any
     failure" and has no exception handling of its own -- a raise here would abort
     a collector run. Only ``fulltext_reader``'s resolver seam propagates, because
     only ``fetch_fulltext`` has a reason vocabulary to record the difference in.

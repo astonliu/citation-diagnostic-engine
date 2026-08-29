@@ -82,8 +82,8 @@ citation, with the claims, the evidence spans and the hash chain.
   the F7 > F6 > F4 > F3 > F5 hierarchy deterministically.
 - `cde/freeze/` — artifact integrity. Canonical serialisation, the frozen prompt
   seals, the trust-boundary bootstrap.
-- `cde/runtime/` — transports, rate limits, cost ledgers, the governed
-  production launcher, and single-packet sandboxes.
+- `cde/runtime/` — transports, rate limits, cost ledgers, and the governed
+  production launcher.
 
 ## Data
 

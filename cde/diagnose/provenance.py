@@ -40,10 +40,11 @@ OFFLINE / INJECTED
     behind these seams; PMID->PMCID resolution is a caller concern, so an
     unresolved cited PMCID simply routes the restatement path to ``UNJUDGEABLE``.
 
-The mechanical candidate-assembly reuses ``f3_candidate_collect``'s reflist ->
-``provenance_candidates`` semantics (refs that carry a title become candidates);
-it does NOT reuse that module's calibration-only attribution lexicon, which
-would bias detection and contaminate the category.
+The mechanical candidate-assembly keeps the reflist -> ``provenance_candidates``
+semantics of the removed F3 calibration tool (refs that carry a title become
+candidates); it deliberately does NOT reuse that tool's attribution lexicon,
+which was calibration-only and would bias detection and contaminate the
+category.
 
 Strict-JSON model parsing mirrors the frozen ``band_prompts._loads_strict``
 pattern (duplicate-key rejection, exact key set, no fences/prose, no coercion).
@@ -305,7 +306,8 @@ def _fill_prompt(template: str, replacements: dict[str, str]) -> str:
 def _assemble_candidates(reflist_result: object) -> list[dict]:
     """Normalize a fetch_reflist return into V3 candidates.
 
-    Reuses f3_candidate_collect's reflist->provenance_candidates semantics: a
+    Keeps the removed F3 calibration tool's reflist->provenance_candidates
+    semantics: a
     reference becomes a candidate when it carries a title. We additionally
     require a nonblank claimed_pmid, because V3->V4 must fetch the candidate's
     abstract and the confirmed origin chain must carry a real primary id.

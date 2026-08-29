@@ -11,10 +11,9 @@ the same reason. ``band_prompts.make_anthropic_call`` is unchanged and remains
 correct; it simply cannot grow.
 
 THIS IS STILL ONE CHOKEPOINT. Every taxonomy reaches the provider through one
-adapter -- claim extraction and coverage (``sandbox_judge``), the F7 generator and
-verifier, and the F5 generator, verifier and candidate screen
-(``sandbox_wiring``). All of those call sites now import from here, so a change
-made once still reaches all of them. That property is the whole reason the
+adapter -- claim extraction and coverage, the F7 generator and verifier, and the
+F5 generator, verifier and candidate screen. All of those call sites import from
+here, so a change made once still reaches all of them. That property is the whole reason the
 caching work was cheap; losing it to per-taxonomy adapters would not have been.
 
 WHAT IT ADDS OVER THE FROZEN ONE, and nothing else:

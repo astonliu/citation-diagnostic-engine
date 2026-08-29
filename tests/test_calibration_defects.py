@@ -264,11 +264,11 @@ def test_the_converter_returns_the_articles_own_pmcid():
 
 
 def test_the_single_pmid_helper_keeps_its_swallowing_contract():
-    """``ncbi_pmid_to_pmcid`` stays in place for its existing caller
-    (``f3_candidate_collect``), which documents "returns "" on any failure" and
-    has no exception handling of its own. It routes through the converter but
-    still swallows -- only ``fetch_fulltext``'s seam propagates, because only
-    ``fetch_fulltext`` has a reason vocabulary to record the difference in."""
+    """``ncbi_pmid_to_pmcid`` keeps the swallowing contract it was written with:
+    it returns "" on any failure and has no exception handling of its own. It
+    routes through the converter but still swallows -- only ``fetch_fulltext``'s
+    seam propagates, because only ``fetch_fulltext`` has a reason vocabulary to
+    record the difference in."""
     session = _CountingSession(_Resp(status_code=500))
     assert nm.ncbi_pmid_to_pmcid("30140736", session=session) == ""
 

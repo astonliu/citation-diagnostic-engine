@@ -1,4 +1,4 @@
-"""Transports, rate limits, launchers, wiring and sandboxes.
+"""Transports, rate limits, launchers and wiring.
 
 Nothing here decides a taxonomy question. This is the machinery that gets a
 prompt to a provider, keeps a run inside its rate and cost budget, verifies that

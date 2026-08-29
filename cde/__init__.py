@@ -7,7 +7,7 @@ motivated it:
   ``cde.claims``    Band 2 front end: claims, evidence, spans, coverage.
   ``cde.diagnose``  the typed decision engine and the five discriminators.
   ``cde.freeze``    artifact integrity and provenance.
-  ``cde.runtime``   transports, rate limits, launchers, wiring, sandboxes.
+  ``cde.runtime``   transports, rate limits, launchers and wiring.
 
 WHAT THIS FILE EXPORTS, AND WHY SO LITTLE. Only the handful of names a caller
 actually reaches for: the two band entry points, the decision core, and the
