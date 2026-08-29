@@ -571,10 +571,10 @@ def test_the_default_path_verdict_record_keeps_the_frozen_five_key_shape(
 def test_the_specificity_boundary_is_stated_as_ZD_ruled_it():
     """Acceptance row 20. ZD's standing default (a): KEEP the boundary as written.
     The initial "wider words count" ruling collided with
-    TAXONOMY_DECISION_RULES.md's "ACCURATE vs. F6 -- the specificity boundary" and
+    doc/taxonomy.md's "ACCURATE vs. F6" specificity boundary and
     with TAXONOMY_AMENDMENT_2026-08-07_FINAL.md SecA, which explicitly preserved
     "'ApoE-deficient mice' vs 'mice' is still F6". Prompt text only; TAXONOMY.md
-    and TAXONOMY_DECISION_RULES.md are NOT edited."""
+    and doc/taxonomy.md are NOT edited."""
     assert ("A BROADER TERM IN THE SOURCE DOES NOT ESTABLISH A NARROWER TERM IN "
             "THE CLAIM.") in PROMPT
     # Run 2's CR4 rows, as the worked negatives.

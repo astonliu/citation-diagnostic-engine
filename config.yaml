@@ -1,5 +1,5 @@
 # Citation Repair Engine — configuration
-# Model strings are pinned snapshots. Do not change a pin without updating PREREGISTRATION.md
+# Model strings are pinned snapshots. Do not change a pin without updating doc/preregistration.md
 # and the Amendment log (Opus + GPT-5 co-equal verifiers; Med-V1 added per Amendment 2).
 #
 # NOTE: fill the *_pin fields with the exact version strings + snapshot dates you actually
@@ -15,7 +15,7 @@ verifiers:
   - name: med-v1           # 3B biomedical specialist (arXiv 2603.05308)
     pin: ""
 
-# Stage 4 diagnosis mapper is rule-based (not an LLM) — see TAXONOMY_DECISION_RULES.md.
+# Stage 4 diagnosis mapper is rule-based (not an LLM) — see doc/taxonomy.md.
 # If repair-candidate *drafting* uses an LLM, name and pin it here; otherwise leave unset.
 repair_drafting_model: ""
 

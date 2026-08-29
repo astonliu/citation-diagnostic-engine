@@ -11,7 +11,7 @@ it sets ``WEAKER_STRENGTH`` when the citing claim is STRONGER than the cited
 paper's own language on a comparable dimension the paper addresses, and
 ``UNJUDGEABLE`` when strength cannot be assessed or coverage and F4 conflict.
 
-DEFINITIONAL BASIS (spec Sec 9.2 + TAXONOMY_DECISION_RULES Pair 2)
+DEFINITIONAL BASIS (spec Sec 9.2 + doc/taxonomy.md, F4 vs F6)
     F4 = the cited paper addresses the SAME relation but at WEAKER strength /
     modality, and the WEAKER language is IN THE CITED PAPER ITSELF (broader-
     literature uncertainty is ACCURATE, not F4). F4 fires only when the citing

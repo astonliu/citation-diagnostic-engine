@@ -229,3 +229,9 @@ cde/freeze/_mint_out/
 
 # ZD's local staging area for files pending removal; never committed.
 _to_delete/
+
+# Downloaded corpora and run outputs. Fetched by script/download-data.sh and
+# written by the pipeline: large, reproducible, and authoritative upstream.
+data/raw/
+results/
+checkpoints/

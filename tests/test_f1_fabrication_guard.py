@@ -1,7 +1,7 @@
 """F1 fabrication guard -- transport failure must never become an accusation.
 
 One test per row of the acceptance matrix in
-``docs/F1_FABRICATION_GUARD_SPEC.md`` (ZD, 2026-08-16), plus the true-positive
+the F1 fabrication-guard acceptance matrix (ZD, 2026-08-16), plus the true-positive
 guards that prove the fix did not simply disable F1.
 
 THE DEFECT THESE COVER. A partial NCBI outage labelled a real, PubMed-indexed
@@ -436,7 +436,7 @@ def test_entrez_benign_nested_errorlist_is_not_a_fault():
 
 def test_matrix_bracketed_translated_title_is_deliberately_not_quoted():
     """Row 8 -- LIVE-NCBI FINDING, 2026-08-16. Reported to ZD; see
-    docs/F1_ESEARCH_TERM_FINDING_2026-08-16.md.
+    the esearch term finding (ZD, 2026-08-16).
 
     The audit's suspicion was that a leading '[' makes the ESearch term
     malformed. Live NCBI says it does NOT: Entrez tolerates the bracket, warns

@@ -1,0 +1,4 @@
+# The committed comparison set stays; everything the download script fetches
+# and everything a run writes does not.
+raw/
+*.xml
