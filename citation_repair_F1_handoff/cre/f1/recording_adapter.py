@@ -180,7 +180,13 @@ class TokenLedger:
 
     __slots__ = ("stage", "model", "calls", "input_tokens", "output_tokens",
                  "cache_creation_input_tokens", "cache_read_input_tokens",
-                 "usage_missing_calls", "_lock")
+                 "reasoning_tokens", "usage_missing_calls", "_surcharged",
+                 "_lock")
+
+    #: The four token counters that make up one call's billable usage, in the
+    #: order ``snapshot`` and ``merge_token_ledgers`` report them.
+    _COUNTERS = ("input_tokens", "output_tokens",
+                 "cache_creation_input_tokens", "cache_read_input_tokens")
 
     def __init__(self, *, stage: str = "", model: str = ""):
         self.stage = str(stage or "")
@@ -190,10 +196,25 @@ class TokenLedger:
         self.output_tokens = 0
         self.cache_creation_input_tokens = 0
         self.cache_read_input_tokens = 0
+        # Recorded, never added to output_tokens: reasoning tokens bill AS
+        # output tokens and are already inside that figure. Adding them would
+        # inflate every judge cost. They are kept because they are the dominant
+        # term in that cost and the only way to see an effort setting run away.
+        # Always present, 0 on the Anthropic path, so one row shape serves both
+        # providers and a reader need not know which one produced it.
+        self.reasoning_tokens = 0
         # A response whose usage block was absent or unreadable. Counted, not
         # skipped: a ledger that silently dropped it would understate spend and
         # read as a complete measurement.
         self.usage_missing_calls = 0
+        # Tokens from calls that crossed the OpenAI long-prompt threshold, held
+        # SEPARATELY rather than folded into the totals above. The surcharge is
+        # a property of one REQUEST, and this ledger is a running sum over many:
+        # pricing the sum would surcharge a thousand short calls that happen to
+        # total 272K, and would miss a single long call inside a small total.
+        # Two buckets, each priced under its own rates, is the only way a
+        # per-request rule survives accumulation.
+        self._surcharged = dict.fromkeys(self._COUNTERS, 0)
         self._lock = threading.Lock()
 
     def record_usage(self, usage) -> None:
@@ -220,6 +241,50 @@ class TokenLedger:
             self.cache_read_input_tokens += prompt_side[2] or 0
             self.output_tokens += completion or 0
 
+    def record_openai_usage(self, usage) -> None:
+        """Add one Responses ``usage`` block, normalised by ``openai_transport``.
+
+        WHY THIS IS A SECOND METHOD AND NOT A BRANCH IN ``record_usage``. The two
+        providers do not merely spell their counters differently, they report
+        them under OPPOSITE conventions: Anthropic's three input figures are
+        disjoint and sum to the prompt, OpenAI's ``input_tokens`` IS the prompt
+        with the cache figures carved out of it. ``record_usage`` is tolerant by
+        design -- it absorbs an odd shape rather than killing a run over a
+        renamed field. That tolerance is exactly wrong here: absorbing a
+        mis-shaped OpenAI block would skip the containment check the whole
+        subtraction rests on, and quietly bill every cached token twice.
+
+        SO THE TWO TOLERANCES DIFFER, DELIBERATELY. An ABSENT usage block is
+        counted as missing, same as on the Anthropic path -- the run continues
+        and ``cost_usd`` becomes ``"not_collected"``, because a total missing one
+        term is unknown, not smaller. A usage block that is PRESENT but fails its
+        own arithmetic RAISES: it is evidence that the convention this module
+        prices under has changed, and continuing would produce a number that
+        looks right.
+
+        The import is local because ``openai_transport`` imports this module for
+        :class:`TokenLedger`; at module scope the two would deadlock on import.
+        """
+        if usage is None:
+            with self._lock:
+                self.calls += 1
+                self.usage_missing_calls += 1
+            return
+        from . import openai_transport
+        counts = openai_transport.usage_dict(usage)
+        prompt_tokens = (counts["input_tokens"]
+                         + counts["cache_creation_input_tokens"]
+                         + counts["cache_read_input_tokens"])
+        surcharged = model_pricing.long_prompt_surcharge_applies(
+            model=self.model, prompt_tokens=prompt_tokens)
+        with self._lock:
+            self.calls += 1
+            self.reasoning_tokens += counts["reasoning_tokens"]
+            for name in self._COUNTERS:
+                setattr(self, name, getattr(self, name) + counts[name])
+                if surcharged:
+                    self._surcharged[name] += counts[name]
+
     def snapshot(self) -> dict:
         """The ledger as a dict, with ``cost_usd`` priced from the table.
 
@@ -236,19 +301,32 @@ class TokenLedger:
                 "output_tokens": self.output_tokens,
                 "cache_creation_input_tokens": self.cache_creation_input_tokens,
                 "cache_read_input_tokens": self.cache_read_input_tokens,
+                "reasoning_tokens": self.reasoning_tokens,
                 "usage_missing_calls": self.usage_missing_calls,
             }
+            surcharged = dict(self._surcharged)
         row["prompt_tokens_total"] = (
             row["input_tokens"] + row["cache_creation_input_tokens"]
             + row["cache_read_input_tokens"])
+        # Reported beside the dollars it produced. A cost figure that silently
+        # doubled reads like a run that used twice the tokens, and the token
+        # counts sitting next to it would say otherwise -- so the flag is what
+        # makes the two legible together.
+        row["long_prompt_surcharge_applied"] = any(surcharged.values())
         priced = None
         if not row["usage_missing_calls"]:
-            priced = model_pricing.cost_usd(
-                model=row["model"],
-                input_tokens=row["input_tokens"],
-                output_tokens=row["output_tokens"],
-                cache_creation_input_tokens=row["cache_creation_input_tokens"],
-                cache_read_input_tokens=row["cache_read_input_tokens"])
+            # Each bucket at its own rates. `long_prompt` is passed EXPLICITLY
+            # in both calls rather than derived: the derivation is per-request
+            # and these are sums, so letting cost_usd infer it here is the one
+            # way this arithmetic could go wrong.
+            plain = model_pricing.cost_usd(
+                model=row["model"], long_prompt=False,
+                **{name: row[name] - surcharged[name]
+                   for name in self._COUNTERS})
+            if plain is not None:
+                over = model_pricing.cost_usd(
+                    model=row["model"], long_prompt=True, **surcharged)
+                priced = plain + (over or 0.0)
         row["cost_usd"] = NOT_COLLECTED if priced is None else round(priced, 6)
         row["prices_read_on"] = model_pricing.PRICES_READ_ON
         return row
@@ -261,6 +339,10 @@ def merge_token_ledgers(ledgers) -> dict:
     knows how to read the call ledger can read the token ledger. ``cost_usd``
     on the total is ``"not_collected"`` if ANY contributing stage could not be
     priced -- a sum missing one term is not a smaller sum, it is an unknown one.
+
+    THE TOTAL NAMES ITS MODELS. Since the judge moved to another provider a run
+    spans two rate cards, and ``total.models`` lists every one that contributed.
+    A single-model total is a claim about the run, and it is a false one here.
     """
     rows = [ledger.snapshot() for ledger in ledgers if ledger is not None]
     by_stage: dict = {}
@@ -273,8 +355,15 @@ def merge_token_ledgers(ledgers) -> dict:
         by_stage[key] = row
     counters = ("calls", "input_tokens", "output_tokens",
                 "cache_creation_input_tokens", "cache_read_input_tokens",
-                "usage_missing_calls", "prompt_tokens_total")
+                "reasoning_tokens", "usage_missing_calls",
+                "prompt_tokens_total")
     total = {name: sum(row[name] for row in rows) for name in counters}
+    # NAMED, not assumed to be one. A two-provider run has two models in it and
+    # a total that silently reported only the first would invite the reader to
+    # price the whole run off one rate card.
+    total["models"] = sorted({row["model"] for row in rows if row["model"]})
+    total["long_prompt_surcharge_applied"] = any(
+        row["long_prompt_surcharge_applied"] for row in rows)
     costs = [row["cost_usd"] for row in rows]
     total["cost_usd"] = (
         NOT_COLLECTED if any(value == NOT_COLLECTED for value in costs)

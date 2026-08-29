@@ -15,7 +15,10 @@ is authored by hand, so the population it belongs to is "one", and no rate can b
 computed from it. Use it to interrogate the engine's behavior, never to produce a
 figure.
 
-ADAPTER IDENTITY IS PRODUCTION'S. ``anthropic_transport.make_anthropic_call``
+ADAPTER IDENTITY IS PRODUCTION'S. The transport is built through
+``completer.make_completer``, the same seam production wires, so ``--model``
+selects the PROVIDER as well as the checkpoint and the sandbox cannot drift onto
+an adapter production does not use. On the Anthropic path that adapter
 sends no temperature parameter, because the pinned Opus model rejects one --
 ``production_launcher`` records that first-party measurement as the string
 ``"unsupported"`` (DEC-070), never as ``0``. This module inherits that exactly.
@@ -80,9 +83,9 @@ import json
 import os
 import sys
 
+from . import completer
 from . import judgment_run as jr
 from . import terminal_outcome as tox
-from .anthropic_transport import make_anthropic_call
 from .band_prompts import (
     CLAIM_EXTRACT_PROMPT_VERSION,
     COVERAGE_PROMPT_VERSION,
@@ -396,9 +399,16 @@ def judge(packet: dict, *, model: str, api_key: str = "",
     # the model is fixed at construction and the resolved temperature is the
     # string production records, so a call carrying a temperature key at all
     # would show up as unauthorized rather than being absorbed.
-    from anthropic import Anthropic
-    client = Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
-    call_llm = make_anthropic_call(client, model, stage="band")
+    # THROUGH THE PROVIDER SEAM, NOT A HARD-WIRED ANTHROPIC CLIENT. `--model`
+    # can now name either vendor, and `completer.make_completer` is the one
+    # place that decision is made -- the same one production wires. Building an
+    # `Anthropic` here directly would make the sandbox answer a question about
+    # a DIFFERENT adapter than the one production runs, which is the one thing
+    # this module must not do; it would also have sent a Claude request shape to
+    # an OpenAI model id and 404'd one packet deep. An unregistered id raises
+    # here, BEFORE any authority load or model call, rather than at the first
+    # request.
+    call_llm = completer.make_completer(model, api_key, stage="band")
     token_ledgers.append(call_llm.token_ledger)
 
     seams = {
@@ -478,13 +488,16 @@ def main(argv=None) -> int:
         description="Run one hand-authored packet through the real F3-F7 band.")
     parser.add_argument("packet", help="path to a cre_sandbox_packet_v1 JSON file")
     parser.add_argument("--model", default="claude-opus-5",
-                        help="model id; recorded, and sent with NO temperature")
+                        help="model id from completer._PROVIDER_BY_MODEL; the "
+                             "provider is derived from it, and it is recorded "
+                             "and sent with NO temperature")
     parser.add_argument("--taxonomies", default=None,
                         help="comma list overriding the packet, e.g. F4,F3")
     parser.add_argument("--dry-run", action="store_true",
                         help="resolve wiring and print the plan; zero model calls")
     parser.add_argument("--api-key", default="",
-                        help="defaults to $ANTHROPIC_API_KEY")
+                        help="defaults to the routed provider's env var "
+                             "($ANTHROPIC_API_KEY or $OPENAI_API_KEY)")
     parser.add_argument("--authorities", default="",
                         help="folder holding manifest.json + the four snapshots "
                              "and sqlite_indexes/ (required for F7)")

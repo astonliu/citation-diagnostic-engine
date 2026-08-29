@@ -109,6 +109,30 @@ def _git(repo_dir: str, *args: str) -> str:
     return out.stdout.strip()
 
 
+#: What ``_registered_provider`` answers for a model this project does not route.
+#: A distinct string rather than "" so a manifest reader can tell "no provider
+#: table entry" from "no model supplied".
+PROVIDER_UNREGISTERED = "unregistered"
+
+
+def _registered_provider(model_id: str) -> str:
+    """The vendor ``completer`` would dispatch ``model_id`` to, or ``"unregistered"``.
+
+    Never raises. ``completer.provider_for`` refuses an unknown id, which is
+    right at the point of building a transport and wrong here: this is a
+    RECORDING step, and a governance block that crashed on a model string it did
+    not recognise would block launches that never intended to route through this
+    package at all.
+    """
+    if not (model_id or "").strip():
+        return ""
+    from . import completer
+    try:
+        return completer.provider_for(model_id)
+    except ValueError:
+        return PROVIDER_UNREGISTERED
+
+
 def _model_family(model_id: str) -> str:
     """Coarse provider/family key. Deliberately blunt: it only has to answer
     'same family?', and over-merging is the SAFE direction -- it can refuse a
@@ -217,9 +241,33 @@ TEMPERATURE_ACCEPTING_MODELS = frozenset({
     "claude-sonnet-4-5",
 })
 
+#: THE THIRD ANSWER, and the reason it cannot be left to the other two. A model
+#: that is BELIEVED to reject the parameter on evidence DEC-070 does not accept
+#: -- vendor documentation, a third-party report -- fits neither table. Leaving
+#: it merely unlisted is not neutral: an unlisted model resolves to "supported",
+#: which pins ``temperature=0`` and SENDS it, for a request shape that
+#: structurally cannot carry it. Putting it in the rejecting table on that same
+#: evidence is what DEC-070 exists to forbid.
+#:
+#: So the model is REFUSED at launch until somebody measures it. That is the
+#: honest third state: not "send 0", not "recorded as unsupported", but "this
+#: project has not established which, and will not start a paid run on a guess".
+#: ``check_openai_judge`` check C is what settles it; its output is the
+#: first-party measurement that moves the id into
+#: :data:`TEMPERATURE_REJECTING_MODELS` and out of here.
+#:
+#: * ``gpt-5.6-sol`` -- OpenAI documents ``temperature`` as unsupported for the
+#:   reasoning-model family and a third-party report shows HTTP 400
+#:   ``unsupported_value``. NOT measured here. Exactly the evidence strength that
+#:   keeps ``claude-opus-4-7`` out of the rejecting table.
+TEMPERATURE_UNMEASURED_MODELS = frozenset({
+    "gpt-5.6-sol",
+})
+
 EVIDENCE_MEASURED_REJECTS = "measured_first_party_rejects"
 EVIDENCE_MEASURED_ACCEPTS = "measured_first_party_accepts"
 EVIDENCE_ASSUMED_ACCEPTS = "unmeasured_assumed_accepts"
+EVIDENCE_UNMEASURED_REPORTED_REJECTS = "unmeasured_reported_rejects"
 
 
 def temperature_support(model: str) -> str:
@@ -234,6 +282,17 @@ def temperature_support(model: str) -> str:
             else "supported")
 
 
+def temperature_unmeasured(model: str) -> bool:
+    """Whether this model's temperature behaviour is reported but not measured.
+
+    Separate from :func:`temperature_support` on purpose. That function answers
+    what to DO with a model this project is willing to run; this one answers
+    whether it is willing to run it at all. Folding the two would make the
+    refusal look like a support answer.
+    """
+    return (model or "").strip() in TEMPERATURE_UNMEASURED_MODELS
+
+
 def temperature_evidence(model: str) -> str:
     """How well the support answer is EVIDENCED -- three tiers, not two.
 
@@ -246,6 +305,8 @@ def temperature_evidence(model: str) -> str:
         return EVIDENCE_MEASURED_REJECTS
     if m in TEMPERATURE_ACCEPTING_MODELS:
         return EVIDENCE_MEASURED_ACCEPTS
+    if m in TEMPERATURE_UNMEASURED_MODELS:
+        return EVIDENCE_UNMEASURED_REPORTED_REJECTS
     return EVIDENCE_ASSUMED_ACCEPTS
 
 
@@ -265,6 +326,22 @@ def verify_temperature_governance(*, model: str, temperature) -> dict:
     The relaxation is bounded by the model table, so a model that does support
     the parameter is still pinned to 0 and cannot opt into the unsupported path.
     """
+    if temperature_unmeasured(model):
+        # BEFORE the two paths, because neither of them has a true answer for
+        # this model. Refusing here costs a launch; either alternative spends a
+        # batch and reports a governance field that is not true of the calls it
+        # describes.
+        raise LaunchRefused(
+            f"model {model!r} is UNMEASURED for temperature support "
+            f"(DEC-070): it is REPORTED to reject the parameter, but this "
+            f"project has not measured it first-party, which is the only "
+            f"evidence that admits a model to TEMPERATURE_REJECTING_MODELS. "
+            f"Neither answer is available -- recording {TEMPERATURE_UNSUPPORTED!r} "
+            f"would assert a measurement that was never taken, and pinning 0 "
+            f"would send a parameter the request shape cannot carry. Run "
+            f"`python -m cre.f1.check_openai_judge` (check C) and move the id "
+            f"into TEMPERATURE_REJECTING_MODELS with the request id it "
+            f"reports.")
     support = temperature_support(model)
     if support == TEMPERATURE_UNSUPPORTED:
         if temperature is None or temperature == TEMPERATURE_UNSUPPORTED:
@@ -320,6 +397,27 @@ PREFILL_REJECTING_MODELS = frozenset({
     "claude-opus-5",
 })
 
+#: Same third state, same reasoning, for prefill. ``gpt-5.6-sol``'s Responses
+#: API has no assistant-prefill concept at all, so a prefill string recorded
+#: against a run on it is a false provenance record either way -- but "there is
+#: no such parameter" is still not the same claim as "we measured the provider
+#: rejecting it", and this project does not write down the second on the
+#: strength of the first.
+#:
+#: THE ASYMMETRY WITH TEMPERATURE, which is why this gate is narrower.
+#: ``assistant_prefill=None`` records NOTHING -- no key, no sentinel, no claim --
+#: and a claim that is never made cannot be false. So None is permitted on an
+#: unmeasured model and only a supplied value is refused. Temperature has no
+#: equivalent: every path through it writes a value.
+PREFILL_UNMEASURED_MODELS = frozenset({
+    "gpt-5.6-sol",
+})
+
+
+def prefill_unmeasured(model: str) -> bool:
+    """Whether this model's prefill behaviour is reported but not measured."""
+    return (model or "").strip() in PREFILL_UNMEASURED_MODELS
+
 
 def prefill_support(model: str) -> str:
     """``"unsupported"`` if the provider rejects assistant prefill, else supported."""
@@ -342,6 +440,16 @@ def verify_prefill_governance(*, model: str, assistant_prefill) -> dict:
     recorded).
     """
     support = prefill_support(model)
+    if assistant_prefill is not None and prefill_unmeasured(model):
+        raise LaunchRefused(
+            f"model {model!r} is UNMEASURED for assistant prefill (DEC-071): "
+            f"this project has not observed the provider reject it, which is "
+            f"the only evidence that admits a model to "
+            f"PREFILL_REJECTING_MODELS. Recording {PREFILL_UNSUPPORTED!r} would "
+            f"assert a measurement never taken, and recording the string would "
+            f"claim a prefill was sent on calls that could not carry one. Omit "
+            f"assistant_prefill entirely (None records nothing and is the one "
+            f"answer that cannot be false), or measure it first.")
     if assistant_prefill is None:
         recorded = None                      # never recorded; key stays absent
     elif support == PREFILL_UNSUPPORTED:
@@ -464,8 +572,20 @@ def verify_judge_governance(*, model: str, judge_model: str,
     a formality -- it is exactly what DEC-069 itself recorded about
     ``claude-opus-5`` judging coverage of claims ``claude-opus-5`` extracted.
     """
+    # TWO family answers, and the STRICTER one wins. `_model_family` is a blunt
+    # substring rule over the id; `completer.provider_for` is the same table the
+    # transport dispatches on, so it cannot disagree with what actually ran. The
+    # table is authoritative where it has an opinion and silent where it does
+    # not -- an id it has never heard of falls back to the blunt rule rather
+    # than refusing a launch, because refusing here would break every caller
+    # that names a model this project does not itself route.
     same_family = bool(judge_model) and (
         _model_family(judge_model) == _model_family(model))
+    judge_provider = _registered_provider(judge_model)
+    generator_provider = _registered_provider(model)
+    if judge_model and PROVIDER_UNREGISTERED not in (judge_provider,
+                                                     generator_provider):
+        same_family = judge_provider == generator_provider
     amended = bool((preregistration_amendment or "").strip())
     ruling = (verify_scope_ruling(preregistration_scope_ruling)
               if preregistration_scope_ruling is not None else None)
@@ -508,6 +628,14 @@ def verify_judge_governance(*, model: str, judge_model: str,
     return {
         "paths_satisfied": paths,
         "judge_model": judge_model,
+        # WHICH VENDOR the two stages ran against, derived from the same table
+        # `completer.make_completer` dispatches on, so the manifest's provider
+        # and the transport's provider cannot disagree. Since the judge moved
+        # off Anthropic, "different family" is a cross-VENDOR claim, and a
+        # manifest that only recorded model strings left a reader to infer it
+        # from the ids.
+        "judge_provider": judge_provider,
+        "generator_provider": generator_provider,
         "generator_family": _model_family(model),
         "judge_family": _model_family(judge_model) if judge_model else "",
         "different_family_judge": bool(judge_model) and not same_family,
